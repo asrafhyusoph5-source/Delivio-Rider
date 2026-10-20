@@ -1,0 +1,255 @@
+package com.example.ui.components
+
+import android.content.Context
+import android.media.RingtoneManager
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import com.example.data.constants.OrderStepConstants
+import com.example.data.models.Order
+import com.example.ui.theme.*
+import kotlinx.coroutines.delay
+
+@Composable
+fun IncomingOrderDialog(
+    order: Order,
+    currencySymbol: String,
+    soundEnabled: Boolean,
+    vibrationEnabled: Boolean,
+    onAccept: () -> Unit,
+    onDecline: () -> Unit
+) {
+    val context = LocalContext.current
+    var secondsLeft by remember(order.id) { mutableIntStateOf(30) }
+
+    // Sound & Vibration on launch
+    LaunchedEffect(order.id) {
+        if (soundEnabled) {
+            try {
+                val notification = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                val r = RingtoneManager.getRingtone(context, notification)
+                r.play()
+            } catch (_: Exception) {}
+        }
+        if (vibrationEnabled) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                    vm?.defaultVibrator?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 200, 100, 200), -1))
+                } else {
+                    @Suppress("DEPRECATION")
+                    val v = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                    @Suppress("DEPRECATION")
+                    v?.vibrate(longArrayOf(0, 200, 100, 200), -1)
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
+    // 30-second countdown
+    LaunchedEffect(order.id) {
+        while (secondsLeft > 0) {
+            delay(1000L)
+            secondsLeft -= 1
+        }
+        onDecline()
+    }
+
+    val badge = OrderStepConstants.getServiceBadge(order.serviceType)
+
+    Dialog(
+        onDismissRequest = { /* Modal dialog */ },
+        properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false, usePlatformDefaultWidth = false)
+    ) {
+        Card(
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            elevation = CardDefaults.cardElevation(defaultElevation = 12.dp),
+            modifier = Modifier
+                .fillMaxWidth(0.92f)
+                .wrapContentHeight()
+                .testTag("incoming_order_dialog")
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // Header with Badge & Countdown
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = DelivioYellow
+                    ) {
+                        Text(
+                            text = badge.uppercase(),
+                            color = TextOnYellow,
+                            fontWeight = FontWeight.Black,
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                        )
+                    }
+
+                    // Circular Countdown Timer
+                    Box(
+                        modifier = Modifier
+                            .size(44.dp)
+                            .clip(CircleShape)
+                            .background(if (secondsLeft <= 5) DelivioRed else DelivioYellowLight),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "$secondsLeft",
+                            fontWeight = FontWeight.Black,
+                            fontSize = 18.sp,
+                            color = if (secondsLeft <= 5) Color.White else TextOnYellow
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Estimated Earnings Callout
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = DelivioYellowLight,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "ESTIMATED EARNINGS",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextOnYellow.copy(alpha = 0.8f)
+                        )
+                        Text(
+                            text = "$currencySymbol${String.format("%.2f", order.estimatedEarnings)}",
+                            fontSize = 28.sp,
+                            fontWeight = FontWeight.Black,
+                            color = TextOnYellow
+                        )
+                        Text(
+                            text = if (order.isCod) "Payment: Cash on Delivery (COD)" else "Payment: Paid Online",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = TextOnYellow
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Information allowed by Section 8 Offer Stage:
+                // FOOD & CONVENIENCE: merchant name and address, customer's area and distances. Hide customer name, address, phone, items!
+                // REQUEST A RIDER: merchant name and address, customer's area. Hide customer name and address!
+                // PARCEL: sender name, pickup address, recipient's area, distances. Hide package specs!
+                // PABILI: vendor name and address, customer's area. Hide customer name and items!
+                val pickupTitle = when (order.serviceType) {
+                    OrderStepConstants.SERVICE_PARCEL -> "Pickup / Sender"
+                    OrderStepConstants.SERVICE_PABILI -> "Purchase at Vendor"
+                    else -> "Pickup Merchant"
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Storefront, contentDescription = "Pickup", tint = DelivioYellowDark, modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(pickupTitle.uppercase(), fontSize = 10.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                                Text(order.merchantName, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                if (order.merchantAddress.isNotBlank()) {
+                                    Text(order.merchantAddress, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        }
+
+                        HorizontalDivider()
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.LocationOn, contentDescription = "Drop-off Area", tint = DelivioRed, modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text("DROP-OFF DESTINATION", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                                Text("Area: ${order.customerArea}", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                Text("Full address & details reveal upon arrival", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+
+                        if (order.pickupDistanceKm > 0 || order.deliveryDistanceKm > 0) {
+                            HorizontalDivider()
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("To pickup: ~${order.pickupDistanceKm} km", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("Trip: ~${order.deliveryDistanceKm} km", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(20.dp))
+
+                // Actions: Accept & Decline
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onDecline,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(50.dp)
+                    ) {
+                        Text("Decline", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
+                    }
+
+                    Button(
+                        onClick = onAccept,
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = DelivioYellow, contentColor = TextOnYellow),
+                        modifier = Modifier
+                            .weight(1.5f)
+                            .height(50.dp)
+                    ) {
+                        Text("Accept Order", fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
+                    }
+                }
+            }
+        }
+    }
+}
