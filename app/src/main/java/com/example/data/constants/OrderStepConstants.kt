@@ -1,12 +1,27 @@
 package com.example.data.constants
 
 object OrderStepConstants {
-    // Shared exact strings for riderStep
-    const val STEP_HEADING_TO_MERCHANT = "heading_to_merchant" // or heading to sender / vendor
-    const val STEP_ARRIVED_AT_MERCHANT = "arrived_at_merchant" // or arrived at sender / vendor
+    // Exact riderStep values per specification
+    const val STEP_TO_MERCHANT = "to_merchant"
+    const val STEP_AT_MERCHANT = "at_merchant"
     const val STEP_PICKED_UP = "picked_up"
-    const val STEP_HEADING_TO_CUSTOMER = "heading_to_customer" // or heading to recipient
-    const val STEP_ARRIVED_AT_CUSTOMER = "arrived_at_customer" // or arrived at recipient
+    const val STEP_TO_CUSTOMER = "to_customer"
+    const val STEP_AT_CUSTOMER = "at_customer"
+    const val STEP_COMPLETED = "completed"
+
+    const val STEP_TO_SENDER = "to_sender"
+    const val STEP_AT_SENDER = "at_sender"
+    const val STEP_TO_RECIPIENT = "to_recipient"
+    const val STEP_AT_RECIPIENT = "at_recipient"
+
+    const val STEP_TO_VENDOR = "to_vendor"
+    const val STEP_AT_VENDOR = "at_vendor"
+
+    // Legacy aliases for backward compatibility
+    const val STEP_HEADING_TO_MERCHANT = "heading_to_merchant"
+    const val STEP_ARRIVED_AT_MERCHANT = "arrived_at_merchant"
+    const val STEP_HEADING_TO_CUSTOMER = "heading_to_customer"
+    const val STEP_ARRIVED_AT_CUSTOMER = "arrived_at_customer"
     const val STEP_DELIVERED = "delivered"
 
     // Platform statuses
@@ -64,6 +79,84 @@ object OrderStepConstants {
             SERVICE_PABILI -> "Pabili"
             SERVICE_REQUEST -> "Request"
             else -> "Food"
+        }
+    }
+
+    fun isCustomerAddressRevealed(serviceType: String, riderStep: String): Boolean {
+        val step = riderStep.lowercase().trim()
+        return when (serviceType.lowercase().trim()) {
+            SERVICE_PARCEL -> step in listOf(STEP_TO_RECIPIENT, STEP_AT_RECIPIENT, STEP_HEADING_TO_CUSTOMER, STEP_ARRIVED_AT_CUSTOMER)
+            else -> step in listOf(STEP_TO_CUSTOMER, STEP_AT_CUSTOMER, STEP_HEADING_TO_CUSTOMER, STEP_ARRIVED_AT_CUSTOMER)
+        }
+    }
+
+    fun isPickupStage(serviceType: String, riderStep: String): Boolean {
+        val step = riderStep.lowercase().trim()
+        return when (serviceType.lowercase().trim()) {
+            SERVICE_PARCEL -> step in listOf(STEP_TO_SENDER, STEP_AT_SENDER, STEP_HEADING_TO_MERCHANT, STEP_ARRIVED_AT_MERCHANT)
+            SERVICE_PABILI -> step in listOf(STEP_TO_VENDOR, STEP_AT_VENDOR, STEP_HEADING_TO_MERCHANT, STEP_ARRIVED_AT_MERCHANT)
+            else -> step in listOf(STEP_TO_MERCHANT, STEP_AT_MERCHANT, STEP_HEADING_TO_MERCHANT, STEP_ARRIVED_AT_MERCHANT)
+        }
+    }
+
+    fun getStageTitle(serviceType: String, riderStep: String): String {
+        val step = riderStep.lowercase().trim()
+        return when (serviceType.lowercase().trim()) {
+            SERVICE_PARCEL -> when (step) {
+                STEP_TO_SENDER, STEP_HEADING_TO_MERCHANT -> "Heading to Sender"
+                STEP_AT_SENDER, STEP_ARRIVED_AT_MERCHANT -> "At Sender"
+                STEP_TO_RECIPIENT, STEP_HEADING_TO_CUSTOMER -> "Heading to Recipient"
+                STEP_AT_RECIPIENT, STEP_ARRIVED_AT_CUSTOMER -> "At Recipient"
+                STEP_COMPLETED -> "Delivery Completed"
+                else -> "On the Way"
+            }
+            SERVICE_PABILI -> when (step) {
+                STEP_TO_VENDOR, STEP_HEADING_TO_MERCHANT -> "Heading to Vendor"
+                STEP_AT_VENDOR, STEP_ARRIVED_AT_MERCHANT -> "At Vendor"
+                STEP_PICKED_UP -> "Items Picked Up"
+                STEP_TO_CUSTOMER, STEP_HEADING_TO_CUSTOMER -> "Heading to Customer"
+                STEP_AT_CUSTOMER, STEP_ARRIVED_AT_CUSTOMER -> "At Customer"
+                STEP_COMPLETED -> "Delivery Completed"
+                else -> "On the Way"
+            }
+            else -> when (step) {
+                STEP_TO_MERCHANT, STEP_HEADING_TO_MERCHANT -> "Heading to Merchant"
+                STEP_AT_MERCHANT, STEP_ARRIVED_AT_MERCHANT -> "At Merchant"
+                STEP_PICKED_UP -> "Order Picked Up"
+                STEP_TO_CUSTOMER, STEP_HEADING_TO_CUSTOMER -> "Heading to Customer"
+                STEP_AT_CUSTOMER, STEP_ARRIVED_AT_CUSTOMER -> "At Customer"
+                STEP_COMPLETED -> "Delivery Completed"
+                else -> "On the Way"
+            }
+        }
+    }
+
+    fun getSlideButtonText(serviceType: String, riderStep: String): String {
+        val step = riderStep.lowercase().trim()
+        return when (serviceType.lowercase().trim()) {
+            SERVICE_PARCEL -> when (step) {
+                STEP_TO_SENDER, STEP_HEADING_TO_MERCHANT -> "Slide to confirm Arrival at Sender"
+                STEP_AT_SENDER, STEP_ARRIVED_AT_MERCHANT -> "Slide to confirm Picked Up"
+                STEP_TO_RECIPIENT, STEP_HEADING_TO_CUSTOMER -> "Slide to confirm Arrival at Recipient"
+                STEP_AT_RECIPIENT, STEP_ARRIVED_AT_CUSTOMER -> "Slide to Complete Delivery"
+                else -> "Slide to Complete Delivery"
+            }
+            SERVICE_PABILI -> when (step) {
+                STEP_TO_VENDOR, STEP_HEADING_TO_MERCHANT -> "Slide to confirm Arrival at Merchant"
+                STEP_AT_VENDOR, STEP_ARRIVED_AT_MERCHANT -> "Slide to confirm Picked Up"
+                STEP_PICKED_UP -> "Slide to start heading to Customer"
+                STEP_TO_CUSTOMER, STEP_HEADING_TO_CUSTOMER -> "Slide to confirm Arrival at Customer"
+                STEP_AT_CUSTOMER, STEP_ARRIVED_AT_CUSTOMER -> "Slide to Complete Delivery"
+                else -> "Slide to Complete Delivery"
+            }
+            else -> when (step) {
+                STEP_TO_MERCHANT, STEP_HEADING_TO_MERCHANT -> "Slide to confirm Arrival at Merchant"
+                STEP_AT_MERCHANT, STEP_ARRIVED_AT_MERCHANT -> "Slide to confirm Picked Up"
+                STEP_PICKED_UP -> "Slide to start heading to Customer"
+                STEP_TO_CUSTOMER, STEP_HEADING_TO_CUSTOMER -> "Slide to confirm Arrival at Customer"
+                STEP_AT_CUSTOMER, STEP_ARRIVED_AT_CUSTOMER -> "Slide to Complete Delivery"
+                else -> "Slide to Complete Delivery"
+            }
         }
     }
 }

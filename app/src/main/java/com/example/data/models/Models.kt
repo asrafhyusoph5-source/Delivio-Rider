@@ -85,6 +85,7 @@ data class Order(
     val riderPhone: String? = null,
     val riderPhotoUrl: String? = null,
     val cityId: String = "",
+    val merchantId: String = "",
 
     // Merchant / Pickup
     val merchantName: String = "",

@@ -6,10 +6,17 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.drawable.BitmapDrawable
-import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.data.constants.OrderStepConstants
 import com.example.data.models.Order
@@ -24,6 +31,7 @@ import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polyline
 import java.net.HttpURLConnection
 import java.net.URL
+import kotlin.math.roundToInt
 
 @Composable
 fun OsmMapView(
@@ -38,37 +46,39 @@ fun OsmMapView(
     var mapViewInstance by remember { mutableStateOf<MapView?>(null) }
     var routePoints by remember { mutableStateOf<List<GeoPoint>>(emptyList()) }
 
+    var routeDistanceKm by remember { mutableDoubleStateOf(0.0) }
+    var routeEtaMinutes by remember { mutableIntStateOf(0) }
+
     // Init osmdroid config once
     LaunchedEffect(Unit) {
         Configuration.getInstance().userAgentValue = context.packageName
     }
 
-    // Determine target location for navigation & polyline
-    val targetGeoPoint: GeoPoint? = remember(currentActiveOrder) {
+    // Determine target location for navigation & polyline (pickup first, then drop-off once revealed)
+    val targetGeoPoint: GeoPoint? = remember(currentActiveOrder, currentActiveOrder?.riderStep, currentActiveOrder?.merchantLat, currentActiveOrder?.customerLat) {
         val o = currentActiveOrder ?: return@remember null
-        val isAtOrPastPickup = o.riderStep != OrderStepConstants.STEP_HEADING_TO_MERCHANT &&
-                o.riderStep != OrderStepConstants.STEP_ARRIVED_AT_MERCHANT
-        val dropOffRevealed = o.riderStep == OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER
-
-        if (!isAtOrPastPickup) {
-            // Heading to merchant / pickup
-            if (o.merchantLat != 0.0 && o.merchantLng != 0.0) GeoPoint(o.merchantLat, o.merchantLng) else null
-        } else if (dropOffRevealed) {
+        val addressRevealed = OrderStepConstants.isCustomerAddressRevealed(o.serviceType, o.riderStep)
+        if (addressRevealed) {
             // Heading to customer / recipient
             if (o.customerLat != 0.0 && o.customerLng != 0.0) GeoPoint(o.customerLat, o.customerLng) else null
         } else {
-            null
+            // Heading to merchant / sender / vendor
+            if (o.merchantLat != 0.0 && o.merchantLng != 0.0) GeoPoint(o.merchantLat, o.merchantLng) else null
         }
     }
 
-    // Fetch OSRM Polyline with straight-line fallback
+    // Fetch OSRM Polyline with straight-line fallback, calculating distance & ETA
     LaunchedEffect(riderLat, riderLng, targetGeoPoint) {
         if (riderLat == 0.0 || riderLng == 0.0 || targetGeoPoint == null) {
             routePoints = emptyList()
+            routeDistanceKm = 0.0
+            routeEtaMinutes = 0
             return@LaunchedEffect
         }
 
         withContext(Dispatchers.IO) {
+            var fetchedDistKm = 0.0
+            var fetchedEta = 0
             val fetched = try {
                 val urlStr = "https://router.project-osrm.org/route/v1/driving/$riderLng,$riderLat;${targetGeoPoint.longitude},${targetGeoPoint.latitude}?overview=full&geometries=geojson"
                 val conn = URL(urlStr).openConnection() as HttpURLConnection
@@ -83,6 +93,11 @@ fun OsmMapView(
                     val json = JSONObject(jsonStr)
                     val routes = json.optJSONArray("routes")
                     val firstRoute = routes?.optJSONObject(0)
+                    val distMeters = firstRoute?.optDouble("distance", 0.0) ?: 0.0
+                    val durSeconds = firstRoute?.optDouble("duration", 0.0) ?: 0.0
+                    if (distMeters > 0) fetchedDistKm = distMeters / 1000.0
+                    if (durSeconds > 0) fetchedEta = Math.round(durSeconds / 60.0).toInt().coerceAtLeast(1)
+
                     val geometry = firstRoute?.optJSONObject("geometry")
                     val coords = geometry?.optJSONArray("coordinates")
                     val points = mutableListOf<GeoPoint>()
@@ -101,7 +116,23 @@ fun OsmMapView(
             }
 
             // Fallback straight-line
-            routePoints = fetched ?: listOf(GeoPoint(riderLat, riderLng), targetGeoPoint)
+            if (fetched != null && fetchedDistKm > 0) {
+                routePoints = fetched
+                routeDistanceKm = fetchedDistKm
+                routeEtaMinutes = fetchedEta
+            } else {
+                val r = 6371.0
+                val dLat = Math.toRadians(targetGeoPoint.latitude - riderLat)
+                val dLon = Math.toRadians(targetGeoPoint.longitude - riderLng)
+                val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                        Math.cos(Math.toRadians(riderLat)) * Math.cos(Math.toRadians(targetGeoPoint.latitude)) *
+                        Math.sin(dLon / 2) * Math.sin(dLon / 2)
+                val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+                val straightDist = r * c
+                routePoints = listOf(GeoPoint(riderLat, riderLng), targetGeoPoint)
+                routeDistanceKm = straightDist
+                routeEtaMinutes = Math.round(straightDist / 25.0 * 60).toInt().coerceAtLeast(1)
+            }
         }
     }
 
@@ -117,80 +148,110 @@ fun OsmMapView(
         }
     }
 
-    AndroidView(
-        modifier = modifier.fillMaxSize(),
-        factory = { ctx ->
-            MapView(ctx).apply {
-                setTileSource(TileSourceFactory.MAPNIK)
-                setMultiTouchControls(true)
-                isTilesScaledToDpi = true
-                controller.setZoom(16.5)
-                val initPoint = if (riderLat != 0.0 && riderLng != 0.0) GeoPoint(riderLat, riderLng) else GeoPoint(9.7392, 118.7353) // Puerto Princesa center
-                controller.setCenter(initPoint)
-                mapViewInstance = this
-            }
-        },
-        update = { map ->
-            // Clear current overlays
-            map.overlays.clear()
-
-            // 1. Draw route polyline
-            if (routePoints.size >= 2) {
-                val poly = Polyline(map).apply {
-                    setPoints(routePoints)
-                    outlinePaint.color = Color.parseColor("#FFC107") // Delivio Yellow
-                    outlinePaint.strokeWidth = 12f
-                    outlinePaint.strokeCap = Paint.Cap.ROUND
+    androidx.compose.foundation.layout.Box(modifier = modifier.fillMaxSize()) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                MapView(ctx).apply {
+                    setTileSource(TileSourceFactory.MAPNIK)
+                    setMultiTouchControls(true)
+                    isTilesScaledToDpi = true
+                    controller.setZoom(16.5)
+                    val initPoint = if (riderLat != 0.0 && riderLng != 0.0) GeoPoint(riderLat, riderLng) else GeoPoint(9.7392, 118.7353) // Puerto Princesa center
+                    controller.setCenter(initPoint)
+                    mapViewInstance = this
                 }
-                map.overlays.add(poly)
-            }
+            },
+            update = { map ->
+                // Clear current overlays
+                map.overlays.clear()
 
-            // 2. Rider Live Location Marker
-            if (riderLat != 0.0 && riderLng != 0.0) {
-                val riderMarker = Marker(map).apply {
-                    position = GeoPoint(riderLat, riderLng)
-                    setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-                    icon = createRiderPinDrawable(context)
-                    title = "My Location"
-                }
-                map.overlays.add(riderMarker)
-            }
-
-            // 3. Pickup / Merchant Pin (for current active order if not yet picked up)
-            currentActiveOrder?.let { order ->
-                val notPickedUp = order.riderStep == OrderStepConstants.STEP_HEADING_TO_MERCHANT ||
-                        order.riderStep == OrderStepConstants.STEP_ARRIVED_AT_MERCHANT
-                if (notPickedUp && order.merchantLat != 0.0 && order.merchantLng != 0.0) {
-                    val pickupMarker = Marker(map).apply {
-                        position = GeoPoint(order.merchantLat, order.merchantLng)
-                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                        icon = createMerchantPinDrawable(context, order.merchantName)
-                        title = "Pickup: ${order.merchantName}"
+                // 1. Draw route polyline
+                if (routePoints.size >= 2) {
+                    val poly = Polyline(map).apply {
+                        setPoints(routePoints)
+                        outlinePaint.color = Color.parseColor("#FFC107") // Delivio Yellow
+                        outlinePaint.strokeWidth = 12f
+                        outlinePaint.strokeCap = Paint.Cap.ROUND
                     }
-                    map.overlays.add(pickupMarker)
+                    map.overlays.add(poly)
                 }
-            }
 
-            // 4. Numbered Drop-off pins "1" and "2"
-            // Rule: appear on the map for each order ONLY once its drop-off address is revealed (stage 5: arrived_at_customer).
-            // Numbering follows acceptance order in activeOrders (first is 1, second is 2).
-            activeOrders.forEachIndexed { index, order ->
-                val orderNumberLabel = (index + 1).toString() // "1" or "2"
-                val dropOffRevealed = order.riderStep == OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER
-                if (dropOffRevealed && order.customerLat != 0.0 && order.customerLng != 0.0) {
-                    val dropPin = Marker(map).apply {
-                        position = GeoPoint(order.customerLat, order.customerLng)
-                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                        icon = createDropoffPinDrawable(context, orderNumberLabel)
-                        title = "Drop-off $orderNumberLabel: ${order.customerAddress}"
+                // 2. Rider Live Location Marker
+                if (riderLat != 0.0 && riderLng != 0.0) {
+                    val riderMarker = Marker(map).apply {
+                        position = GeoPoint(riderLat, riderLng)
+                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+                        icon = createRiderPinDrawable(context)
+                        title = "My Location"
                     }
-                    map.overlays.add(dropPin)
+                    map.overlays.add(riderMarker)
+                }
+
+                // 3. Pickup Pin (merchant, sender, or vendor icon) for active orders
+                currentActiveOrder?.let { order ->
+                    val isRevealed = OrderStepConstants.isCustomerAddressRevealed(order.serviceType, order.riderStep)
+                    if (!isRevealed && order.merchantLat != 0.0 && order.merchantLng != 0.0) {
+                        val pickupMarker = Marker(map).apply {
+                            position = GeoPoint(order.merchantLat, order.merchantLng)
+                            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                            icon = createPickupPinDrawable(context, order.serviceType, order.merchantName)
+                            title = "Pickup: ${order.merchantName}"
+                        }
+                        map.overlays.add(pickupMarker)
+                    }
+                }
+
+                // 4. Numbered Drop-off pins "1" and "2"
+                // Rule: appear on the map ONLY from the stage where customer address is revealed
+                activeOrders.forEachIndexed { index, order ->
+                    val orderNumberLabel = (index + 1).toString() // "1" or "2"
+                    val dropOffRevealed = OrderStepConstants.isCustomerAddressRevealed(order.serviceType, order.riderStep)
+                    if (dropOffRevealed && order.customerLat != 0.0 && order.customerLng != 0.0) {
+                        val dropPin = Marker(map).apply {
+                            position = GeoPoint(order.customerLat, order.customerLng)
+                            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                            icon = createDropoffPinDrawable(context, orderNumberLabel)
+                            title = "Drop-off $orderNumberLabel: ${order.customerAddress}"
+                        }
+                        map.overlays.add(dropPin)
+                    }
+                }
+
+                map.invalidate()
+            }
+        )
+
+        // Route Distance and ETA Pill overlay
+        if (routeDistanceKm > 0 && routePoints.isNotEmpty()) {
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = androidx.compose.ui.graphics.Color(0xFF1E1E1E),
+                shadowElevation = 6.dp,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 70.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "📍 ${String.format("%.1f", routeDistanceKm)} km",
+                        color = androidx.compose.ui.graphics.Color(0xFFFFC107),
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "• ~$routeEtaMinutes mins",
+                        color = androidx.compose.ui.graphics.Color.White,
+                        fontSize = 13.sp
+                    )
                 }
             }
-
-            map.invalidate()
         }
-    )
+    }
 }
 
 // Helpers for marker icons
@@ -221,17 +282,30 @@ private fun createRiderPinDrawable(context: Context): BitmapDrawable {
     return BitmapDrawable(context.resources, bitmap)
 }
 
-private fun createMerchantPinDrawable(context: Context, label: String): BitmapDrawable {
+private fun createPickupPinDrawable(context: Context, serviceType: String, label: String): BitmapDrawable {
     val width = 64
     val height = 74
     val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap)
 
+    val (pinColor, letter) = when (serviceType.lowercase().trim()) {
+        OrderStepConstants.SERVICE_PARCEL -> Color.parseColor("#E65100") to "S" // Orange / Sender
+        OrderStepConstants.SERVICE_PABILI -> Color.parseColor("#7B1FA2") to "V" // Purple / Vendor
+        else -> Color.parseColor("#1E88E5") to "M" // Delivio Blue / Merchant
+    }
+
     val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#1E88E5") // Blue pin
+        color = pinColor
         style = Paint.Style.FILL
     }
     canvas.drawCircle(width / 2f, 30f, 26f, paint)
+
+    val border = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.STROKE
+        strokeWidth = 4f
+    }
+    canvas.drawCircle(width / 2f, 30f, 26f, border)
 
     val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
@@ -239,7 +313,7 @@ private fun createMerchantPinDrawable(context: Context, label: String): BitmapDr
         textAlign = Paint.Align.CENTER
         isFakeBoldText = true
     }
-    canvas.drawText("P", width / 2f, 38f, textPaint)
+    canvas.drawText(letter, width / 2f, 38f, textPaint)
 
     return BitmapDrawable(context.resources, bitmap)
 }

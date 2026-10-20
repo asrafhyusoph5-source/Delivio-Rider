@@ -55,6 +55,13 @@ class RiderRepository {
     private val _newlyReachedTier = MutableStateFlow<TierConfig?>(null)
     val newlyReachedTier: StateFlow<TierConfig?> = _newlyReachedTier.asStateFlow()
 
+    private val _listenerError = MutableStateFlow<String?>(null)
+    val listenerError: StateFlow<String?> = _listenerError.asStateFlow()
+
+    fun clearListenerError() {
+        _listenerError.value = null
+    }
+
     // Listener registrations
     private var riderListener: ListenerRegistration? = null
     private var activeOrdersListener: ListenerRegistration? = null
@@ -115,15 +122,22 @@ class RiderRepository {
                 _coins.value = r.coins
             }
 
-        // 2. Listen to active orders assigned to rider (not Delivered, not Cancelled)
+        // 2. Listen to active orders assigned to rider (find active order by rider, not by status in query)
         activeOrdersListener = db.collection("orders")
             .whereEqualTo("riderId", uid)
-            .whereNotIn("status", listOf(OrderStepConstants.STATUS_DELIVERED, "Cancelled"))
             .addSnapshotListener { snapshots, error ->
-                if (error != null || snapshots == null) return@addSnapshotListener
-                val orders = snapshots.documents.mapNotNull { parseOrder(it) }
-                _activeOrders.value = orders
-                val activeIds = orders.map { it.id }.toSet()
+                if (error != null) {
+                    _listenerError.value = "Active orders listener: ${error.localizedMessage}"
+                    return@addSnapshotListener
+                }
+                if (snapshots == null) return@addSnapshotListener
+                val activeList = snapshots.documents.mapNotNull { parseOrder(it) }.filter { order ->
+                    val s = order.status.trim().lowercase()
+                    val step = order.riderStep.trim().lowercase()
+                    s != "delivered" && s != "cancelled" && s != "canceled" && s != "rejected" && step != "completed"
+                }
+                _activeOrders.value = activeList
+                val activeIds = activeList.map { it.id }.toSet()
                 RiderLocationTracker.setActiveOrderIds(activeIds)
             }
 
@@ -428,13 +442,20 @@ class RiderRepository {
             return
         }
 
+        val targetService = _incomingOffer.value?.serviceType?.lowercase() ?: OrderStepConstants.SERVICE_FOOD
+        val initialStep = when (targetService) {
+            OrderStepConstants.SERVICE_PARCEL -> OrderStepConstants.STEP_TO_SENDER
+            OrderStepConstants.SERVICE_PABILI -> OrderStepConstants.STEP_TO_VENDOR
+            else -> OrderStepConstants.STEP_TO_MERCHANT
+        }
+
         val orderRef = db.collection("orders").document(orderId)
         var writeMap: Map<String, Any?> = mapOf(
             "riderId" to authUid,
             "riderName" to currentRider.name,
             "riderPhone" to currentRider.phone,
             "riderPhotoUrl" to currentRider.photoUrl,
-            "riderStep" to OrderStepConstants.STEP_HEADING_TO_MERCHANT,
+            "riderStep" to initialStep,
             "statusHistory" to "[arrayUnion(status=$fetchedStatus, timestamp=Timestamp.now())]",
             "updatedAt" to "FieldValue.serverTimestamp()"
         )
@@ -453,6 +474,11 @@ class RiderRepository {
             }
 
             val serviceType = snapshot.getString("serviceType") ?: OrderStepConstants.SERVICE_FOOD
+            val stepForOrder = when (serviceType.lowercase()) {
+                OrderStepConstants.SERVICE_PARCEL -> OrderStepConstants.STEP_TO_SENDER
+                OrderStepConstants.SERVICE_PABILI -> OrderStepConstants.STEP_TO_VENDOR
+                else -> OrderStepConstants.STEP_TO_MERCHANT
+            }
 
             val updates = mutableMapOf<String, Any>()
             // riderId (must be the FirebaseAuth uid, never the riderCode)
@@ -463,8 +489,8 @@ class RiderRepository {
             updates["riderPhone"] = currentRider.phone
             // riderPhotoUrl
             updates["riderPhotoUrl"] = currentRider.photoUrl
-            // riderStep
-            updates["riderStep"] = OrderStepConstants.STEP_HEADING_TO_MERCHANT
+            // riderStep (first stage is to_merchant, to_sender, or to_vendor)
+            updates["riderStep"] = stepForOrder
 
             // riderRequest
             val isRequestOrder = serviceType.equals(OrderStepConstants.SERVICE_REQUEST, ignoreCase = true) ||
@@ -509,7 +535,30 @@ class RiderRepository {
             writeMap = updates
             tx.update(orderRef, updates)
         }.addOnSuccessListener {
+            val accepted = _incomingOffer.value
             _incomingOffer.value = null
+            if (accepted != null && accepted.id == orderId) {
+                val stepForAccepted = when (accepted.serviceType.lowercase()) {
+                    OrderStepConstants.SERVICE_PARCEL -> OrderStepConstants.STEP_TO_SENDER
+                    OrderStepConstants.SERVICE_PABILI -> OrderStepConstants.STEP_TO_VENDOR
+                    else -> OrderStepConstants.STEP_TO_MERCHANT
+                }
+                val newStatus = when (accepted.serviceType.lowercase()) {
+                    OrderStepConstants.SERVICE_PARCEL -> OrderStepConstants.STATUS_RIDER_ON_WAY_SENDER
+                    OrderStepConstants.SERVICE_PABILI -> OrderStepConstants.STATUS_RIDER_ON_WAY_VENDOR
+                    else -> accepted.status
+                }
+                val immediateOrder = accepted.copy(
+                    riderId = authUid,
+                    riderName = currentRider.name,
+                    riderPhone = currentRider.phone,
+                    riderPhotoUrl = currentRider.photoUrl,
+                    riderStep = stepForAccepted,
+                    status = newStatus
+                )
+                _activeOrders.value = (_activeOrders.value.filter { it.id != orderId } + immediateOrder)
+                RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
+            }
             onSuccess()
         }.addOnFailureListener { exception ->
             _incomingOffer.value = null
@@ -536,127 +585,103 @@ class RiderRepository {
             "updatedAt" to FieldValue.serverTimestamp()
         )
 
+        val serviceType = order.serviceType.lowercase()
+        val currentStep = order.riderStep.lowercase()
+
         val nextStep: String
         val nextStatus: String
         var nextReqStatus: String? = null
 
-        when (order.serviceType) {
+        when (serviceType) {
             OrderStepConstants.SERVICE_PARCEL -> {
-                when (order.riderStep) {
-                    OrderStepConstants.STEP_HEADING_TO_MERCHANT -> {
-                        nextStep = OrderStepConstants.STEP_ARRIVED_AT_MERCHANT
+                when (currentStep) {
+                    OrderStepConstants.STEP_TO_SENDER, OrderStepConstants.STEP_HEADING_TO_MERCHANT -> {
+                        nextStep = OrderStepConstants.STEP_AT_SENDER
                         nextStatus = OrderStepConstants.STATUS_ARRIVED_AT_SENDER
                         updates["arrivedMerchantAt"] = FieldValue.serverTimestamp()
                     }
-                    OrderStepConstants.STEP_ARRIVED_AT_MERCHANT -> {
-                        nextStep = OrderStepConstants.STEP_PICKED_UP
+                    OrderStepConstants.STEP_AT_SENDER, OrderStepConstants.STEP_ARRIVED_AT_MERCHANT -> {
+                        nextStep = OrderStepConstants.STEP_TO_RECIPIENT
                         nextStatus = OrderStepConstants.STATUS_RIDER_ON_WAY_RECIPIENT
                         updates["pickedUpAt"] = FieldValue.serverTimestamp()
                     }
-                    OrderStepConstants.STEP_PICKED_UP -> {
-                        nextStep = OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER
+                    OrderStepConstants.STEP_TO_RECIPIENT, OrderStepConstants.STEP_HEADING_TO_CUSTOMER, OrderStepConstants.STEP_PICKED_UP -> {
+                        nextStep = OrderStepConstants.STEP_AT_RECIPIENT
                         nextStatus = OrderStepConstants.STATUS_ARRIVED_AT_RECIPIENT
                         updates["arrivedCustomerAt"] = FieldValue.serverTimestamp()
                     }
-                    else -> {
-                        nextStep = OrderStepConstants.STEP_DELIVERED
+                    else -> { // at_recipient -> completed
+                        nextStep = OrderStepConstants.STEP_COMPLETED
                         nextStatus = OrderStepConstants.STATUS_DELIVERED
                         updates["deliveredAt"] = FieldValue.serverTimestamp()
                     }
                 }
             }
             OrderStepConstants.SERVICE_PABILI -> {
-                when (order.riderStep) {
-                    OrderStepConstants.STEP_HEADING_TO_MERCHANT -> {
-                        nextStep = OrderStepConstants.STEP_ARRIVED_AT_MERCHANT
+                when (currentStep) {
+                    OrderStepConstants.STEP_TO_VENDOR, OrderStepConstants.STEP_HEADING_TO_MERCHANT -> {
+                        nextStep = OrderStepConstants.STEP_AT_VENDOR
                         nextStatus = OrderStepConstants.STATUS_ARRIVED_AT_VENDOR
                         updates["arrivedMerchantAt"] = FieldValue.serverTimestamp()
                     }
-                    OrderStepConstants.STEP_ARRIVED_AT_MERCHANT -> {
-                        // Picked up / bought: requires finalReceiptTotal, status stays Arrived at vendor
+                    OrderStepConstants.STEP_AT_VENDOR, OrderStepConstants.STEP_ARRIVED_AT_MERCHANT -> {
+                        // Picked up / bought: requires finalReceiptTotal
                         if (finalReceiptTotal == null || finalReceiptTotal <= 0.0) {
                             onError("Receipt total is required for Pabili")
                             return
                         }
                         nextStep = OrderStepConstants.STEP_PICKED_UP
-                        nextStatus = OrderStepConstants.STATUS_ARRIVED_AT_VENDOR
+                        nextStatus = OrderStepConstants.STATUS_RIDER_ON_THE_WAY
                         updates["finalReceiptTotal"] = finalReceiptTotal
                         updates["pickedUpAt"] = FieldValue.serverTimestamp()
                     }
                     OrderStepConstants.STEP_PICKED_UP -> {
-                        nextStep = OrderStepConstants.STEP_HEADING_TO_CUSTOMER
-                        nextStatus = OrderStepConstants.STATUS_RIDER_ON_WAY_RECIPIENT
+                        nextStep = OrderStepConstants.STEP_TO_CUSTOMER
+                        nextStatus = OrderStepConstants.STATUS_RIDER_ON_THE_WAY
                     }
-                    OrderStepConstants.STEP_HEADING_TO_CUSTOMER -> {
-                        nextStep = OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER
-                        nextStatus = OrderStepConstants.STATUS_ARRIVED_AT_RECIPIENT
+                    OrderStepConstants.STEP_TO_CUSTOMER, OrderStepConstants.STEP_HEADING_TO_CUSTOMER -> {
+                        nextStep = OrderStepConstants.STEP_AT_CUSTOMER
+                        nextStatus = OrderStepConstants.STATUS_RIDER_ON_THE_WAY
                         updates["arrivedCustomerAt"] = FieldValue.serverTimestamp()
                     }
-                    else -> {
-                        nextStep = OrderStepConstants.STEP_DELIVERED
+                    else -> { // at_customer -> completed
+                        nextStep = OrderStepConstants.STEP_COMPLETED
                         nextStatus = OrderStepConstants.STATUS_DELIVERED
-                        updates["deliveredAt"] = FieldValue.serverTimestamp()
-                    }
-                }
-            }
-            OrderStepConstants.SERVICE_REQUEST -> {
-                when (order.riderStep) {
-                    OrderStepConstants.STEP_HEADING_TO_MERCHANT -> {
-                        nextStep = OrderStepConstants.STEP_ARRIVED_AT_MERCHANT
-                        nextStatus = OrderStepConstants.STATUS_PREPARING
-                        nextReqStatus = OrderStepConstants.REQ_ARRIVED_AT_MERCHANT
-                        updates["arrivedMerchantAt"] = FieldValue.serverTimestamp()
-                    }
-                    OrderStepConstants.STEP_ARRIVED_AT_MERCHANT -> {
-                        nextStep = OrderStepConstants.STEP_PICKED_UP
-                        nextStatus = OrderStepConstants.STATUS_RIDER_ON_THE_WAY
-                        nextReqStatus = OrderStepConstants.REQ_PICKED_UP
-                        updates["pickedUpAt"] = FieldValue.serverTimestamp()
-                    }
-                    OrderStepConstants.STEP_PICKED_UP -> {
-                        nextStep = OrderStepConstants.STEP_HEADING_TO_CUSTOMER
-                        nextStatus = OrderStepConstants.STATUS_RIDER_ON_THE_WAY
-                        nextReqStatus = OrderStepConstants.REQ_ON_THE_WAY
-                    }
-                    OrderStepConstants.STEP_HEADING_TO_CUSTOMER -> {
-                        nextStep = OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER
-                        nextStatus = OrderStepConstants.STATUS_RIDER_ON_THE_WAY
-                        nextReqStatus = OrderStepConstants.REQ_ON_THE_WAY
-                        updates["arrivedCustomerAt"] = FieldValue.serverTimestamp()
-                    }
-                    else -> {
-                        nextStep = OrderStepConstants.STEP_DELIVERED
-                        nextStatus = OrderStepConstants.STATUS_DELIVERED
-                        nextReqStatus = OrderStepConstants.REQ_DELIVERED
                         updates["deliveredAt"] = FieldValue.serverTimestamp()
                     }
                 }
             }
             else -> {
-                // FOOD and CONVENIENCE (Instant)
-                when (order.riderStep) {
-                    OrderStepConstants.STEP_HEADING_TO_MERCHANT -> {
-                        nextStep = OrderStepConstants.STEP_ARRIVED_AT_MERCHANT
-                        nextStatus = OrderStepConstants.STATUS_PREPARING
+                // FOOD, CONVENIENCE (Instant), and REQUEST
+                val isRequest = serviceType == OrderStepConstants.SERVICE_REQUEST || serviceType == "request"
+                when (currentStep) {
+                    OrderStepConstants.STEP_TO_MERCHANT, OrderStepConstants.STEP_HEADING_TO_MERCHANT -> {
+                        nextStep = OrderStepConstants.STEP_AT_MERCHANT
+                        nextStatus = order.status // food, convenience, and request keep status
+                        if (isRequest) nextReqStatus = OrderStepConstants.REQ_ARRIVED_AT_MERCHANT
                         updates["arrivedMerchantAt"] = FieldValue.serverTimestamp()
                     }
-                    OrderStepConstants.STEP_ARRIVED_AT_MERCHANT -> {
+                    OrderStepConstants.STEP_AT_MERCHANT, OrderStepConstants.STEP_ARRIVED_AT_MERCHANT -> {
                         nextStep = OrderStepConstants.STEP_PICKED_UP
                         nextStatus = OrderStepConstants.STATUS_RIDER_ON_THE_WAY
+                        if (isRequest) nextReqStatus = OrderStepConstants.REQ_PICKED_UP
                         updates["pickedUpAt"] = FieldValue.serverTimestamp()
                     }
                     OrderStepConstants.STEP_PICKED_UP -> {
-                        nextStep = OrderStepConstants.STEP_HEADING_TO_CUSTOMER
+                        nextStep = OrderStepConstants.STEP_TO_CUSTOMER
                         nextStatus = OrderStepConstants.STATUS_RIDER_ON_THE_WAY
+                        if (isRequest) nextReqStatus = OrderStepConstants.REQ_ON_THE_WAY
                     }
-                    OrderStepConstants.STEP_HEADING_TO_CUSTOMER -> {
-                        nextStep = OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER
+                    OrderStepConstants.STEP_TO_CUSTOMER, OrderStepConstants.STEP_HEADING_TO_CUSTOMER -> {
+                        nextStep = OrderStepConstants.STEP_AT_CUSTOMER
                         nextStatus = OrderStepConstants.STATUS_RIDER_ON_THE_WAY
+                        if (isRequest) nextReqStatus = OrderStepConstants.REQ_ON_THE_WAY
                         updates["arrivedCustomerAt"] = FieldValue.serverTimestamp()
                     }
-                    else -> {
-                        nextStep = OrderStepConstants.STEP_DELIVERED
+                    else -> { // at_customer -> completed
+                        nextStep = OrderStepConstants.STEP_COMPLETED
                         nextStatus = OrderStepConstants.STATUS_DELIVERED
+                        if (isRequest) nextReqStatus = OrderStepConstants.REQ_DELIVERED
                         updates["deliveredAt"] = FieldValue.serverTimestamp()
                     }
                 }
@@ -669,8 +694,15 @@ class RiderRepository {
             updates["riderRequest.status"] = nextReqStatus
         }
 
+        // statusHistory (arrayUnion with Timestamp.now())
+        val historyEntry = mapOf(
+            "status" to nextStatus,
+            "timestamp" to com.google.firebase.Timestamp.now()
+        )
+        updates["statusHistory"] = FieldValue.arrayUnion(historyEntry)
+
         // If completed: compute riderEarning
-        if (nextStep == OrderStepConstants.STEP_DELIVERED) {
+        if (nextStep == OrderStepConstants.STEP_COMPLETED || nextStatus == OrderStepConstants.STATUS_DELIVERED) {
             val cityId = order.cityId.ifEmpty { _rider.value?.cityId ?: "puerto_princesa" }
             db.collection("deliveryRates").document(cityId).get()
                 .addOnSuccessListener { rateDoc ->
@@ -686,7 +718,11 @@ class RiderRepository {
                     )
 
                     orderRef.update(updates)
-                        .addOnSuccessListener { onSuccess() }
+                        .addOnSuccessListener {
+                            _activeOrders.value = _activeOrders.value.filter { it.id != order.id }
+                            RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
+                            onSuccess()
+                        }
                         .addOnFailureListener { onError(it.localizedMessage ?: "Failed to complete delivery") }
                 }
                 .addOnFailureListener {
@@ -700,12 +736,21 @@ class RiderRepository {
                         "net" to net
                     )
                     orderRef.update(updates)
-                        .addOnSuccessListener { onSuccess() }
+                        .addOnSuccessListener {
+                            _activeOrders.value = _activeOrders.value.filter { it.id != order.id }
+                            RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
+                            onSuccess()
+                        }
                         .addOnFailureListener { onError(it.localizedMessage ?: "Failed to complete delivery") }
                 }
         } else {
             orderRef.update(updates)
-                .addOnSuccessListener { onSuccess() }
+                .addOnSuccessListener {
+                    _activeOrders.value = _activeOrders.value.map {
+                        if (it.id == order.id) it.copy(riderStep = nextStep, status = nextStatus) else it
+                    }
+                    onSuccess()
+                }
                 .addOnFailureListener { onError(it.localizedMessage ?: "Failed to advance step") }
         }
     }
@@ -801,21 +846,48 @@ class RiderRepository {
             val riderPhotoUrl = doc.getString("riderPhotoUrl")
             val cityId = doc.getString("cityId") ?: ""
 
-            val merchantMap = doc.get("merchant") as? Map<*, *>
-            val merchantName = merchantMap?.get("name")?.toString() ?: doc.getString("merchantName") ?: doc.getString("senderName") ?: "Merchant"
-            val merchantAddress = merchantMap?.get("address")?.toString() ?: doc.getString("merchantAddress") ?: doc.getString("senderAddress") ?: ""
-            val merchantPhone = merchantMap?.get("phone")?.toString() ?: doc.getString("merchantPhone") ?: doc.getString("senderPhone") ?: ""
-            val merchantLat = (merchantMap?.get("latitude") as? Number)?.toDouble() ?: doc.getDouble("merchantLat") ?: 0.0
-            val merchantLng = (merchantMap?.get("longitude") as? Number)?.toDouble() ?: doc.getDouble("merchantLng") ?: 0.0
+            val merchantId = doc.getString("merchantId") ?: ""
 
-            val customerMap = doc.get("customer") as? Map<*, *>
-            val customerName = customerMap?.get("name")?.toString() ?: doc.getString("customerName") ?: doc.getString("recipientName") ?: "Customer"
-            val customerPhone = customerMap?.get("phone")?.toString() ?: doc.getString("customerPhone") ?: doc.getString("recipientPhone") ?: ""
-            val customerAddress = customerMap?.get("address")?.toString() ?: doc.getString("customerAddress") ?: doc.getString("recipientAddress") ?: ""
-            val customerArea = customerMap?.get("area")?.toString() ?: doc.getString("customerArea") ?: doc.getString("recipientArea") ?: "Downtown"
-            val customerLat = (customerMap?.get("latitude") as? Number)?.toDouble() ?: doc.getDouble("customerLat") ?: 0.0
-            val customerLng = (customerMap?.get("longitude") as? Number)?.toDouble() ?: doc.getDouble("customerLng") ?: 0.0
-            val customerNotes = customerMap?.get("notes")?.toString() ?: doc.getString("customerNotes") ?: ""
+            // 1. Pickup location: orders.pickup.lat/lng or merchant.latitude/longitude
+            val pickupMap = (doc.get("pickup") as? Map<*, *>) ?: (doc.get("merchant") as? Map<*, *>)
+            val merchantLat = (pickupMap?.get("lat") as? Number)?.toDouble()
+                ?: (pickupMap?.get("latitude") as? Number)?.toDouble()
+                ?: doc.getDouble("merchantLat") ?: 0.0
+            val merchantLng = (pickupMap?.get("lng") as? Number)?.toDouble()
+                ?: (pickupMap?.get("longitude") as? Number)?.toDouble()
+                ?: doc.getDouble("merchantLng") ?: 0.0
+            val merchantName = pickupMap?.get("name")?.toString()
+                ?: doc.getString("merchantName") ?: doc.getString("senderName") ?: "Merchant"
+            val merchantAddress = pickupMap?.get("address")?.toString()
+                ?: doc.getString("merchantAddress") ?: doc.getString("senderAddress") ?: ""
+            val merchantPhone = pickupMap?.get("phone")?.toString()
+                ?: doc.getString("merchantPhone") ?: doc.getString("senderPhone") ?: ""
+
+            // Asynchronously resolve merchant if lat/lng is missing
+            if (merchantLat == 0.0 && merchantId.isNotBlank()) {
+                fetchMerchantLocation(merchantId, id)
+            }
+
+            // 2. Dropoff location: orders.dropoff.lat/lng or customer.latitude/longitude
+            val dropoffMap = (doc.get("dropoff") as? Map<*, *>)
+                ?: (doc.get("dropOff") as? Map<*, *>)
+                ?: (doc.get("customer") as? Map<*, *>)
+            val customerLat = (dropoffMap?.get("lat") as? Number)?.toDouble()
+                ?: (dropoffMap?.get("latitude") as? Number)?.toDouble()
+                ?: doc.getDouble("customerLat") ?: 0.0
+            val customerLng = (dropoffMap?.get("lng") as? Number)?.toDouble()
+                ?: (dropoffMap?.get("longitude") as? Number)?.toDouble()
+                ?: doc.getDouble("customerLng") ?: 0.0
+            val customerName = dropoffMap?.get("name")?.toString()
+                ?: doc.getString("customerName") ?: doc.getString("recipientName") ?: "Customer"
+            val customerAddress = dropoffMap?.get("address")?.toString()
+                ?: doc.getString("customerAddress") ?: doc.getString("recipientAddress") ?: ""
+            val customerPhone = dropoffMap?.get("phone")?.toString()
+                ?: doc.getString("customerPhone") ?: doc.getString("recipientPhone") ?: ""
+            val customerArea = dropoffMap?.get("area")?.toString()
+                ?: doc.getString("customerArea") ?: doc.getString("recipientArea") ?: "Downtown"
+            val customerNotes = dropoffMap?.get("notes")?.toString()
+                ?: doc.getString("customerNotes") ?: ""
 
             val itemsRaw = doc.get("items") as? List<*>
             val items = itemsRaw?.mapNotNull { itemObj ->
@@ -872,6 +944,7 @@ class RiderRepository {
                 riderPhone = riderPhone,
                 riderPhotoUrl = riderPhotoUrl,
                 cityId = cityId,
+                merchantId = merchantId,
                 merchantName = merchantName,
                 merchantAddress = merchantAddress,
                 merchantPhone = merchantPhone,
@@ -931,6 +1004,59 @@ class RiderRepository {
             )
         } catch (_: Exception) {
             return null
+        }
+    }
+
+    private val merchantCache = mutableMapOf<String, Map<String, Any?>>()
+
+    private fun fetchMerchantLocation(merchantId: String, orderId: String) {
+        val cached = merchantCache[merchantId]
+        if (cached != null) {
+            applyMerchantInfo(cached, orderId)
+            return
+        }
+        db.collection("merchants").document(merchantId).get()
+            .addOnSuccessListener { doc ->
+                if (doc.exists()) {
+                    val mLat = (doc.get("lat") as? Number)?.toDouble()
+                        ?: (doc.get("latitude") as? Number)?.toDouble() ?: 0.0
+                    val mLng = (doc.get("lng") as? Number)?.toDouble()
+                        ?: (doc.get("longitude") as? Number)?.toDouble() ?: 0.0
+                    val mName = doc.getString("name") ?: "Merchant"
+                    val mAddr = doc.getString("address") ?: ""
+                    val mPhone = doc.getString("phone") ?: ""
+                    val data = mapOf<String, Any?>(
+                        "lat" to mLat,
+                        "lng" to mLng,
+                        "name" to mName,
+                        "address" to mAddr,
+                        "phone" to mPhone
+                    )
+                    merchantCache[merchantId] = data
+                    applyMerchantInfo(data, orderId)
+                }
+            }
+    }
+
+    private fun applyMerchantInfo(data: Map<String, Any?>, orderId: String) {
+        val mLat = data["lat"] as? Double ?: 0.0
+        val mLng = data["lng"] as? Double ?: 0.0
+        val mName = data["name"] as? String ?: "Merchant"
+        val mAddr = data["address"] as? String ?: ""
+        val mPhone = data["phone"] as? String ?: ""
+
+        if (mLat != 0.0 && mLng != 0.0) {
+            _activeOrders.value = _activeOrders.value.map { o ->
+                if (o.id == orderId && o.merchantLat == 0.0) {
+                    o.copy(
+                        merchantLat = mLat,
+                        merchantLng = mLng,
+                        merchantName = if (o.merchantName.isBlank() || o.merchantName == "Merchant") mName else o.merchantName,
+                        merchantAddress = if (o.merchantAddress.isBlank()) mAddr else o.merchantAddress,
+                        merchantPhone = if (o.merchantPhone.isBlank()) mPhone else o.merchantPhone
+                    )
+                } else o
+            }
         }
     }
 

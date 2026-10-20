@@ -213,6 +213,14 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         auth.currentUser?.let { user ->
             checkUserRoleAndListen(user.uid)
         }
+        viewModelScope.launch {
+            riderRepository.listenerError.collect { err ->
+                err?.let {
+                    showSnackbar(it)
+                    riderRepository.clearListenerError()
+                }
+            }
+        }
     }
 
     fun selectOrderIndex(index: Int) {
@@ -570,13 +578,21 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     fun advanceCurrentOrderStep(finalReceiptTotal: Double? = null) {
         val order = currentActiveOrder.value ?: return
         triggerVibration()
+        val step = order.riderStep.lowercase()
+        val isFinal = when (order.serviceType.lowercase()) {
+            OrderStepConstants.SERVICE_PARCEL -> step in listOf(OrderStepConstants.STEP_AT_RECIPIENT, OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER)
+            else -> step in listOf(OrderStepConstants.STEP_AT_CUSTOMER, OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER)
+        }
         riderRepository.advanceOrderStep(order, finalReceiptTotal,
             onSuccess = {
-                if (order.riderStep == OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER) {
+                if (isFinal) {
                     // Show celebration delivery success dialog
-                    _completedDeliveryOrder.value = order
+                    _completedDeliveryOrder.value = order.copy(
+                        status = OrderStepConstants.STATUS_DELIVERED,
+                        riderStep = OrderStepConstants.STEP_COMPLETED
+                    )
                 } else {
-                    showSnackbar("Step updated successfully")
+                    showSnackbar("Stage updated successfully")
                 }
             },
             onError = { showSnackbar(it) }

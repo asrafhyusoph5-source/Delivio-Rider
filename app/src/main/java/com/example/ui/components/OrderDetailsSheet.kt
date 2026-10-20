@@ -182,37 +182,47 @@ fun OrderDetailsSheet(
                     }
                 }
 
-                // 2. Order Header (Badge, Order #, Status)
+                // 2. Order Header (Badge, Order #, Current Stage Title, Report problem & Support)
+                val stageTitle = OrderStepConstants.getStageTitle(order.serviceType, order.riderStep)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = DelivioYellowLight
-                        ) {
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = DelivioYellowLight
+                            ) {
+                                Text(
+                                    text = badge,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp,
+                                    color = TextOnYellow,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = badge,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp,
-                                color = TextOnYellow,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                text = "#${order.orderNumber}",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 16.sp
                             )
                         }
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.height(2.dp))
                         Text(
-                            text = "#${order.orderNumber}",
-                            fontWeight = FontWeight.ExtraBold,
-                            fontSize = 16.sp
+                            text = stageTitle,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.primary
                         )
                     }
 
                     // Report problem & Support
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = { showProblemDialog = true }) {
-                            Icon(Icons.Default.ReportProblem, contentDescription = "Report Problem", tint = DelivioRed)
+                            Icon(Icons.Default.ReportProblem, contentDescription = "Report a problem", tint = DelivioRed)
                         }
                         if (!supportPhone.isNullOrBlank()) {
                             IconButton(onClick = {
@@ -228,7 +238,14 @@ fun OrderDetailsSheet(
 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                // Scrollable details section based on stage & service
+                val onContactSupport = {
+                    val phone = supportPhone ?: "09170000000"
+                    val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$phone"))
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    try { context.startActivity(intent) } catch (_: Exception) {}
+                }
+
+                // Scrollable details section based on stage & service (visibility table rules)
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -238,6 +255,7 @@ fun OrderDetailsSheet(
                         OrderStepConstants.SERVICE_PARCEL -> {
                             ParcelOrderContent(
                                 order = order,
+                                onContactSupport = onContactSupport,
                                 onCall = onCallClick,
                                 onNavigate = { lat, lng, addr -> navigateExternal(context, lat, lng, addr) }
                             )
@@ -247,6 +265,7 @@ fun OrderDetailsSheet(
                                 order = order,
                                 pabiliReceiptInput = pabiliReceiptInput,
                                 onReceiptChange = { pabiliReceiptInput = it },
+                                onContactSupport = onContactSupport,
                                 onCall = onCallClick,
                                 onNavigate = { lat, lng, addr -> navigateExternal(context, lat, lng, addr) }
                             )
@@ -254,6 +273,7 @@ fun OrderDetailsSheet(
                         OrderStepConstants.SERVICE_REQUEST -> {
                             RequestRiderOrderContent(
                                 order = order,
+                                onContactSupport = onContactSupport,
                                 onCall = onCallClick,
                                 onNavigate = { lat, lng, addr -> navigateExternal(context, lat, lng, addr) }
                             )
@@ -262,6 +282,7 @@ fun OrderDetailsSheet(
                             // FOOD & CONVENIENCE (Instant)
                             FoodOrderContent(
                                 order = order,
+                                onContactSupport = onContactSupport,
                                 onCall = onCallClick,
                                 onNavigate = { lat, lng, addr -> navigateExternal(context, lat, lng, addr) }
                             )
@@ -272,8 +293,7 @@ fun OrderDetailsSheet(
                 Spacer(modifier = Modifier.height(14.dp))
 
                 // Release button (only allowed before pickup)
-                val canRelease = order.riderStep == OrderStepConstants.STEP_HEADING_TO_MERCHANT ||
-                        order.riderStep == OrderStepConstants.STEP_ARRIVED_AT_MERCHANT
+                val canRelease = OrderStepConstants.isPickupStage(order.serviceType, order.riderStep)
                 if (canRelease) {
                     TextButton(
                         onClick = { showReleaseDialog = true },
@@ -285,7 +305,12 @@ fun OrderDetailsSheet(
                 }
 
                 // COD Cash confirmation checkbox if final step
-                val isFinalStep = order.riderStep == OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER
+                val stepLower = order.riderStep.lowercase().trim()
+                val isFinalStep = stepLower in listOf(
+                    OrderStepConstants.STEP_AT_CUSTOMER,
+                    OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER,
+                    OrderStepConstants.STEP_AT_RECIPIENT
+                )
                 if (isFinalStep && order.isCod) {
                     Row(
                         modifier = Modifier
@@ -307,13 +332,17 @@ fun OrderDetailsSheet(
                 }
 
                 // Slide To Confirm Action Button
-                val buttonText = getStepButtonText(order)
+                val buttonText = OrderStepConstants.getSlideButtonText(order.serviceType, order.riderStep)
+                val isPabiliReceiptStep = order.serviceType == OrderStepConstants.SERVICE_PABILI &&
+                        (stepLower in listOf(OrderStepConstants.STEP_AT_VENDOR, OrderStepConstants.STEP_ARRIVED_AT_MERCHANT))
+                val pabiliReceiptValid = !isPabiliReceiptStep || (pabiliReceiptInput.toDoubleOrNull() != null && (pabiliReceiptInput.toDoubleOrNull() ?: 0.0) > 0.0)
+                val isSlideEnabled = if (isFinalStep && order.isCod) cashReceivedConfirmed else pabiliReceiptValid
+
                 SlideToConfirmButton(
                     text = buttonText,
-                    enabled = if (isFinalStep && order.isCod) cashReceivedConfirmed else true,
+                    enabled = isSlideEnabled,
                     onConfirmed = {
-                        val receiptTotal = if (order.serviceType == OrderStepConstants.SERVICE_PABILI &&
-                            order.riderStep == OrderStepConstants.STEP_ARRIVED_AT_MERCHANT) {
+                        val receiptTotal = if (isPabiliReceiptStep) {
                             pabiliReceiptInput.toDoubleOrNull()
                         } else null
                         onAdvanceStep(receiptTotal)
@@ -425,28 +454,36 @@ fun OrderDetailsSheet(
     }
 }
 
-// ================= STAGE-SPECIFIC CONTENT COMPOSABLES =================
+// ================= STAGE-SPECIFIC CONTENT COMPOSABLES (Visibility Table) =================
 
 @Composable
 private fun FoodOrderContent(
     order: Order,
+    onContactSupport: () -> Unit,
     onCall: (String, String) -> Unit,
     onNavigate: (Double, Double, String) -> Unit
 ) {
-    // Stage 2 (heading_to_merchant): Merchant name & address. Hide customer name & items. Merchant call icon.
-    // Stage 3 (arrived_at_merchant): Merchant name & address, customer name, order number, items. Hide customer address.
-    // Stage 4 (picked_up): Customer name, order number, items. Hide merchant name & address & customer address. Customer call icon.
-    // Stage 5 & 6 (arrived_at_customer): Full customer details (name, phone, address, map pin), order number, items, merchant name only (hide merchant address).
+    // Visibility rules for Food & Convenience:
+    // 1. to_merchant: Merchant details (name, address, call, navigate). Customer completely hidden. Items hidden.
+    // 2. at_merchant: Merchant details. Customer name only (address hidden). Items shown.
+    // 3. picked_up: Merchant name only (hide merchant address). Customer name & call. Customer address reveals next stage. Items shown.
+    // 4. to_customer: Customer address revealed! Full customer card (name, phone, address, call, navigate). Merchant name only. Items shown.
+    // 5. at_customer: Full customer card. Merchant name only. Items shown.
+    val step = order.riderStep.lowercase().trim()
+    val isToMerchant = step in listOf(OrderStepConstants.STEP_TO_MERCHANT, OrderStepConstants.STEP_HEADING_TO_MERCHANT)
+    val isAtMerchant = step in listOf(OrderStepConstants.STEP_AT_MERCHANT, OrderStepConstants.STEP_ARRIVED_AT_MERCHANT)
+    val isPickedUp = step == OrderStepConstants.STEP_PICKED_UP
+    val isCustomerRevealed = OrderStepConstants.isCustomerAddressRevealed(order.serviceType, step)
 
-    val step = order.riderStep
-    val showMerchant = step == OrderStepConstants.STEP_HEADING_TO_MERCHANT ||
-            step == OrderStepConstants.STEP_ARRIVED_AT_MERCHANT ||
-            step == OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER
-    val showMerchantAddress = step == OrderStepConstants.STEP_HEADING_TO_MERCHANT ||
-            step == OrderStepConstants.STEP_ARRIVED_AT_MERCHANT
-    val showCustomerName = step != OrderStepConstants.STEP_HEADING_TO_MERCHANT
-    val showCustomerAddress = step == OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER
-    val showItems = step != OrderStepConstants.STEP_HEADING_TO_MERCHANT
+    val showMerchant = true
+    val showMerchantAddress = isToMerchant || isAtMerchant
+    val showMerchantPhone = isToMerchant || isAtMerchant
+    val showCustomer = !isToMerchant
+    val showCustomerAddress = isCustomerRevealed
+    val showCustomerPhone = isPickedUp || isCustomerRevealed
+    val showItems = !isToMerchant
+
+    val isCustomerLocationMissing = isCustomerRevealed && (order.customerLat == 0.0 || order.customerLng == 0.0)
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (showMerchant) {
@@ -454,22 +491,24 @@ private fun FoodOrderContent(
                 title = "Merchant",
                 name = order.merchantName,
                 address = if (showMerchantAddress) order.merchantAddress else null,
-                phone = if (step == OrderStepConstants.STEP_HEADING_TO_MERCHANT || step == OrderStepConstants.STEP_ARRIVED_AT_MERCHANT) order.merchantPhone else null,
-                lat = order.merchantLat,
-                lng = order.merchantLng,
+                phone = if (showMerchantPhone) order.merchantPhone else null,
+                lat = if (showMerchantAddress) order.merchantLat else 0.0,
+                lng = if (showMerchantAddress) order.merchantLng else 0.0,
                 onCall = onCall,
                 onNavigate = onNavigate
             )
         }
 
-        if (showCustomerName) {
+        if (showCustomer) {
             DestinationCard(
                 title = "Customer",
                 name = order.customerName,
-                address = if (showCustomerAddress) order.customerAddress else "Area: ${order.customerArea} (address reveals on arrival)",
-                phone = if (showCustomerAddress || step == OrderStepConstants.STEP_PICKED_UP) order.customerPhone else null,
+                address = if (showCustomerAddress) order.customerAddress else "Area: ${order.customerArea} (address reveals on way to customer)",
+                phone = if (showCustomerPhone) order.customerPhone else null,
                 lat = if (showCustomerAddress) order.customerLat else 0.0,
                 lng = if (showCustomerAddress) order.customerLng else 0.0,
+                isLocationMissing = isCustomerLocationMissing,
+                onContactSupport = onContactSupport,
                 onCall = onCall,
                 onNavigate = onNavigate
             )
@@ -484,68 +523,100 @@ private fun FoodOrderContent(
 @Composable
 private fun RequestRiderOrderContent(
     order: Order,
+    onContactSupport: () -> Unit,
     onCall: (String, String) -> Unit,
     onNavigate: (Double, Double, String) -> Unit
 ) {
     // REQUEST A RIDER: Never show items!
-    // Arrival at Merchant: merchant name & address, customer name.
-    // Picked Up: merchant name & address, customer name, customer address.
-    // Start heading to Customer: customer name only (hide merchant name & address).
-    // Arrival at Customer: customer name, phone, address, and merchant name (no merchant address).
-    val step = order.riderStep
-    val showMerchantName = step != OrderStepConstants.STEP_PICKED_UP
-    val showMerchantAddress = step == OrderStepConstants.STEP_HEADING_TO_MERCHANT || step == OrderStepConstants.STEP_ARRIVED_AT_MERCHANT
-    val showCustomerAddress = step == OrderStepConstants.STEP_ARRIVED_AT_MERCHANT || step == OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER
+    // 1. to_merchant: Merchant details (name, address, call, navigate). Customer completely hidden.
+    // 2. at_merchant: Merchant details. Customer name only.
+    // 3. picked_up: Merchant name only. Customer name & call.
+    // 4. to_customer & at_customer: Customer address revealed! Merchant name only.
+    val step = order.riderStep.lowercase().trim()
+    val isToMerchant = step in listOf(OrderStepConstants.STEP_TO_MERCHANT, OrderStepConstants.STEP_HEADING_TO_MERCHANT)
+    val isAtMerchant = step in listOf(OrderStepConstants.STEP_AT_MERCHANT, OrderStepConstants.STEP_ARRIVED_AT_MERCHANT)
+    val isPickedUp = step == OrderStepConstants.STEP_PICKED_UP
+    val isCustomerRevealed = OrderStepConstants.isCustomerAddressRevealed(order.serviceType, step)
+
+    val showMerchant = true
+    val showMerchantAddress = isToMerchant || isAtMerchant
+    val showMerchantPhone = isToMerchant || isAtMerchant
+    val showCustomer = !isToMerchant
+    val showCustomerAddress = isCustomerRevealed
+    val showCustomerPhone = isPickedUp || isCustomerRevealed
+
+    val isCustomerLocationMissing = isCustomerRevealed && (order.customerLat == 0.0 || order.customerLng == 0.0)
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (showMerchantName) {
+        if (showMerchant) {
             DestinationCard(
                 title = "Merchant (Requesting)",
                 name = order.merchantName,
                 address = if (showMerchantAddress) order.merchantAddress else null,
-                phone = if (showMerchantAddress) order.merchantPhone else null,
-                lat = order.merchantLat,
-                lng = order.merchantLng,
+                phone = if (showMerchantPhone) order.merchantPhone else null,
+                lat = if (showMerchantAddress) order.merchantLat else 0.0,
+                lng = if (showMerchantAddress) order.merchantLng else 0.0,
                 onCall = onCall,
                 onNavigate = onNavigate
             )
         }
 
-        DestinationCard(
-            title = "Customer Destination",
-            name = order.customerName,
-            address = if (showCustomerAddress) order.customerAddress else "Area: ${order.customerArea} (reveals on arrival)",
-            phone = if (step == OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER) order.customerPhone else null,
-            lat = if (showCustomerAddress) order.customerLat else 0.0,
-            lng = if (showCustomerAddress) order.customerLng else 0.0,
-            onCall = onCall,
-            onNavigate = onNavigate
-        )
+        if (showCustomer) {
+            DestinationCard(
+                title = "Customer Destination",
+                name = order.customerName,
+                address = if (showCustomerAddress) order.customerAddress else "Area: ${order.customerArea} (reveals on way to customer)",
+                phone = if (showCustomerPhone) order.customerPhone else null,
+                lat = if (showCustomerAddress) order.customerLat else 0.0,
+                lng = if (showCustomerAddress) order.customerLng else 0.0,
+                isLocationMissing = isCustomerLocationMissing,
+                onContactSupport = onContactSupport,
+                onCall = onCall,
+                onNavigate = onNavigate
+            )
+        }
     }
 }
 
 @Composable
 private fun ParcelOrderContent(
     order: Order,
+    onContactSupport: () -> Unit,
     onCall: (String, String) -> Unit,
     onNavigate: (Double, Double, String) -> Unit
 ) {
-    val step = order.riderStep
-    val showSpecs = step != OrderStepConstants.STEP_HEADING_TO_MERCHANT
-    val showRecipientDetails = step == OrderStepConstants.STEP_PICKED_UP || step == OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER
-    val showRecipientAddress = step == OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER
+    // PARCEL:
+    // 1. to_sender: Sender details (name, address, phone, navigate). Recipient hidden. Specs hidden.
+    // 2. at_sender: Sender details. Recipient name only (address hidden). Specs shown.
+    // 3. to_recipient & at_recipient: Recipient address revealed! Full recipient card. Sender name only. Specs shown.
+    val step = order.riderStep.lowercase().trim()
+    val isToSender = step in listOf(OrderStepConstants.STEP_TO_SENDER, OrderStepConstants.STEP_HEADING_TO_MERCHANT)
+    val isAtSender = step in listOf(OrderStepConstants.STEP_AT_SENDER, OrderStepConstants.STEP_ARRIVED_AT_MERCHANT)
+    val isRecipientRevealed = OrderStepConstants.isCustomerAddressRevealed(order.serviceType, step)
+
+    val showSender = true
+    val showSenderAddress = isToSender || isAtSender
+    val showSenderPhone = isToSender || isAtSender
+    val showSpecs = !isToSender
+    val showRecipient = !isToSender
+    val showRecipientAddress = isRecipientRevealed
+    val showRecipientPhone = isRecipientRevealed
+
+    val isRecipientLocationMissing = isRecipientRevealed && (order.customerLat == 0.0 || order.customerLng == 0.0)
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        DestinationCard(
-            title = "Sender",
-            name = order.merchantName,
-            address = order.merchantAddress,
-            phone = if (step != OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER) order.merchantPhone else null,
-            lat = order.merchantLat,
-            lng = order.merchantLng,
-            onCall = onCall,
-            onNavigate = onNavigate
-        )
+        if (showSender) {
+            DestinationCard(
+                title = "Sender",
+                name = order.merchantName,
+                address = if (showSenderAddress) order.merchantAddress else null,
+                phone = if (showSenderPhone) order.merchantPhone else null,
+                lat = if (showSenderAddress) order.merchantLat else 0.0,
+                lng = if (showSenderAddress) order.merchantLng else 0.0,
+                onCall = onCall,
+                onNavigate = onNavigate
+            )
+        }
 
         if (showSpecs) {
             Card(
@@ -569,14 +640,16 @@ private fun ParcelOrderContent(
             }
         }
 
-        if (showRecipientDetails) {
+        if (showRecipient) {
             DestinationCard(
                 title = "Recipient",
                 name = order.customerName,
-                address = if (showRecipientAddress) order.customerAddress else "Area: ${order.customerArea} (reveals on arrival)",
-                phone = order.customerPhone,
+                address = if (showRecipientAddress) order.customerAddress else "Area: ${order.customerArea} (reveals on way to recipient)",
+                phone = if (showRecipientPhone) order.customerPhone else null,
                 lat = if (showRecipientAddress) order.customerLat else 0.0,
                 lng = if (showRecipientAddress) order.customerLng else 0.0,
+                isLocationMissing = isRecipientLocationMissing,
+                onContactSupport = onContactSupport,
                 onCall = onCall,
                 onNavigate = onNavigate
             )
@@ -589,37 +662,58 @@ private fun PabiliOrderContent(
     order: Order,
     pabiliReceiptInput: String,
     onReceiptChange: (String) -> Unit,
+    onContactSupport: () -> Unit,
     onCall: (String, String) -> Unit,
     onNavigate: (Double, Double, String) -> Unit
 ) {
-    val step = order.riderStep
-    val showVendor = step == OrderStepConstants.STEP_HEADING_TO_MERCHANT || step == OrderStepConstants.STEP_ARRIVED_AT_MERCHANT
-    val showCustomerAddress = step == OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER
+    // PABILI:
+    // 1. to_vendor: Vendor details (name, address, phone, navigate). Shopping list shown. Customer name only (address hidden).
+    // 2. at_vendor: Vendor details. Shopping list + OutlinedTextField for Receipt Total. Customer name only.
+    // 3. picked_up: Vendor name only. Customer name, call. Shopping list with receipt total.
+    // 4. to_customer & at_customer: Customer address revealed! Full customer card. Vendor name only. Shopping list with receipt total.
+    val step = order.riderStep.lowercase().trim()
+    val isToVendor = step in listOf(OrderStepConstants.STEP_TO_VENDOR, OrderStepConstants.STEP_HEADING_TO_MERCHANT)
+    val isAtVendor = step in listOf(OrderStepConstants.STEP_AT_VENDOR, OrderStepConstants.STEP_ARRIVED_AT_MERCHANT)
+    val isPickedUp = step == OrderStepConstants.STEP_PICKED_UP
+    val isCustomerRevealed = OrderStepConstants.isCustomerAddressRevealed(order.serviceType, step)
+
+    val showVendor = true
+    val showVendorAddress = isToVendor || isAtVendor
+    val showVendorPhone = isToVendor || isAtVendor
+    val showCustomer = true
+    val showCustomerAddress = isCustomerRevealed
+    val showCustomerPhone = isPickedUp || isCustomerRevealed
+
+    val isCustomerLocationMissing = isCustomerRevealed && (order.customerLat == 0.0 || order.customerLng == 0.0)
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (showVendor) {
             DestinationCard(
                 title = "Vendor",
                 name = order.merchantName,
-                address = order.merchantAddress,
-                phone = order.merchantPhone,
-                lat = order.merchantLat,
-                lng = order.merchantLng,
+                address = if (showVendorAddress) order.merchantAddress else null,
+                phone = if (showVendorPhone) order.merchantPhone else null,
+                lat = if (showVendorAddress) order.merchantLat else 0.0,
+                lng = if (showVendorAddress) order.merchantLng else 0.0,
                 onCall = onCall,
                 onNavigate = onNavigate
             )
         }
 
-        DestinationCard(
-            title = "Customer",
-            name = order.customerName,
-            address = if (showCustomerAddress) order.customerAddress else "Area: ${order.customerArea} (reveals on arrival)",
-            phone = order.customerPhone,
-            lat = if (showCustomerAddress) order.customerLat else 0.0,
-            lng = if (showCustomerAddress) order.customerLng else 0.0,
-            onCall = onCall,
-            onNavigate = onNavigate
-        )
+        if (showCustomer) {
+            DestinationCard(
+                title = "Customer",
+                name = order.customerName,
+                address = if (showCustomerAddress) order.customerAddress else "Area: ${order.customerArea} (reveals on way to customer)",
+                phone = if (showCustomerPhone) order.customerPhone else null,
+                lat = if (showCustomerAddress) order.customerLat else 0.0,
+                lng = if (showCustomerAddress) order.customerLng else 0.0,
+                isLocationMissing = isCustomerLocationMissing,
+                onContactSupport = onContactSupport,
+                onCall = onCall,
+                onNavigate = onNavigate
+            )
+        }
 
         // Pabili Item list & totals
         Card(
@@ -639,16 +733,24 @@ private fun PabiliOrderContent(
                 }
 
                 // If at vendor bought step: require receipt total
-                if (step == OrderStepConstants.STEP_ARRIVED_AT_MERCHANT) {
+                if (isAtVendor) {
                     Spacer(modifier = Modifier.height(6.dp))
                     OutlinedTextField(
                         value = pabiliReceiptInput,
                         onValueChange = onReceiptChange,
-                        label = { Text("Receipt Total (Required)") },
+                        label = { Text("Receipt Total (Required to Pick Up)") },
                         prefix = { Text("₱ ") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
+                    )
+                } else if (order.finalReceiptTotal > 0.0) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Actual Receipt: ₱${String.format("%.2f", order.finalReceiptTotal)}",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp,
+                        color = DelivioGreenDark
                     )
                 }
             }
@@ -665,38 +767,79 @@ private fun DestinationCard(
     phone: String?,
     lat: Double,
     lng: Double,
+    isLocationMissing: Boolean = false,
+    onContactSupport: (() -> Unit)? = null,
     onCall: (String, String) -> Unit,
     onNavigate: (Double, Double, String) -> Unit
 ) {
+    val context = LocalContext.current
     Surface(
         shape = RoundedCornerShape(14.dp),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(title.uppercase(), fontSize = 10.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                Text(name, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                if (!address.isNullOrBlank()) {
-                    Text(address, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(title.uppercase(), fontSize = 10.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                    Text(name, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    if (!address.isNullOrBlank()) {
+                        Text(address, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (!phone.isNullOrBlank()) {
+                        IconButton(onClick = {
+                            val dialIntent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$phone"))
+                            dialIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                            try {
+                                context.startActivity(dialIntent)
+                            } catch (_: Exception) {
+                                onCall(name, phone)
+                            }
+                        }) {
+                            Icon(Icons.Default.Phone, contentDescription = "Call $title", tint = DelivioGreenDark)
+                        }
+                    }
+                    if (lat != 0.0 && lng != 0.0) {
+                        IconButton(onClick = { onNavigate(lat, lng, address ?: name) }) {
+                            Icon(Icons.Default.Navigation, contentDescription = "Navigate to $title", tint = DelivioYellowDark)
+                        }
+                    }
                 }
             }
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (!phone.isNullOrBlank()) {
-                    IconButton(onClick = { onCall(name, phone) }) {
-                        Icon(Icons.Default.Phone, contentDescription = "Call $title", tint = DelivioGreenDark)
-                    }
-                }
-                if (lat != 0.0 && lng != 0.0) {
-                    IconButton(onClick = { onNavigate(lat, lng, address ?: name) }) {
-                        Icon(Icons.Default.Navigation, contentDescription = "Navigate to $title", tint = DelivioYellowDark)
+            // Location missing warning with Contact Support button (does not block flow)
+            if (isLocationMissing) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = DelivioRed.copy(alpha = 0.12f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Warning, contentDescription = null, tint = DelivioRed, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Customer location missing", color = DelivioRed, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                        if (onContactSupport != null) {
+                            TextButton(
+                                onClick = onContactSupport,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                            ) {
+                                Text("Contact Support", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = DelivioYellowDark)
+                            }
+                        }
                     }
                 }
             }
@@ -715,37 +858,6 @@ private fun ItemsCard(items: List<com.example.data.models.OrderItem>) {
             Text("Order Items (${items.size})", fontWeight = FontWeight.Bold, fontSize = 13.sp)
             items.forEach { item ->
                 Text("• ${item.quantity}x ${item.name}", fontSize = 12.sp)
-            }
-        }
-    }
-}
-
-private fun getStepButtonText(order: Order): String {
-    return when (order.serviceType) {
-        OrderStepConstants.SERVICE_PARCEL -> {
-            when (order.riderStep) {
-                OrderStepConstants.STEP_HEADING_TO_MERCHANT -> "Slide to confirm Arrival at Sender"
-                OrderStepConstants.STEP_ARRIVED_AT_MERCHANT -> "Slide to confirm Picked Up"
-                OrderStepConstants.STEP_PICKED_UP -> "Slide to confirm Arrival at Recipient"
-                else -> "Slide to Complete Delivery"
-            }
-        }
-        OrderStepConstants.SERVICE_PABILI -> {
-            when (order.riderStep) {
-                OrderStepConstants.STEP_HEADING_TO_MERCHANT -> "Slide to confirm Arrival at Vendor"
-                OrderStepConstants.STEP_ARRIVED_AT_MERCHANT -> "Slide to confirm Bought / Picked Up"
-                OrderStepConstants.STEP_PICKED_UP -> "Slide to start heading to Customer"
-                OrderStepConstants.STEP_HEADING_TO_CUSTOMER -> "Slide to confirm Arrival at Customer"
-                else -> "Slide to Complete Delivery"
-            }
-        }
-        else -> {
-            when (order.riderStep) {
-                OrderStepConstants.STEP_HEADING_TO_MERCHANT -> "Slide to confirm Arrival at Merchant"
-                OrderStepConstants.STEP_ARRIVED_AT_MERCHANT -> "Slide to confirm Picked Up"
-                OrderStepConstants.STEP_PICKED_UP -> "Slide to start heading to Customer"
-                OrderStepConstants.STEP_HEADING_TO_CUSTOMER -> "Slide to confirm Arrival at Customer"
-                else -> "Slide to Complete Delivery"
             }
         }
     }
