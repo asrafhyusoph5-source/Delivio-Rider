@@ -45,6 +45,7 @@ fun MainMapScreen(
     val activeCall by viewModel.activeCall.collectAsState()
     val newlyReachedTier by viewModel.newlyReachedTier.collectAsState()
     val completedOrder by viewModel.completedDeliveryOrder.collectAsState()
+    val acceptOrderError by viewModel.acceptOrderError.collectAsState()
     val liveLoc by viewModel.currentLocation.collectAsState()
 
     val riderLat = liveLoc?.first ?: 9.7392
@@ -254,6 +255,14 @@ fun MainMapScreen(
                     callInfo = call,
                     onEndCall = { viewModel.endCall() },
                     onOpenSystemDialer = { phone -> viewModel.launchExternalDialer(phone) }
+                )
+            }
+
+            // 7. Accept Order Error Dialog
+            acceptOrderError?.let { err ->
+                AcceptOrderErrorDialog(
+                    errorDetails = err,
+                    onDismiss = { viewModel.dismissAcceptOrderError() }
                 )
             }
         }

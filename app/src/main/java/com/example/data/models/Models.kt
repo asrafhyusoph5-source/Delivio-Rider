@@ -255,3 +255,11 @@ data class WalletTransaction(
     val category: String = "Delivery",
     val isCredit: Boolean = true
 )
+
+data class AcceptOrderErrorDetails(
+    val exceptionMessage: String = "",
+    val orderId: String = "",
+    val currentStatus: String = "",
+    val authUid: String = "",
+    val fieldsWritten: Map<String, Any?> = emptyMap()
+)

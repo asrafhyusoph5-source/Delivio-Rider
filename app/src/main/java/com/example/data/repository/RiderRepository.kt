@@ -393,55 +393,134 @@ class RiderRepository {
     }
 
     // ACCEPT ORDER (Transaction)
-    fun acceptOrder(orderId: String, onSuccess: () -> Unit, onError: (String) -> Unit) {
-        val currentRider = _rider.value ?: run { onError("Rider profile not ready"); return }
+    fun acceptOrder(
+        orderId: String,
+        onSuccess: () -> Unit,
+        onError: (AcceptOrderErrorDetails) -> Unit
+    ) {
+        val currentRider = _rider.value
+        val authUid = auth.currentUser?.uid ?: currentRider?.uid ?: ""
+        var fetchedStatus = _incomingOffer.value?.status ?: "unknown"
+
+        if (currentRider == null || authUid.isEmpty()) {
+            onError(
+                AcceptOrderErrorDetails(
+                    exceptionMessage = "Rider profile or FirebaseAuth session is not ready",
+                    orderId = orderId,
+                    currentStatus = fetchedStatus,
+                    authUid = authUid,
+                    fieldsWritten = emptyMap()
+                )
+            )
+            return
+        }
+
         if (_activeOrders.value.size >= 2) {
-            onError("Cannot hold more than 2 active orders")
+            onError(
+                AcceptOrderErrorDetails(
+                    exceptionMessage = "Cannot hold more than 2 active orders",
+                    orderId = orderId,
+                    currentStatus = fetchedStatus,
+                    authUid = authUid,
+                    fieldsWritten = emptyMap()
+                )
+            )
             return
         }
 
         val orderRef = db.collection("orders").document(orderId)
+        var writeMap: Map<String, Any?> = mapOf(
+            "riderId" to authUid,
+            "riderName" to currentRider.name,
+            "riderPhone" to currentRider.phone,
+            "riderPhotoUrl" to currentRider.photoUrl,
+            "riderStep" to OrderStepConstants.STEP_HEADING_TO_MERCHANT,
+            "statusHistory" to "[arrayUnion(status=$fetchedStatus, timestamp=Timestamp.now())]",
+            "updatedAt" to "FieldValue.serverTimestamp()"
+        )
+
         db.runTransaction { tx ->
             val snapshot = tx.get(orderRef)
+            val currentStatus = snapshot.getString("status") ?: OrderStepConstants.STATUS_PLACED_ORDER
+            fetchedStatus = currentStatus
+
             val existingRider = snapshot.getString("riderId")
             if (existingRider != null) {
-                throw FirebaseFirestoreException("Order already taken", FirebaseFirestoreException.Code.ABORTED)
+                throw FirebaseFirestoreException(
+                    "Order already taken by rider: $existingRider",
+                    FirebaseFirestoreException.Code.ABORTED
+                )
             }
 
             val serviceType = snapshot.getString("serviceType") ?: OrderStepConstants.SERVICE_FOOD
-            val updates = mutableMapOf<String, Any>(
-                "riderId" to currentRider.uid,
-                "riderName" to currentRider.name,
-                "riderPhone" to currentRider.phone,
-                "riderPhotoUrl" to currentRider.photoUrl,
-                "riderStep" to OrderStepConstants.STEP_HEADING_TO_MERCHANT,
-                "updatedAt" to FieldValue.serverTimestamp()
-            )
 
-            when (serviceType) {
+            val updates = mutableMapOf<String, Any>()
+            // riderId (must be the FirebaseAuth uid, never the riderCode)
+            updates["riderId"] = authUid
+            // riderName
+            updates["riderName"] = currentRider.name
+            // riderPhone
+            updates["riderPhone"] = currentRider.phone
+            // riderPhotoUrl
+            updates["riderPhotoUrl"] = currentRider.photoUrl
+            // riderStep
+            updates["riderStep"] = OrderStepConstants.STEP_HEADING_TO_MERCHANT
+
+            // riderRequest
+            val isRequestOrder = serviceType.equals(OrderStepConstants.SERVICE_REQUEST, ignoreCase = true) ||
+                    serviceType.equals("request", ignoreCase = true) ||
+                    snapshot.contains("riderRequest")
+            if (isRequestOrder) {
+                val existingReq = (snapshot.get("riderRequest") as? Map<*, *>)?.mapKeys { it.key.toString() }?.toMutableMap() ?: mutableMapOf()
+                existingReq["status"] = OrderStepConstants.REQ_RIDER_ASSIGNED
+                updates["riderRequest"] = existingReq
+            }
+
+            // status: never change status for food, convenience, or request orders
+            // For parcel set status "Rider is on the way to sender"; for pabili set "Rider is on the way to vendor"
+            val newStatusForHistory: String
+            when (serviceType.lowercase()) {
                 OrderStepConstants.SERVICE_PARCEL -> {
-                    updates["status"] = OrderStepConstants.STATUS_RIDER_ON_WAY_SENDER
+                    val parcelStatus = OrderStepConstants.STATUS_RIDER_ON_WAY_SENDER
+                    updates["status"] = parcelStatus
+                    newStatusForHistory = parcelStatus
                 }
                 OrderStepConstants.SERVICE_PABILI -> {
-                    updates["status"] = OrderStepConstants.STATUS_RIDER_ON_WAY_VENDOR
-                }
-                OrderStepConstants.SERVICE_REQUEST -> {
-                    updates["riderRequest.status"] = OrderStepConstants.REQ_RIDER_ASSIGNED
-                    updates["status"] = OrderStepConstants.STATUS_RIDER_ON_THE_WAY
+                    val pabiliStatus = OrderStepConstants.STATUS_RIDER_ON_WAY_VENDOR
+                    updates["status"] = pabiliStatus
+                    newStatusForHistory = pabiliStatus
                 }
                 else -> {
-                    // food & instant
-                    updates["status"] = OrderStepConstants.STATUS_RIDER_ON_THE_WAY
+                    // food, convenience, or request orders: never change status
+                    newStatusForHistory = currentStatus
                 }
             }
 
+            // statusHistory (arrayUnion with Timestamp.now(), never serverTimestamp)
+            val historyEntry = mapOf(
+                "status" to newStatusForHistory,
+                "timestamp" to com.google.firebase.Timestamp.now()
+            )
+            updates["statusHistory"] = FieldValue.arrayUnion(historyEntry)
+
+            // updatedAt
+            updates["updatedAt"] = FieldValue.serverTimestamp()
+
+            writeMap = updates
             tx.update(orderRef, updates)
         }.addOnSuccessListener {
             _incomingOffer.value = null
             onSuccess()
-        }.addOnFailureListener {
-            val msg = if (it.message?.contains("Order already taken") == true) "Order already taken" else (it.localizedMessage ?: "Failed to accept order")
-            onError(msg)
+        }.addOnFailureListener { exception ->
+            _incomingOffer.value = null
+            val errorDetails = AcceptOrderErrorDetails(
+                exceptionMessage = exception.message ?: exception.localizedMessage ?: "Failed to accept order",
+                orderId = orderId,
+                currentStatus = fetchedStatus,
+                authUid = authUid,
+                fieldsWritten = writeMap
+            )
+            onError(errorDetails)
         }
     }
 

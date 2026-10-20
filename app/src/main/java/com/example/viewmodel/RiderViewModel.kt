@@ -71,6 +71,14 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     val snackbarMessage: StateFlow<String?> = _snackbarMessage.asStateFlow()
     val toastMessage: StateFlow<String?> = snackbarMessage
 
+    // Accept Order Error Dialog State
+    private val _acceptOrderError = MutableStateFlow<AcceptOrderErrorDetails?>(null)
+    val acceptOrderError: StateFlow<AcceptOrderErrorDetails?> = _acceptOrderError.asStateFlow()
+
+    fun dismissAcceptOrderError() {
+        _acceptOrderError.value = null
+    }
+
     // Notifications & Inbox
     val notifications: StateFlow<List<MessageNotification>> = inboxMessages
     val unreadNotificationCount: StateFlow<Int> = inboxMessages.map { list ->
@@ -547,7 +555,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             onSuccess = {
                 showSnackbar("Order accepted! Heading to pickup.")
             },
-            onError = { showSnackbar(it) }
+            onError = { errorDetails ->
+                _acceptOrderError.value = errorDetails
+            }
         )
     }
 

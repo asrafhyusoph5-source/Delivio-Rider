@@ -84,4 +84,26 @@ class ExampleRobolectricTest {
         assertEquals("john@delivio.ph", user.email)
         assertEquals("rider", user.role)
     }
+
+    @Test
+    fun `verify accept order error details data class`() {
+        val errorDetails = com.example.data.models.AcceptOrderErrorDetails(
+            exceptionMessage = "PERMISSION_DENIED: Missing or insufficient permissions.",
+            orderId = "order_abc_123",
+            currentStatus = "Placed Order",
+            authUid = "auth_rider_uid_999",
+            fieldsWritten = mapOf(
+                "riderId" to "auth_rider_uid_999",
+                "riderName" to "Juan Dela Cruz",
+                "riderStep" to OrderStepConstants.STEP_HEADING_TO_MERCHANT
+            )
+        )
+
+        assertEquals("PERMISSION_DENIED: Missing or insufficient permissions.", errorDetails.exceptionMessage)
+        assertEquals("order_abc_123", errorDetails.orderId)
+        assertEquals("Placed Order", errorDetails.currentStatus)
+        assertEquals("auth_rider_uid_999", errorDetails.authUid)
+        assertEquals(3, errorDetails.fieldsWritten.size)
+        assertEquals("auth_rider_uid_999", errorDetails.fieldsWritten["riderId"])
+    }
 }
