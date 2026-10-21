@@ -40,6 +40,9 @@ fun OsmMapView(
     activeOrders: List<Order>,
     currentActiveOrder: Order?,
     recenterTrigger: Int,
+    sheetHeightFraction: Float = 0.28f,
+    isSatelliteLayer: Boolean = false,
+    onRouteChange: (Double, Int) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -48,6 +51,15 @@ fun OsmMapView(
 
     var routeDistanceKm by remember { mutableDoubleStateOf(0.0) }
     var routeEtaMinutes by remember { mutableIntStateOf(0) }
+    var tappedPinLabel by remember { mutableStateOf<String?>(null) }
+
+    // Auto-dismiss pin label after 3 seconds
+    LaunchedEffect(tappedPinLabel) {
+        if (tappedPinLabel != null) {
+            kotlinx.coroutines.delay(3000)
+            tappedPinLabel = null
+        }
+    }
 
     // Init osmdroid config once
     LaunchedEffect(Unit) {
@@ -136,19 +148,49 @@ fun OsmMapView(
         }
     }
 
-    // Recenter map
-    LaunchedEffect(recenterTrigger, riderLat, riderLng) {
+    // Report route changes to caller
+    LaunchedEffect(routeDistanceKm, routeEtaMinutes) {
+        onRouteChange(routeDistanceKm, routeEtaMinutes)
+    }
+
+    // Fit route in the area above the sheet whenever sheet state, step, or recenter changes
+    LaunchedEffect(sheetHeightFraction, currentActiveOrder?.riderStep, routePoints, recenterTrigger) {
         mapViewInstance?.let { map ->
-            if (riderLat != 0.0 && riderLng != 0.0) {
-                map.controller.animateTo(GeoPoint(riderLat, riderLng))
-                if (map.zoomLevelDouble < 14.0) {
-                    map.controller.setZoom(16.5)
+            val points = if (routePoints.size >= 2) routePoints
+            else if (targetGeoPoint != null && riderLat != 0.0 && riderLng != 0.0) listOf(GeoPoint(riderLat, riderLng), targetGeoPoint)
+            else if (riderLat != 0.0 && riderLng != 0.0) listOf(GeoPoint(riderLat, riderLng))
+            else emptyList()
+
+            if (points.isNotEmpty()) {
+                val minLat = points.minOf { it.latitude }
+                val maxLat = points.maxOf { it.latitude }
+                val minLng = points.minOf { it.longitude }
+                val maxLng = points.maxOf { it.longitude }
+
+                val latSpan = (maxLat - minLat).coerceAtLeast(0.004)
+                val lngSpan = (maxLng - minLng).coerceAtLeast(0.004)
+
+                // Offset center downwards so route is centered in the visible area above the sheet
+                val centerLat = (minLat + maxLat) / 2.0 - (latSpan * sheetHeightFraction * 0.45)
+                val centerLng = (minLng + maxLng) / 2.0
+
+                val maxSpan = maxOf(latSpan / (1.0 - sheetHeightFraction).coerceAtLeast(0.35), lngSpan)
+                val targetZoom = when {
+                    maxSpan > 0.15 -> 12.0
+                    maxSpan > 0.08 -> 13.0
+                    maxSpan > 0.04 -> 14.0
+                    maxSpan > 0.02 -> 15.0
+                    maxSpan > 0.01 -> 16.0
+                    else -> 16.5
                 }
+
+                map.controller.animateTo(GeoPoint(centerLat, centerLng))
+                map.controller.setZoom(targetZoom)
             }
         }
     }
 
-    androidx.compose.foundation.layout.Box(modifier = modifier.fillMaxSize()) {
+    Box(modifier = modifier.fillMaxSize()) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
@@ -163,6 +205,12 @@ fun OsmMapView(
                 }
             },
             update = { map ->
+                // Switch tile layer if requested
+                val targetTileSource = if (isSatelliteLayer) TileSourceFactory.USGS_SAT else TileSourceFactory.MAPNIK
+                if (map.tileProvider.tileSource != targetTileSource) {
+                    map.setTileSource(targetTileSource)
+                }
+
                 // Clear current overlays
                 map.overlays.clear()
 
@@ -184,6 +232,11 @@ fun OsmMapView(
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
                         icon = createRiderPinDrawable(context)
                         title = "My Location"
+                        infoWindow = null // Remove large address bubble
+                        setOnMarkerClickListener { m, _ ->
+                            tappedPinLabel = m.title ?: "My Location"
+                            true
+                        }
                     }
                     map.overlays.add(riderMarker)
                 }
@@ -197,6 +250,11 @@ fun OsmMapView(
                             setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
                             icon = createPickupPinDrawable(context, order.serviceType, order.merchantName)
                             title = "Pickup: ${order.merchantName}"
+                            infoWindow = null // Remove large address bubble
+                            setOnMarkerClickListener { m, _ ->
+                                tappedPinLabel = m.title ?: order.merchantName
+                                true
+                            }
                         }
                         map.overlays.add(pickupMarker)
                     }
@@ -212,7 +270,12 @@ fun OsmMapView(
                             position = GeoPoint(order.customerLat, order.customerLng)
                             setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
                             icon = createDropoffPinDrawable(context, orderNumberLabel)
-                            title = "Drop-off $orderNumberLabel: ${order.customerAddress}"
+                            title = "Drop-off $orderNumberLabel: ${order.customerAddress.ifBlank { order.customerName }}"
+                            infoWindow = null // Remove large address bubble
+                            setOnMarkerClickListener { m, _ ->
+                                tappedPinLabel = m.title ?: order.customerName
+                                true
+                            }
                         }
                         map.overlays.add(dropPin)
                     }
@@ -222,33 +285,23 @@ fun OsmMapView(
             }
         )
 
-        // Route Distance and ETA Pill overlay
-        if (routeDistanceKm > 0 && routePoints.isNotEmpty()) {
+        // Tapping a pin shows a small label that disappears after 3 seconds
+        tappedPinLabel?.let { label ->
             Surface(
                 shape = RoundedCornerShape(20.dp),
-                color = androidx.compose.ui.graphics.Color(0xFF1E1E1E),
+                color = androidx.compose.ui.graphics.Color(0xDD1E1E1E),
                 shadowElevation = 6.dp,
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .padding(top = 70.dp)
+                    .padding(top = 96.dp)
             ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "📍 ${String.format("%.1f", routeDistanceKm)} km",
-                        color = androidx.compose.ui.graphics.Color(0xFFFFC107),
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "• ~$routeEtaMinutes mins",
-                        color = androidx.compose.ui.graphics.Color.White,
-                        fontSize = 13.sp
-                    )
-                }
+                Text(
+                    text = label,
+                    color = androidx.compose.ui.graphics.Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
+                )
             }
         }
     }
