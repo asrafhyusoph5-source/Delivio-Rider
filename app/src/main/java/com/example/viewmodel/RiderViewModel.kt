@@ -45,6 +45,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     val coins = riderRepository.coins
     val coinHistory = riderRepository.coinHistory
     val newlyReachedTier = riderRepository.newlyReachedTier
+    val listenerError = riderRepository.listenerError
     val currentLocation = RiderLocationTracker.currentLocation
 
     // Order Switcher (index 0 or 1)
@@ -164,9 +165,26 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         )
     }.stateIn(viewModelScope, SharingStarted.Lazily, EarningSummary())
 
-    // Wallet balance & transactions
-    val walletBalance: StateFlow<Double> = deliveredOrders.map { orders ->
+    // Wallet balance (live from riders/{uid}.walletBalance) & Withdrawable Earnings
+    val walletBalance: StateFlow<Double> = rider.map { r ->
+        r?.walletBalance ?: 0.0
+    }.stateIn(viewModelScope, SharingStarted.Lazily, 0.0)
+
+    val earningsAvailableToWithdraw: StateFlow<Double> = deliveredOrders.map { orders ->
         orders.sumOf { it.estimatedEarnings }
+    }.stateIn(viewModelScope, SharingStarted.Lazily, 0.0)
+
+    // Real COD cash collected and Remittance due
+    val totalCodCollected: StateFlow<Double> = deliveredOrders.map { orders ->
+        orders.filter { it.isCod }.sumOf { it.codCollected }
+    }.stateIn(viewModelScope, SharingStarted.Lazily, 0.0)
+
+    val cashRemitted: StateFlow<Double> = rider.map { r ->
+        r?.cashRemitted ?: 0.0
+    }.stateIn(viewModelScope, SharingStarted.Lazily, 0.0)
+
+    val remittanceDue: StateFlow<Double> = combine(totalCodCollected, cashRemitted) { cod, remitted ->
+        (cod - remitted).coerceAtLeast(0.0)
     }.stateIn(viewModelScope, SharingStarted.Lazily, 0.0)
 
     val cashOnHand: StateFlow<Double> = combine(deliveredOrders, rider) { orders, r ->
@@ -174,19 +192,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         (totalCod - (r?.cashRemitted ?: 0.0)).coerceAtLeast(0.0)
     }.stateIn(viewModelScope, SharingStarted.Lazily, 0.0)
 
-    val transactions: StateFlow<List<WalletTransaction>> = deliveredOrders.map { orders ->
-        orders.map { order ->
-            WalletTransaction(
-                id = order.id,
-                title = "Order Payout #${order.orderNumber}",
-                amount = order.estimatedEarnings,
-                dateText = order.placedAt.ifBlank { "Recent" },
-                referenceNo = "TXN-${order.orderNumber}",
-                category = order.serviceType,
-                isCredit = true
-            )
-        }
-    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+    // Wallet history live from walletTransactions collection (sorted newest first in code)
+    val transactions: StateFlow<List<WalletTransaction>> = riderRepository.walletTransactions
+    val walletHistory: StateFlow<List<WalletTransaction>> = transactions
 
     // Support chat
     private val _supportChatMessages = MutableStateFlow<List<ChatMessage>>(listOf(
@@ -301,12 +309,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         onComplete()
     }
 
-    fun cashOut(amount: Double, method: String): Boolean {
-        if (amount <= 0 || amount > walletBalance.value) {
-            showSnackbar("Invalid payout amount")
-            return false
-        }
-        showSnackbar("Payout request of ₱$amount via $method submitted to finance.")
+    fun cashOut(amount: Double = 0.0, method: String = ""): Boolean {
+        showSnackbar("Coming soon")
         return true
     }
 
@@ -586,10 +590,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         riderRepository.advanceOrderStep(order, finalReceiptTotal,
             onSuccess = {
                 if (isFinal) {
-                    // Show celebration delivery success dialog
+                    // Show celebration delivery success dialog with accurate codCollected
+                    val codAmountFinal = if (order.isCod) order.cashAmountToCollect else 0.0
                     _completedDeliveryOrder.value = order.copy(
                         status = OrderStepConstants.STATUS_DELIVERED,
-                        riderStep = OrderStepConstants.STEP_COMPLETED
+                        riderStep = OrderStepConstants.STEP_COMPLETED,
+                        codCollected = codAmountFinal
                     )
                 } else {
                     showSnackbar("Stage updated successfully")

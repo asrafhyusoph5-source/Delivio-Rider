@@ -106,4 +106,166 @@ class ExampleRobolectricTest {
         assertEquals(3, errorDetails.fieldsWritten.size)
         assertEquals("auth_rider_uid_999", errorDetails.fieldsWritten["riderId"])
     }
+
+    @Test
+    fun `verify payment parsing logic`() {
+        // COD variants
+        assertEquals(com.example.data.models.PaymentType.COD, com.example.data.models.parsePaymentType("cod"))
+        assertEquals(com.example.data.models.PaymentType.COD, com.example.data.models.parsePaymentType("  COD  "))
+        assertEquals(com.example.data.models.PaymentType.COD, com.example.data.models.parsePaymentType("cash"))
+        assertEquals(com.example.data.models.PaymentType.COD, com.example.data.models.parsePaymentType("cash on delivery"))
+
+        // Paid Online variants
+        assertEquals(com.example.data.models.PaymentType.PAID_ONLINE, com.example.data.models.parsePaymentType("wallet"))
+        assertEquals(com.example.data.models.PaymentType.PAID_ONLINE, com.example.data.models.parsePaymentType("online"))
+        assertEquals(com.example.data.models.PaymentType.PAID_ONLINE, com.example.data.models.parsePaymentType(" ONLINE "))
+
+        // Unknown variants (never defaults to Paid Online)
+        assertEquals(com.example.data.models.PaymentType.UNKNOWN, com.example.data.models.parsePaymentType(null))
+        assertEquals(com.example.data.models.PaymentType.UNKNOWN, com.example.data.models.parsePaymentType(""))
+        assertEquals(com.example.data.models.PaymentType.UNKNOWN, com.example.data.models.parsePaymentType("credit_card_stripe"))
+    }
+
+    @Test
+    fun `verify payment provider labels`() {
+        assertEquals("Delivio Wallet", com.example.data.models.formatPaymentProvider("wallet"))
+        assertEquals("GCash", com.example.data.models.formatPaymentProvider("gcash"))
+        assertEquals("Maya", com.example.data.models.formatPaymentProvider("maya"))
+        assertEquals("Bank", com.example.data.models.formatPaymentProvider("bank"))
+        assertEquals("Card", com.example.data.models.formatPaymentProvider("card"))
+    }
+
+    @Test
+    fun `verify cash to collect calculation for all services`() {
+        // 1. Food COD with cashToCollect
+        val foodOrder = com.example.data.models.Order(
+            serviceType = "food",
+            paymentMethod = "cod",
+            cashToCollect = 350.0,
+            feesTotal = 320.0
+        )
+        assertEquals(350.0, foodOrder.cashAmountToCollect, 0.001)
+
+        // Food COD falling back to feesTotal
+        val foodOrderFallback = com.example.data.models.Order(
+            serviceType = "food",
+            paymentMethod = "cod",
+            cashToCollect = 0.0,
+            feesTotal = 280.0
+        )
+        assertEquals(280.0, foodOrderFallback.cashAmountToCollect, 0.001)
+
+        // 2. Parcel COD with sender collection
+        val parcelSender = com.example.data.models.Order(
+            serviceType = "parcel",
+            paymentMethod = "cod",
+            cashToCollect = 150.0,
+            cashCollectAt = "sender"
+        )
+        assertEquals(150.0, parcelSender.cashAmountToCollect, 0.001)
+        assertTrue(parcelSender.parcelCollectAtSender)
+
+        // 3. Pabili COD with estimated total + fees
+        val pabiliOrder = com.example.data.models.Order(
+            serviceType = "pabili",
+            paymentMethod = "cash",
+            pabiliEstimatedTotal = 500.0,
+            feesDeliveryFee = 60.0,
+            feesServiceFee = 25.0
+        )
+        assertEquals(585.0, pabiliOrder.cashAmountToCollect, 0.001)
+
+        // Pabili COD with final receipt total
+        val pabiliReceipt = com.example.data.models.Order(
+            serviceType = "pabili",
+            paymentMethod = "cash",
+            pabiliEstimatedTotal = 500.0,
+            finalReceiptTotal = 540.0,
+            feesDeliveryFee = 60.0,
+            feesServiceFee = 25.0
+        )
+        assertEquals(625.0, pabiliReceipt.cashAmountToCollect, 0.001)
+
+        // 4. Request Rider COD
+        val requestOrder = com.example.data.models.Order(
+            serviceType = "request_rider",
+            paymentMethod = "cod",
+            codAmount = 400.0,
+            feesDeliveryFee = 75.0
+        )
+        assertEquals(400.0, requestOrder.cashAmountToCollect, 0.001)
+
+        // 5. Paid online / wallet order (never asks for cash)
+        val onlineOrder = com.example.data.models.Order(
+            serviceType = "food",
+            paymentMethod = "online",
+            paymentProvider = "gcash",
+            feesTotal = 400.0
+        )
+        assertEquals(0.0, onlineOrder.cashAmountToCollect, 0.001)
+        assertEquals("GCash", onlineOrder.paymentProviderLabel)
+
+        // 6. Unknown payment (never asks for cash)
+        val unknownOrder = com.example.data.models.Order(
+            serviceType = "food",
+            paymentMethod = "",
+            feesTotal = 400.0
+        )
+        assertEquals(0.0, unknownOrder.cashAmountToCollect, 0.001)
+        assertTrue(unknownOrder.isPaymentUnknown)
+    }
+
+    @Test
+    fun `verify rider wallet balance and remittance due calculation`() {
+        val rider = Rider(
+            uid = "rider_abc",
+            name = "Rider Test",
+            walletBalance = 1500.0,
+            cashRemitted = 300.0
+        )
+        assertEquals(1500.0, rider.walletBalance, 0.001)
+        assertEquals(300.0, rider.cashRemitted, 0.001)
+
+        val totalCod = 800.0
+        val remittanceDue = (totalCod - rider.cashRemitted).coerceAtLeast(0.0)
+        assertEquals(500.0, remittanceDue, 0.001)
+    }
+
+    @Test
+    fun `verify wallet transaction model formatting and sorting`() {
+        val cashInTx = com.example.data.models.WalletTransaction(
+            id = "tx_1",
+            riderId = "rider_abc",
+            type = "cash_in",
+            amount = 500.0,
+            note = "Admin Cash In Bonus",
+            dateText = "Oct 22, 2026 • 09:30 AM",
+            dateRaw = 1729589400000L,
+            balanceAfter = 1500.0
+        )
+        assertTrue(cashInTx.isPositive)
+        assertEquals("+500.00", cashInTx.displayAmount)
+        assertEquals("Cash In", cashInTx.formattedType)
+        assertEquals(1500.0, cashInTx.balanceAfter ?: 0.0, 0.001)
+
+        val adjustmentDeduction = com.example.data.models.WalletTransaction(
+            id = "tx_2",
+            riderId = "rider_abc",
+            type = "adjustment",
+            amount = -150.0,
+            note = "Correction adjustment",
+            dateText = "Oct 22, 2026 • 10:00 AM",
+            dateRaw = 1729591200000L,
+            balanceAfter = 1350.0
+        )
+        org.junit.Assert.assertFalse(adjustmentDeduction.isPositive)
+        assertEquals("-150.00", adjustmentDeduction.displayAmount)
+        assertEquals("Adjustment", adjustmentDeduction.formattedType)
+        assertEquals(1350.0, adjustmentDeduction.balanceAfter ?: 0.0, 0.001)
+
+        // Verify in-code sorting by dateRaw newest first (no orderBy in query)
+        val list = listOf(cashInTx, adjustmentDeduction).sortedByDescending { it.dateRaw }
+        assertEquals("tx_2", list.first().id)
+        assertEquals("tx_1", list.last().id)
+    }
 }

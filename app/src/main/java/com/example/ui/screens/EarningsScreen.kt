@@ -27,6 +27,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.theme.*
+import com.example.data.models.PaymentType
+import com.example.data.models.parsePaymentType
+import com.example.data.models.formatPaymentProvider
+import com.example.ui.components.PaymentBadgeContent
 import com.example.viewmodel.RiderViewModel
 
 data class EarningsJobRecord(
@@ -47,9 +51,26 @@ data class EarningsJobRecord(
     val returnTripPay: Double = 0.0,
     val urgentBonus: Double = 0.0,
     val platformCommission: Double = 5.0,
-    val isCod: Boolean = false,
+    val paymentMethod: String = "cod",
+    val paymentProvider: String = "",
+    val cashToCollect: Double = 0.0,
     val codCollected: Double = 0.0
 ) {
+    val paymentType: PaymentType
+        get() = parsePaymentType(paymentMethod)
+
+    val isCod: Boolean
+        get() = paymentType == PaymentType.COD
+
+    val isPaidOnline: Boolean
+        get() = paymentType == PaymentType.PAID_ONLINE
+
+    val isPaymentUnknown: Boolean
+        get() = paymentType == PaymentType.UNKNOWN
+
+    val paymentProviderLabel: String
+        get() = formatPaymentProvider(paymentProvider)
+
     val netEarning: Double
         get() = baseFare + distanceFare + tip + surgeBoost + waitingPay + extraStopPay + returnTripPay + urgentBonus - platformCommission
 }
@@ -73,7 +94,8 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
         returnTripPay = 40.0,
         urgentBonus = 50.0,
         platformCommission = 10.0,
-        isCod = true,
+        paymentMethod = "cod",
+        cashToCollect = 320.0,
         codCollected = 320.0
     ),
     EarningsJobRecord(
@@ -90,7 +112,8 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
         tip = 20.0,
         surgeBoost = 30.0,
         platformCommission = 5.0,
-        isCod = false
+        paymentMethod = "online",
+        paymentProvider = "gcash"
     ),
     EarningsJobRecord(
         id = "job_103",
@@ -105,7 +128,8 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
         distanceFare = 30.0,
         tip = 0.0,
         platformCommission = 5.0,
-        isCod = false
+        paymentMethod = "wallet",
+        paymentProvider = "wallet"
     ),
     // Saturday Oct 10
     EarningsJobRecord(
@@ -122,7 +146,8 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
         tip = 25.0,
         surgeBoost = 40.0,
         platformCommission = 6.0,
-        isCod = true,
+        paymentMethod = "cash",
+        cashToCollect = 560.0,
         codCollected = 560.0
     ),
     EarningsJobRecord(
@@ -138,7 +163,8 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
         distanceFare = 45.0,
         tip = 35.0,
         platformCommission = 7.0,
-        isCod = false
+        paymentMethod = "online",
+        paymentProvider = "maya"
     ),
     // Friday Oct 9
     EarningsJobRecord(
@@ -155,7 +181,8 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
         tip = 15.0,
         extraStopPay = 30.0,
         platformCommission = 5.0,
-        isCod = true,
+        paymentMethod = "cod",
+        cashToCollect = 450.0,
         codCollected = 450.0
     ),
     EarningsJobRecord(
@@ -171,7 +198,8 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
         distanceFare = 25.0,
         tip = 10.0,
         platformCommission = 5.0,
-        isCod = false
+        paymentMethod = "online",
+        paymentProvider = "bank"
     ),
     // Thursday Oct 8
     EarningsJobRecord(
@@ -188,7 +216,8 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
         tip = 20.0,
         surgeBoost = 25.0,
         platformCommission = 6.0,
-        isCod = false
+        paymentMethod = "online",
+        paymentProvider = "card"
     ),
     // Wednesday Oct 7
     EarningsJobRecord(
@@ -205,7 +234,8 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
         tip = 40.0,
         urgentBonus = 50.0,
         platformCommission = 8.0,
-        isCod = false
+        paymentMethod = "unknown",
+        paymentProvider = ""
     ),
     // Tuesday Oct 6
     EarningsJobRecord(
@@ -221,7 +251,8 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
         distanceFare = 30.0,
         tip = 15.0,
         platformCommission = 5.0,
-        isCod = true,
+        paymentMethod = "cash on delivery",
+        cashToCollect = 250.0,
         codCollected = 250.0
     ),
     // Monday Oct 5
@@ -239,7 +270,8 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
         tip = 25.0,
         surgeBoost = 20.0,
         platformCommission = 5.0,
-        isCod = false
+        paymentMethod = "wallet",
+        paymentProvider = "wallet"
     )
 )
 
@@ -286,7 +318,7 @@ fun EarningsScreen(
             }
             val matchesPayment = when (selectedPaymentFilter) {
                 "All" -> true
-                "Paid Online" -> !job.isCod
+                "Paid Online" -> job.isPaidOnline
                 "COD" -> job.isCod
                 else -> true
             }
@@ -306,7 +338,7 @@ fun EarningsScreen(
     val totalReturnTrip = remember(filteredJobs) { filteredJobs.sumOf { it.returnTripPay } }
     val totalUrgent = remember(filteredJobs) { filteredJobs.sumOf { it.urgentBonus } }
     val totalCommission = remember(filteredJobs) { filteredJobs.sumOf { it.platformCommission } }
-    val totalCodCash = remember(filteredJobs) { filteredJobs.sumOf { it.codCollected } }
+    val totalCodCash = remember(filteredJobs) { filteredJobs.filter { it.isCod }.sumOf { it.codCollected } }
 
     Scaffold(
         topBar = {
@@ -693,17 +725,22 @@ fun EarningsScreen(
                     HorizontalDivider()
                     BreakdownRow("Net Rider Pay", "$currencySymbol${String.format("%.2f", job.netEarning)}", isBold = true)
 
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant,
+                    Spacer(modifier = Modifier.height(6.dp))
+                    PaymentBadgeContent(
+                        paymentType = job.paymentType,
+                        providerLabel = job.paymentProviderLabel,
+                        amountToCollect = if (job.isCod) (if (job.codCollected > 0) job.codCollected else job.cashToCollect) else 0.0,
+                        isRequestRider = job.serviceType.lowercase().contains("request"),
+                        currencySymbol = currencySymbol,
+                        isLarge = true,
                         modifier = Modifier.fillMaxWidth()
-                    ) {
+                    )
+                    if (job.serviceType.lowercase().contains("request")) {
                         Text(
-                            text = if (job.isCod) "Payment Status: COD Collected ($currencySymbol${String.format("%.2f", job.codCollected)})" else "Payment Status: Paid Online (Direct Deposit)",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.padding(8.dp)
+                            text = "Delivery Fee: Paid by merchant",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = DelivioGreenDark
                         )
                     }
 
@@ -893,18 +930,14 @@ private fun JobRowCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // Payment chip
-                Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = if (job.isCod) DelivioYellowLight else MaterialTheme.colorScheme.surfaceVariant
-                ) {
-                    Text(
-                        text = if (job.isCod) "COD" else "Paid Online",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (job.isCod) TextOnYellow else MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                    )
-                }
+                PaymentBadgeContent(
+                    paymentType = job.paymentType,
+                    providerLabel = job.paymentProviderLabel,
+                    amountToCollect = if (job.isCod) (if (job.codCollected > 0) job.codCollected else job.cashToCollect) else 0.0,
+                    isRequestRider = job.serviceType.lowercase().contains("request"),
+                    currencySymbol = currencySymbol,
+                    isLarge = false
+                )
 
                 // Service badge
                 Surface(

@@ -156,12 +156,21 @@ fun IncomingOrderDialog(
                             fontWeight = FontWeight.Black,
                             color = TextOnYellow
                         )
-                        Text(
-                            text = if (order.isCod) "Payment: Cash on Delivery (COD)" else "Payment: Paid Online",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = TextOnYellow
+                        Spacer(modifier = Modifier.height(6.dp))
+                        PaymentBadgeChip(
+                            order = order,
+                            currencySymbol = currencySymbol,
+                            isLarge = true
                         )
+                        if (order.isRequestRider) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Delivery fee: Paid by merchant",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextOnYellow
+                            )
+                        }
                     }
                 }
 

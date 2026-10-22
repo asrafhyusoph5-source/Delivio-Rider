@@ -33,6 +33,7 @@ data class Rider(
     val status: String = "active", // "active", "suspended", "inactive"
     val allowedServices: List<String> = listOf("food", "convenience", "parcel", "pabili", "request_rider"),
     val activeServices: List<String> = listOf("food", "convenience", "parcel", "pabili", "request_rider"),
+    val walletBalance: Double = 0.0,
     val cashRemitted: Double = 0.0,
     val coins: Int = 0,
     val totalTrips: Int = 0,
@@ -117,7 +118,16 @@ data class Order(
     val returnTripPay: Double = 0.0,
     val urgentBonus: Double = 0.0,
     val platformCommission: Double = 0.0,
-    val isCod: Boolean = false,
+
+    // Payment & Collection fields
+    val paymentMethod: String = "",
+    val paymentProvider: String = "",
+    val cashToCollect: Double = 0.0,
+    val cashCollectAt: String = "",
+    val codAmount: Double = 0.0,
+    val feesTotal: Double = 0.0,
+    val feesDeliveryFee: Double = 0.0,
+    val feesServiceFee: Double = 0.0,
     val codCollected: Double = 0.0,
 
     // Parcel specifications
@@ -151,6 +161,79 @@ data class Order(
 
     val isRequestRider: Boolean
         get() = serviceType == OrderStepConstants.SERVICE_REQUEST
+
+    val isParcel: Boolean
+        get() = serviceType.lowercase() == OrderStepConstants.SERVICE_PARCEL
+
+    val paymentType: PaymentType
+        get() = parsePaymentType(paymentMethod)
+
+    val isCod: Boolean
+        get() = paymentType == PaymentType.COD
+
+    val isPaidOnline: Boolean
+        get() = paymentType == PaymentType.PAID_ONLINE
+
+    val isPaymentUnknown: Boolean
+        get() = paymentType == PaymentType.UNKNOWN
+
+    val paymentProviderLabel: String
+        get() = formatPaymentProvider(paymentProvider)
+
+    val parcelCollectAtSender: Boolean
+        get() = serviceType.lowercase() == OrderStepConstants.SERVICE_PARCEL &&
+                cashCollectAt.trim().lowercase() == "sender"
+
+    // Section 2: CASH TO COLLECT
+    // COD, food or convenience: orders.cashToCollect, falling back to fees.total, collected from customer at delivery.
+    // COD, parcel: cashToCollect, from party in cashCollectAt ("sender" at pickup, "recipient" at delivery).
+    // COD, pabili: finalReceiptTotal (estimated items total until receipt entered) + fees.deliveryFee + fees.serviceFee, collected at delivery.
+    // request_rider: codAmount (collected from recipient). Delivery fee shows "Paid by merchant".
+    // Paid Online or wallet: no cash to collect.
+    val cashAmountToCollect: Double
+        get() {
+            if (paymentType == PaymentType.PAID_ONLINE || paymentType == PaymentType.UNKNOWN) {
+                return 0.0
+            }
+            return when (serviceType.lowercase()) {
+                OrderStepConstants.SERVICE_PARCEL -> cashToCollect
+                OrderStepConstants.SERVICE_PABILI -> {
+                    val itemsTotal = if (finalReceiptTotal > 0.0) finalReceiptTotal else pabiliEstimatedTotal
+                    itemsTotal + feesDeliveryFee + feesServiceFee
+                }
+                OrderStepConstants.SERVICE_REQUEST, "request" -> codAmount
+                else -> {
+                    // Food or convenience (Instant)
+                    if (cashToCollect > 0.0) cashToCollect else feesTotal
+                }
+            }
+        }
+}
+
+enum class PaymentType {
+    COD,
+    PAID_ONLINE,
+    UNKNOWN
+}
+
+fun parsePaymentType(paymentMethod: String?): PaymentType {
+    val pm = paymentMethod?.trim()?.lowercase() ?: ""
+    return when (pm) {
+        "cod", "cash", "cash on delivery" -> PaymentType.COD
+        "wallet", "online" -> PaymentType.PAID_ONLINE
+        else -> PaymentType.UNKNOWN
+    }
+}
+
+fun formatPaymentProvider(provider: String?): String {
+    return when (provider?.trim()?.lowercase()) {
+        "wallet" -> "Delivio Wallet"
+        "gcash" -> "GCash"
+        "maya" -> "Maya"
+        "bank" -> "Bank"
+        "card" -> "Card"
+        else -> if (!provider.isNullOrBlank()) provider.trim().replaceFirstChar { it.uppercase() } else ""
+    }
 }
 
 data class TierConfig(
@@ -249,13 +332,53 @@ enum class RiderStep(val stepKey: String) {
 
 data class WalletTransaction(
     val id: String = "",
-    val title: String = "",
+    val riderId: String = "",
+    val type: String = "cash_in", // "cash_in", "adjustment", etc.
     val amount: Double = 0.0,
+    val note: String = "",
     val dateText: String = "",
+    val dateRaw: Long = 0L,
+    val balanceAfter: Double? = null,
+    val title: String = "",
     val referenceNo: String = "",
-    val category: String = "Delivery",
+    val category: String = "Wallet",
     val isCredit: Boolean = true
-)
+) {
+    val isPositive: Boolean
+        get() = when {
+            amount > 0 -> true
+            amount < 0 -> false
+            type.lowercase() in listOf("cash_in", "top_up", "credit", "bonus", "reward") -> true
+            type.lowercase() in listOf("cash_out", "deduction", "fee", "penalty", "debit") -> false
+            else -> isCredit
+        }
+
+    val displayAmount: String
+        get() {
+            val sign = if (isPositive) "+" else "-"
+            return "$sign${String.format("%.2f", kotlin.math.abs(amount))}"
+        }
+
+    val formattedType: String
+        get() = formatType(type)
+
+    companion object {
+        fun formatType(rawType: String): String {
+            return when (rawType.trim().lowercase()) {
+                "cash_in" -> "Cash In"
+                "adjustment" -> "Adjustment"
+                "cash_out" -> "Cash Out"
+                "top_up" -> "Top Up"
+                "penalty" -> "Penalty"
+                "fee" -> "Fee"
+                else -> if (rawType.isNotBlank()) {
+                    rawType.replace("_", " ").split(" ")
+                        .joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
+                } else "Transaction"
+            }
+        }
+    }
+}
 
 data class AcceptOrderErrorDetails(
     val exceptionMessage: String = "",

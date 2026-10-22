@@ -4,7 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -13,8 +12,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -22,6 +19,7 @@ import androidx.compose.ui.unit.sp
 import com.example.data.models.WalletTransaction
 import com.example.ui.theme.*
 import com.example.viewmodel.RiderViewModel
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -30,14 +28,41 @@ fun WalletScreen(
     onBack: () -> Unit,
     onOpenEarnings: () -> Unit = {}
 ) {
+    // 1. Live wallet balance from riders/{uid}.walletBalance (snapshot listener)
     val walletBal by viewModel.walletBalance.collectAsState()
-    val cashOnHand by viewModel.cashOnHand.collectAsState()
-    val transactions by viewModel.transactions.collectAsState()
-    val currencySymbol by viewModel.currencySymbol.collectAsState()
 
-    var showCashOutDialog by remember { mutableStateOf(false) }
-    var cashOutMethod by remember { mutableStateOf("GCash") }
-    var cashOutAmountText by remember { mutableStateOf("500") }
+    // 2. Separate line for earnings available to withdraw (do not add together)
+    val earningsAvailable by viewModel.earningsAvailableToWithdraw.collectAsState()
+
+    // 3. Real COD cash collected and Remittance due
+    val totalCodCollected by viewModel.totalCodCollected.collectAsState()
+    val cashRemitted by viewModel.cashRemitted.collectAsState()
+    val remittanceDue by viewModel.remittanceDue.collectAsState()
+    val cashOnHand by viewModel.cashOnHand.collectAsState()
+
+    // 4. Wallet history query walletTransactions where riderId == current uid
+    val transactions by viewModel.transactions.collectAsState()
+
+    val currencySymbol by viewModel.currencySymbol.collectAsState()
+    val snackbarMessage by viewModel.snackbarMessage.collectAsState()
+    val listenerError by viewModel.listenerError.collectAsState()
+
+    val snackbarHostState = remember { SnackbarHostState() }
+    val coroutineScope = rememberCoroutineScope()
+
+    // Handle snackbar messages & real errors from reading
+    LaunchedEffect(snackbarMessage) {
+        snackbarMessage?.let { msg ->
+            snackbarHostState.showSnackbar(msg)
+            viewModel.clearToast()
+        }
+    }
+
+    LaunchedEffect(listenerError) {
+        listenerError?.let { err ->
+            snackbarHostState.showSnackbar(err)
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -53,6 +78,7 @@ fun WalletScreen(
                 )
             )
         },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         modifier = Modifier.testTag("wallet_screen")
     ) { padding ->
         LazyColumn(
@@ -73,7 +99,7 @@ fun WalletScreen(
                 ) {
                     Column(modifier = Modifier.padding(20.dp)) {
                         Text(
-                            text = "AVAILABLE WITHDRAWABLE BALANCE",
+                            text = "WALLET BALANCE",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -86,31 +112,89 @@ fun WalletScreen(
                             color = DelivioYellowDark
                         )
 
-                        Spacer(modifier = Modifier.height(16.dp))
+                        Spacer(modifier = Modifier.height(6.dp))
 
-                        // Cash on Hand vs Earnings Breakdown
+                        // Below it: separate line "Earnings available to withdraw" (do not add the two together)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = "Earnings available to withdraw: ",
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = "$currencySymbol${String.format("%.2f", earningsAvailable)}",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = DelivioGreenDark
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(18.dp))
+                        HorizontalDivider()
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        // Cash on Hand & Remittance Due using real values only
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Column {
-                                Text("Cash Collected (On-Hand)", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text("$currencySymbol${String.format("%.2f", cashOnHand)}", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                Text(
+                                    text = "Cash collected (on hand)",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = "$currencySymbol${String.format("%.2f", cashOnHand)}",
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                if (totalCodCollected > 0 && cashRemitted > 0) {
+                                    Text(
+                                        text = "Total COD: $currencySymbol${String.format("%.2f", totalCodCollected)}",
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                             Column(horizontalAlignment = Alignment.End) {
-                                Text("Remittance Due", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text("$currencySymbol${String.format("%.2f", (cashOnHand * 0.85).coerceAtLeast(0.0))}", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = DelivioRed)
+                                Text(
+                                    text = "Remittance due",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = "$currencySymbol${String.format("%.2f", remittanceDue)}",
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (remittanceDue > 0) DelivioRed else MaterialTheme.colorScheme.onSurface
+                                )
+                                if (cashRemitted > 0) {
+                                    Text(
+                                        text = "Remitted: $currencySymbol${String.format("%.2f", cashRemitted)}",
+                                        fontSize = 10.sp,
+                                        color = DelivioGreenDark
+                                    )
+                                }
                             }
                         }
 
                         Spacer(modifier = Modifier.height(20.dp))
 
+                        // Cash Out and Remit Cash buttons (show "Coming soon" message)
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             Button(
-                                onClick = { showCashOutDialog = true },
+                                onClick = {
+                                    coroutineScope.launch {
+                                        snackbarHostState.showSnackbar("Coming soon")
+                                    }
+                                },
                                 shape = RoundedCornerShape(14.dp),
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = DelivioYellow,
@@ -127,11 +211,16 @@ fun WalletScreen(
                             }
 
                             OutlinedButton(
-                                onClick = { viewModel.showToast("Remittance deposited at 7-Eleven / GCash partner kiosk.") },
+                                onClick = {
+                                    coroutineScope.launch {
+                                        snackbarHostState.showSnackbar("Coming soon")
+                                    }
+                                },
                                 shape = RoundedCornerShape(14.dp),
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(48.dp)
+                                    .testTag("remit_cash_button")
                             ) {
                                 Icon(Icons.Default.QrCodeScanner, contentDescription = "Remit", modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
@@ -157,183 +246,140 @@ fun WalletScreen(
                 }
             }
 
-            // Linked Payout Accounts
-            item {
-                Text("Linked Payout Accounts", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-            }
-
-            item {
-                Card(
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.PhoneAndroid, "GCash", tint = MaterialTheme.colorScheme.primary)
-                                Spacer(modifier = Modifier.width(12.dp))
-                                Column {
-                                    Text("GCash Account (Primary)", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                    Text("0917 •••• 1234 • Test Rider", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
-                            }
-                            Text("Default", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = DelivioYellow)
-                        }
-
-                        HorizontalDivider()
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.AccountBalance, "Maya", tint = MaterialTheme.colorScheme.secondary)
-                                Spacer(modifier = Modifier.width(12.dp))
-                                Column {
-                                    Text("Maya Wallet", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                    Text("0918 •••• 5678 • Test Rider", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
-                            }
-                            Text("Connected", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                }
-            }
-
-            // Payout Policy Note
-            item {
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier.padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Default.Info, contentDescription = "Info", tint = MaterialTheme.colorScheme.primary)
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Text(
-                            text = "Instant cash-outs to GCash and Maya are free for up to 3 transactions per week. Minimum payout is ₱100.00.",
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-
-            // Transaction History Header
+            // Wallet History Header
             item {
                 Text(
-                    text = "Transaction History",
+                    text = "Wallet history",
                     fontWeight = FontWeight.Bold,
                     fontSize = 17.sp,
                     color = MaterialTheme.colorScheme.onBackground
                 )
             }
 
-            items(transactions) { tx ->
-                TransactionRow(tx = tx, currencySymbol = currencySymbol)
-            }
-        }
-    }
-
-    if (showCashOutDialog) {
-        AlertDialog(
-            onDismissRequest = { showCashOutDialog = false },
-            title = { Text("Instant Cash Out", fontWeight = FontWeight.Bold) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("Select Destination:", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf("GCash", "Maya", "BDO", "BPI").forEach { method ->
-                            FilterChip(
-                                selected = cashOutMethod == method,
-                                onClick = { cashOutMethod = method },
-                                label = { Text(method) }
+            // Empty state or list of wallet transactions
+            if (transactions.isEmpty()) {
+                item {
+                    Card(
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp)
+                            .testTag("wallet_history_empty")
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(32.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ReceiptLong,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.outlineVariant,
+                                modifier = Modifier.size(48.dp)
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                text = "No wallet activity yet",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 16.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Top-ups, adjustments, and cash activity will appear here in real time.",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
                             )
                         }
                     }
-
-                    OutlinedTextField(
-                        value = cashOutAmountText,
-                        onValueChange = { cashOutAmountText = it },
-                        label = { Text("Amount ($currencySymbol)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
                 }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        val amount = cashOutAmountText.toDoubleOrNull() ?: 0.0
-                        if (viewModel.cashOut(amount, cashOutMethod)) {
-                            showCashOutDialog = false
-                        }
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = DelivioYellow, contentColor = TextOnYellow)
-                ) {
-                    Text("Confirm Payout", fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showCashOutDialog = false }) {
-                    Text("Cancel")
+            } else {
+                items(transactions, key = { it.id }) { tx ->
+                    TransactionRow(tx = tx, currencySymbol = currencySymbol)
                 }
             }
-        )
+        }
     }
 }
 
 @Composable
 private fun TransactionRow(tx: WalletTransaction, currencySymbol: String) {
     Card(
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("wallet_transaction_${tx.id}")
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(if (tx.isCredit) DelivioGreen.copy(alpha = 0.15f) else DelivioRed.copy(alpha = 0.15f)),
-                    contentAlignment = Alignment.Center
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                // Type chip / label (cash_in, adjustment, etc.)
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = if (tx.isPositive) DelivioGreen.copy(alpha = 0.12f) else DelivioRed.copy(alpha = 0.12f)
                 ) {
-                    Icon(
-                        imageVector = if (tx.isCredit) Icons.Default.ArrowDownward else Icons.Default.ArrowUpward,
-                        contentDescription = tx.category,
-                        tint = if (tx.isCredit) DelivioGreen else DelivioRed,
-                        modifier = Modifier.size(18.dp)
+                    Text(
+                        text = tx.type, // e.g. "cash_in", "adjustment"
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (tx.isPositive) DelivioGreenDark else DelivioRed,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                     )
                 }
-                Spacer(modifier = Modifier.width(12.dp))
-                Column {
-                    Text(tx.title, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                    Text("${tx.dateText} • ${tx.referenceNo}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
+
+                // Signed amount: green + or red -
+                val sign = if (tx.isPositive) "+" else "-"
+                val amountColor = if (tx.isPositive) DelivioGreenDark else DelivioRed
+                Text(
+                    text = "$sign$currencySymbol${String.format("%.2f", kotlin.math.abs(tx.amount))}",
+                    fontWeight = FontWeight.Black,
+                    fontSize = 16.sp,
+                    color = amountColor
+                )
             }
 
-            Text(
-                text = "${if (tx.isCredit) "+" else "-"}$currencySymbol${String.format("%.2f", tx.amount)}",
-                fontWeight = FontWeight.ExtraBold,
-                fontSize = 15.sp,
-                color = if (tx.isCredit) DelivioGreenDark else DelivioRed
-            )
+            // Note (if present)
+            if (tx.note.isNotBlank()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = tx.note,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Date and balanceAfter (if present)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = tx.dateText,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                if (tx.balanceAfter != null) {
+                    Text(
+                        text = "Balance after: $currencySymbol${String.format("%.2f", tx.balanceAfter)}",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
         }
     }
 }

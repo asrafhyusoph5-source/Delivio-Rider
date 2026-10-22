@@ -76,8 +76,14 @@ fun OrderDetailsSheet(
     var problemReason by remember { mutableStateOf("Merchant delay / waiting") }
     var showReleaseDialog by remember { mutableStateOf(false) }
     var releaseReason by remember { mutableStateOf("Emergency / Flat tire") }
-    var pabiliReceiptInput by remember { mutableStateOf("") }
+    var pabiliReceiptInput by remember(currentOrder?.id) {
+        mutableStateOf(if ((currentOrder?.finalReceiptTotal ?: 0.0) > 0.0) currentOrder?.finalReceiptTotal.toString() else "")
+    }
     var cashReceivedConfirmed by remember { mutableStateOf(false) }
+
+    LaunchedEffect(currentOrder?.id, currentOrder?.riderStep) {
+        cashReceivedConfirmed = false
+    }
 
     // Spring animation for sheet snap height
     val targetHeight = if (currentOrder == null) {
@@ -242,10 +248,18 @@ fun OrderDetailsSheet(
                 OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER,
                 OrderStepConstants.STEP_AT_RECIPIENT
             )
+            val isParcelPickupCashStep = order.isCod && order.isParcel && order.parcelCollectAtSender &&
+                    (stepLower in listOf(OrderStepConstants.STEP_AT_SENDER, OrderStepConstants.STEP_ARRIVED_AT_MERCHANT))
+            val isDeliveryCashStep = order.isCod && (
+                (!order.isParcel && isFinalStep) ||
+                (order.isParcel && !order.parcelCollectAtSender && isFinalStep)
+            )
+            val isCashCollectionStep = isParcelPickupCashStep || isDeliveryCashStep
+
             val isPabiliReceiptStep = order.serviceType == OrderStepConstants.SERVICE_PABILI &&
                     (stepLower in listOf(OrderStepConstants.STEP_AT_VENDOR, OrderStepConstants.STEP_ARRIVED_AT_MERCHANT))
             val pabiliReceiptValid = !isPabiliReceiptStep || (pabiliReceiptInput.toDoubleOrNull() != null && (pabiliReceiptInput.toDoubleOrNull() ?: 0.0) > 0.0)
-            val isSlideEnabled = if (isFinalStep && order.isCod) cashReceivedConfirmed else pabiliReceiptValid
+            val isSlideEnabled = if (isCashCollectionStep) cashReceivedConfirmed else pabiliReceiptValid
 
             when (sheetState) {
                 OrderSheetState.HIDDEN -> {
@@ -465,7 +479,8 @@ fun OrderDetailsSheet(
                                 )
                             }
 
-                            if (isFinalStep && order.isCod) {
+                            if (isCashCollectionStep) {
+                                val collectParty = if (order.isParcel && order.parcelCollectAtSender) "sender" else "customer"
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -478,10 +493,67 @@ fun OrderDetailsSheet(
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text(
-                                        text = "Cash received ($currencySymbol${String.format("%.2f", order.codCollected)})",
+                                        text = "Collect $currencySymbol${String.format("%.2f", order.cashAmountToCollect)} (Cash received from $collectParty)",
                                         fontWeight = FontWeight.Bold,
-                                        fontSize = 12.sp
+                                        fontSize = 12.sp,
+                                        color = Color(0xFFE65100)
                                     )
+                                }
+                            } else if (isFinalStep) {
+                                if (order.isPaidOnline) {
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = Color(0xFFE8F5E9),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(bottom = 4.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.CheckCircle,
+                                                contentDescription = null,
+                                                tint = Color(0xFF2E7D32),
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = "No cash to collect",
+                                                color = Color(0xFF2E7D32),
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                    }
+                                } else if (order.isPaymentUnknown) {
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = Color(0xFFFFEBEE),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(bottom = 4.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Warning,
+                                                contentDescription = null,
+                                                tint = Color(0xFFC62828),
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = "Payment unknown - contact support",
+                                                color = Color(0xFFC62828),
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                    }
                                 }
                             }
 
@@ -648,6 +720,13 @@ fun OrderDetailsSheet(
                         }
 
                         Spacer(modifier = Modifier.height(10.dp))
+                        PaymentBadgeChip(
+                            order = order,
+                            currencySymbol = currencySymbol,
+                            isLarge = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
 
                         val onContactSupport = {
                             val phone = supportPhone ?: "09170000000"
@@ -716,7 +795,8 @@ fun OrderDetailsSheet(
                         Spacer(modifier = Modifier.height(8.dp))
 
                         // Bottom pinned slide action in Expanded mode
-                        if (isFinalStep && order.isCod) {
+                        if (isCashCollectionStep) {
+                            val collectParty = if (order.isParcel && order.parcelCollectAtSender) "sender" else "customer"
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -729,10 +809,67 @@ fun OrderDetailsSheet(
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = "Cash received ($currencySymbol${String.format("%.2f", order.codCollected)})",
+                                    text = "Collect $currencySymbol${String.format("%.2f", order.cashAmountToCollect)} (Cash received from $collectParty)",
                                     fontWeight = FontWeight.Bold,
-                                    fontSize = 13.sp
+                                    fontSize = 13.sp,
+                                    color = Color(0xFFE65100)
                                 )
+                            }
+                        } else if (isFinalStep) {
+                            if (order.isPaidOnline) {
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = Color(0xFFE8F5E9),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(bottom = 6.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.CheckCircle,
+                                            contentDescription = null,
+                                            tint = Color(0xFF2E7D32),
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "No cash to collect",
+                                            color = Color(0xFF2E7D32),
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            } else if (order.isPaymentUnknown) {
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = Color(0xFFFFEBEE),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(bottom = 6.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Warning,
+                                            contentDescription = null,
+                                            tint = Color(0xFFC62828),
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "Payment unknown - contact support",
+                                            color = Color(0xFFC62828),
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
                             }
                         }
 
@@ -974,6 +1111,26 @@ private fun RequestRiderOrderContent(
                 onCall = onCall,
                 onNavigate = onNavigate
             )
+        }
+
+        Card(
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("Delivery Fee & Payment", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Delivery Fee", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Paid by merchant", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = DelivioGreenDark)
+                }
+                if (order.isCod) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("COD Amount to Collect", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("₱${String.format("%.2f", order.codAmount)} (from recipient)", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFFE65100))
+                    }
+                }
+            }
         }
     }
 }

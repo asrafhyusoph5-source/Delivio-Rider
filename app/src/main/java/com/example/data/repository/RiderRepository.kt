@@ -55,6 +55,9 @@ class RiderRepository {
     private val _newlyReachedTier = MutableStateFlow<TierConfig?>(null)
     val newlyReachedTier: StateFlow<TierConfig?> = _newlyReachedTier.asStateFlow()
 
+    private val _walletTransactions = MutableStateFlow<List<WalletTransaction>>(emptyList())
+    val walletTransactions: StateFlow<List<WalletTransaction>> = _walletTransactions.asStateFlow()
+
     private val _listenerError = MutableStateFlow<String?>(null)
     val listenerError: StateFlow<String?> = _listenerError.asStateFlow()
 
@@ -72,6 +75,7 @@ class RiderRepository {
     private var inboxAllListener: ListenerRegistration? = null
     private var inboxReadsListener: ListenerRegistration? = null
     private var coinTxListener: ListenerRegistration? = null
+    private var walletTransactionsListener: ListenerRegistration? = null
 
     private var inboxDirectList = emptyList<MessageNotification>()
     private var inboxAllList = emptyList<MessageNotification>()
@@ -83,7 +87,11 @@ class RiderRepository {
         // 1. Listen to riders/{uid}
         riderListener = db.collection("riders").document(uid)
             .addSnapshotListener { snapshot, error ->
-                if (error != null || snapshot == null || !snapshot.exists()) return@addSnapshotListener
+                if (error != null) {
+                    _listenerError.value = "Rider profile listener: ${error.localizedMessage}"
+                    return@addSnapshotListener
+                }
+                if (snapshot == null || !snapshot.exists()) return@addSnapshotListener
                 val allowed = (snapshot.get("allowedServices") as? List<*>)?.mapNotNull { it?.toString() }
                     ?: OrderStepConstants.ALL_SERVICES
                 val active = (snapshot.get("activeServices") as? List<*>)?.mapNotNull { it?.toString() }
@@ -112,6 +120,7 @@ class RiderRepository {
                     status = snapshot.getString("status") ?: "active",
                     allowedServices = allowed,
                     activeServices = active,
+                    walletBalance = snapshot.getDouble("walletBalance") ?: 0.0,
                     cashRemitted = snapshot.getDouble("cashRemitted") ?: 0.0,
                     coins = snapshot.getLong("coins")?.toInt() ?: 0,
                     totalTrips = snapshot.getLong("totalTrips")?.toInt() ?: 0,
@@ -266,6 +275,20 @@ class RiderRepository {
         db.collection("settings").document("platform").get()
             .addOnSuccessListener { doc ->
                 _supportPhone.value = doc.getString("supportPhone")
+            }
+
+        // 11. Wallet history: query walletTransactions where riderId == uid (no orderBy; sort newest first in code)
+        walletTransactionsListener = db.collection("walletTransactions")
+            .whereEqualTo("riderId", uid)
+            .addSnapshotListener { snapshots, error ->
+                if (error != null) {
+                    _listenerError.value = "Wallet history error: ${error.localizedMessage}"
+                    return@addSnapshotListener
+                }
+                if (snapshots == null) return@addSnapshotListener
+                val txs = snapshots.documents.mapNotNull { parseWalletTransaction(it) }
+                    .sortedByDescending { it.dateRaw } // Sort newest first in code (no orderBy)
+                _walletTransactions.value = txs
             }
     }
 
@@ -701,8 +724,11 @@ class RiderRepository {
         )
         updates["statusHistory"] = FieldValue.arrayUnion(historyEntry)
 
-        // If completed: compute riderEarning
+        // If completed: compute riderEarning and codCollected
         if (nextStep == OrderStepConstants.STEP_COMPLETED || nextStatus == OrderStepConstants.STATUS_DELIVERED) {
+            val codAmountToWrite = if (order.isCod) order.cashAmountToCollect else 0.0
+            updates["codCollected"] = codAmountToWrite
+
             val cityId = order.cityId.ifEmpty { _rider.value?.cityId ?: "puerto_princesa" }
             db.collection("deliveryRates").document(cityId).get()
                 .addOnSuccessListener { rateDoc ->
@@ -830,6 +856,75 @@ class RiderRepository {
         inboxAllListener?.remove()
         inboxReadsListener?.remove()
         coinTxListener?.remove()
+        walletTransactionsListener?.remove()
+    }
+
+    // Helpers
+    private fun parseWalletTransaction(doc: DocumentSnapshot): WalletTransaction? {
+        try {
+            val id = doc.id
+            val riderId = doc.getString("riderId") ?: ""
+            val type = doc.getString("type") ?: doc.getString("transactionType") ?: "cash_in"
+            val amount = doc.getDouble("amount")
+                ?: (doc.getLong("amount")?.toDouble() ?: 0.0)
+            val note = doc.getString("note")
+                ?: doc.getString("description")
+                ?: doc.getString("remarks")
+                ?: ""
+            val balanceAfter = doc.getDouble("balanceAfter")
+                ?: doc.getLong("balanceAfter")?.toDouble()
+
+            val rawDate = doc.get("createdAt")
+                ?: doc.get("date")
+                ?: doc.get("timestamp")
+
+            var dateRaw = 0L
+            val dateText = when (rawDate) {
+                is com.google.firebase.Timestamp -> {
+                    dateRaw = rawDate.toDate().time
+                    val sdf = SimpleDateFormat("MMM dd, yyyy • hh:mm a", Locale.getDefault())
+                    sdf.format(rawDate.toDate())
+                }
+                is Date -> {
+                    dateRaw = rawDate.time
+                    val sdf = SimpleDateFormat("MMM dd, yyyy • hh:mm a", Locale.getDefault())
+                    sdf.format(rawDate)
+                }
+                is Number -> {
+                    val num = rawDate.toLong()
+                    val millis = if (num < 1000000000000L) num * 1000L else num
+                    dateRaw = millis
+                    val sdf = SimpleDateFormat("MMM dd, yyyy • hh:mm a", Locale.getDefault())
+                    sdf.format(Date(millis))
+                }
+                else -> {
+                    val str = doc.getString("dateText") ?: doc.getString("date") ?: doc.getString("createdAt") ?: ""
+                    if (str.isNotBlank()) {
+                        try {
+                            dateRaw = java.time.Instant.parse(str).toEpochMilli()
+                        } catch (_: Exception) {}
+                    }
+                    str.ifBlank { "Recent" }
+                }
+            }
+
+            return WalletTransaction(
+                id = id,
+                riderId = riderId,
+                type = type,
+                amount = amount,
+                note = note,
+                dateText = dateText,
+                dateRaw = dateRaw,
+                balanceAfter = balanceAfter,
+                title = if (note.isNotBlank()) note else WalletTransaction.formatType(type),
+                referenceNo = "TXN-${id.takeLast(6).uppercase()}",
+                category = type,
+                isCredit = amount >= 0 && type.lowercase() !in listOf("cash_out", "deduction", "fee", "penalty", "debit")
+            )
+        } catch (e: Exception) {
+            return null
+        }
     }
 
     // Helpers
@@ -904,11 +999,26 @@ class RiderRepository {
             val distanceFare = doc.getDouble("distanceFare") ?: 30.0
             val tip = doc.getDouble("tip") ?: 0.0
             val surgeBonus = doc.getDouble("surgeBonus") ?: 0.0
-            val deliveryFee = (doc.get("fees") as? Map<*, *>)?.get("deliveryFee")?.let { (it as? Number)?.toDouble() }
-                ?: doc.getDouble("deliveryFee") ?: (baseFare + distanceFare + surgeBonus)
+            val feesMap = doc.get("fees") as? Map<*, *>
+            val feesDeliveryFee = (feesMap?.get("deliveryFee") as? Number)?.toDouble() ?: doc.getDouble("deliveryFee") ?: (baseFare + distanceFare + surgeBonus)
+            val feesServiceFee = (feesMap?.get("serviceFee") as? Number)?.toDouble() ?: doc.getDouble("serviceFee") ?: 0.0
+            val feesTotal = (feesMap?.get("total") as? Number)?.toDouble()
+                ?: doc.getDouble("totalAmount")
+                ?: doc.getDouble("totalFee")
+                ?: (feesDeliveryFee + feesServiceFee)
 
-            val isCod = doc.getBoolean("isCod") ?: (doc.getString("paymentType")?.lowercase() == "cod" || doc.getString("paymentType")?.lowercase() == "cash")
-            val codCollected = doc.getDouble("codCollected") ?: (if (isCod) (doc.getDouble("totalAmountToCollect") ?: 0.0) else 0.0)
+            // 1. READ PAYMENT FROM THE ORDER (never default to "Paid Online")
+            // Read orders.paymentMethod, trimmed and lower-cased. "cod", "cash", "cash on delivery" = COD. "wallet" or "online" = Paid Online. If missing or unknown, show "Payment unknown - contact support"
+            val paymentMethod = doc.getString("paymentMethod")
+                ?: doc.getString("paymentType")
+                ?: ""
+            val paymentProvider = doc.getString("paymentProvider") ?: ""
+            val cashToCollect = doc.getDouble("cashToCollect")
+                ?: doc.getDouble("totalAmountToCollect")
+                ?: 0.0
+            val cashCollectAt = doc.getString("cashCollectAt") ?: ""
+            val codAmount = doc.getDouble("codAmount") ?: 0.0
+            val codCollected = doc.getDouble("codCollected") ?: 0.0
 
             val parcelMap = doc.get("parcel") as? Map<*, *>
             val parcelSize = parcelMap?.get("size")?.toString() ?: doc.getString("parcelSize") ?: "M"
@@ -962,8 +1072,15 @@ class RiderRepository {
                 distanceFare = distanceFare,
                 tip = tip,
                 surgeBonus = surgeBonus,
-                deliveryFee = deliveryFee,
-                isCod = isCod,
+                deliveryFee = feesDeliveryFee,
+                paymentMethod = paymentMethod,
+                paymentProvider = paymentProvider,
+                cashToCollect = cashToCollect,
+                cashCollectAt = cashCollectAt,
+                codAmount = codAmount,
+                feesTotal = feesTotal,
+                feesDeliveryFee = feesDeliveryFee,
+                feesServiceFee = feesServiceFee,
                 codCollected = codCollected,
                 parcelSize = parcelSize,
                 parcelWeightKg = parcelWeightKg,

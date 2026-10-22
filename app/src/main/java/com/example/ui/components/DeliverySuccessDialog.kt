@@ -104,7 +104,15 @@ fun DeliverySuccessDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(14.dp))
+                PaymentBadgeChip(
+                    order = order,
+                    currencySymbol = currencySymbol,
+                    isLarge = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
 
                 // Breakdown list
                 Column(
@@ -133,10 +141,18 @@ fun DeliverySuccessDialog(
                     }
                     FareRow("Platform Commission", "-$currencySymbol${String.format("%.2f", order.platformCommission)}")
 
-                    val codAmount = if (order.isCod) order.codCollected else 0.0
-                    if (codAmount > 0) {
-                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-                        FareRow("COD Cash Collected", "$currencySymbol${String.format("%.2f", codAmount)}", isBold = true)
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                    if (order.isCod) {
+                        FareRow("COD Cash Collected", "$currencySymbol${String.format("%.2f", order.codCollected)}", isBold = true)
+                    } else if (order.isPaidOnline) {
+                        val provider = if (order.paymentProviderLabel.isNotBlank()) " (${order.paymentProviderLabel})" else ""
+                        FareRow("Payment", "Paid Online$provider", isBold = true)
+                    } else {
+                        FareRow("Payment", "Payment unknown - contact support", isBold = true)
+                    }
+
+                    if (order.isRequestRider) {
+                        FareRow("Delivery Fee", "Paid by merchant")
                     }
                 }
 
