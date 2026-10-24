@@ -162,6 +162,27 @@ fun IncomingOrderDialog(
                             currencySymbol = currencySymbol,
                             isLarge = true
                         )
+                        if (order.tip > 0 || order.isScheduled) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                if (order.tip > 0) {
+                                    TipBadgeChip(
+                                        tipAmount = order.tip,
+                                        currencySymbol = currencySymbol,
+                                        isLarge = true
+                                    )
+                                }
+                                if (order.isScheduled) {
+                                    ScheduledOrderChip(
+                                        order = order,
+                                        isLarge = true
+                                    )
+                                }
+                            }
+                        }
                         if (order.isRequestRider) {
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(

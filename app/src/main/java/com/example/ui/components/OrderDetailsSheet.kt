@@ -462,6 +462,32 @@ fun OrderDetailsSheet(
                                     }
                                 }
                             }
+
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                PaymentBadgeChip(
+                                    order = order,
+                                    currencySymbol = currencySymbol,
+                                    isLarge = false
+                                )
+                                if (order.tip > 0) {
+                                    TipBadgeChip(
+                                        tipAmount = order.tip,
+                                        currencySymbol = currencySymbol,
+                                        isLarge = false
+                                    )
+                                }
+                                if (order.isScheduled) {
+                                    ScheduledOrderChip(
+                                        order = order,
+                                        isLarge = false
+                                    )
+                                }
+                            }
                         }
 
                         // Bottom Actions: Pabili input / COD Checkbox & Slide Button
@@ -726,6 +752,28 @@ fun OrderDetailsSheet(
                             isLarge = true,
                             modifier = Modifier.fillMaxWidth()
                         )
+                        if (order.tip > 0 || order.isScheduled) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                if (order.tip > 0) {
+                                    TipBadgeChip(
+                                        tipAmount = order.tip,
+                                        currencySymbol = currencySymbol,
+                                        isLarge = true
+                                    )
+                                }
+                                if (order.isScheduled) {
+                                    ScheduledOrderChip(
+                                        order = order,
+                                        isLarge = true
+                                    )
+                                }
+                            }
+                        }
                         Spacer(modifier = Modifier.height(8.dp))
 
                         val onContactSupport = {

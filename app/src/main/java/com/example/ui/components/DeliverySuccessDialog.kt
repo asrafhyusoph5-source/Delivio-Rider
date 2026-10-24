@@ -111,6 +111,15 @@ fun DeliverySuccessDialog(
                     isLarge = true,
                     modifier = Modifier.fillMaxWidth()
                 )
+                if (order.tip > 0) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    TipBadgeChip(
+                        tipAmount = order.tip,
+                        currencySymbol = currencySymbol,
+                        isLarge = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
 
                 Spacer(modifier = Modifier.height(14.dp))
 

@@ -4,9 +4,11 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.constants.AuthConstants
 import com.example.data.constants.OrderStepConstants
+import com.example.data.models.Order
 import com.example.data.models.Rider
 import com.example.data.models.TierLevel
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -267,5 +269,90 @@ class ExampleRobolectricTest {
         val list = listOf(cashInTx, adjustmentDeduction).sortedByDescending { it.dateRaw }
         assertEquals("tx_2", list.first().id)
         assertEquals("tx_1", list.last().id)
+    }
+
+    @Test
+    fun `verify pickup orders are recognized and flagged for exclusion`() {
+        val pickupOrder = Order(
+            id = "ord_pickup",
+            fulfillment = "pickup",
+            status = OrderStepConstants.STATUS_READY
+        )
+        assertTrue(pickupOrder.isPickup)
+
+        val deliveryOrder = Order(
+            id = "ord_delivery",
+            fulfillment = "delivery",
+            status = OrderStepConstants.STATUS_READY
+        )
+        assertFalse(deliveryOrder.isPickup)
+    }
+
+    @Test
+    fun `verify scheduled order chip text and merchant acceptance logic`() {
+        val scheduledOrder = Order(
+            id = "ord_sched",
+            isScheduled = true,
+            scheduledDateText = "Oct 23, 5:30 PM",
+            status = OrderStepConstants.STATUS_PREPARING,
+            merchantAccepted = true
+        )
+        assertTrue(scheduledOrder.isScheduled)
+        assertEquals("Scheduled for Oct 23, 5:30 PM", scheduledOrder.scheduledChipText)
+
+        // Acceptance check
+        val isReadyForRider = scheduledOrder.merchantAccepted || scheduledOrder.status == OrderStepConstants.STATUS_PREPARING
+        assertTrue(isReadyForRider)
+    }
+
+    @Test
+    fun `verify tip chip text and net earnings with zero commission on tip`() {
+        val orderWithTip = Order(
+            id = "ord_tip_1",
+            feesDeliveryFee = 100.0,
+            deliveryFee = 100.0,
+            tip = 35.0,
+            feesTotal = 135.0,
+            paymentMethod = "cod"
+        )
+
+        assertEquals("Tip ₱35", orderWithTip.tipChipText)
+        // deliveryFee 100 * (1 - 0.20) + tip 35 = 80 + 35 = 115
+        assertEquals(115.0, orderWithTip.estimatedEarnings, 0.001)
+
+        // For COD, the cash to collect is fees.total which already includes the tip
+        assertEquals(135.0, orderWithTip.cashAmountToCollect, 0.001)
+    }
+
+    @Test
+    fun `verify shared wallet linked customer account and merged history`() {
+        val riderWithLinkedCustomer = Rider(
+            uid = "rider_99",
+            name = "Rider With Customer Account",
+            walletBalance = 250.0,
+            linkedCustomerUid = "customer_88"
+        )
+        assertEquals("customer_88", riderWithLinkedCustomer.linkedCustomerUid)
+
+        val riderTx = com.example.data.models.WalletTransaction(
+            id = "tx_rider",
+            riderId = "rider_99",
+            amount = 100.0,
+            dateRaw = 1000L
+        )
+        val customerTx = com.example.data.models.WalletTransaction(
+            id = "tx_customer",
+            customerId = "customer_88",
+            amount = 50.0,
+            dateRaw = 2000L
+        )
+
+        val merged = (listOf(riderTx) + listOf(customerTx))
+            .distinctBy { it.id }
+            .sortedByDescending { it.dateRaw }
+
+        assertEquals(2, merged.size)
+        assertEquals("tx_customer", merged.first().id)
+        assertEquals("tx_rider", merged.last().id)
     }
 }

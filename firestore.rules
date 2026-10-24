@@ -38,7 +38,9 @@ service cloud.firestore {
 
     match /users/{uid} {
       allow read: if signedIn() && (request.auth.uid == uid || isAdmin()
-        || (isMerchant() && resource.data.merchantId == request.auth.uid));
+        || (isMerchant() && resource.data.merchantId == request.auth.uid)
+        || (exists(/databases/$(db)/documents/riders/$(request.auth.uid))
+            && get(/databases/$(db)/documents/riders/$(request.auth.uid)).data.get('linkedCustomerUid', '') == uid));
       allow create: if signedIn() && (
         (request.auth.uid == uid
           && request.resource.data.role == 'customer'
@@ -175,7 +177,13 @@ service cloud.firestore {
     }
 
     match /walletTransactions/{tid} {
-      allow read: if signedIn() && (resource.data.riderId == request.auth.uid || isAdmin());
+      allow read: if signedIn() && (
+        resource.data.riderId == request.auth.uid
+        || resource.data.customerId == request.auth.uid
+        || (exists(/databases/$(db)/documents/riders/$(request.auth.uid))
+            && get(/databases/$(db)/documents/riders/$(request.auth.uid)).data.get('linkedCustomerUid', '') == resource.data.customerId)
+        || isAdmin()
+      );
       allow write: if isAdmin();
     }
   }

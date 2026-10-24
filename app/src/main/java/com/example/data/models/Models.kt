@@ -34,6 +34,7 @@ data class Rider(
     val allowedServices: List<String> = listOf("food", "convenience", "parcel", "pabili", "request_rider"),
     val activeServices: List<String> = listOf("food", "convenience", "parcel", "pabili", "request_rider"),
     val walletBalance: Double = 0.0,
+    val linkedCustomerUid: String? = null,
     val cashRemitted: Double = 0.0,
     val coins: Int = 0,
     val totalTrips: Int = 0,
@@ -87,6 +88,13 @@ data class Order(
     val riderPhotoUrl: String? = null,
     val cityId: String = "",
     val merchantId: String = "",
+
+    // Fulfillment & Scheduling
+    val fulfillment: String = "delivery",
+    val isScheduled: Boolean = false,
+    val scheduledFor: Any? = null,
+    val scheduledDateText: String = "",
+    val merchantAccepted: Boolean = false,
 
     // Merchant / Pickup
     val merchantName: String = "",
@@ -157,7 +165,20 @@ data class Order(
     val releaseReason: String? = null
 ) {
     val estimatedEarnings: Double
-        get() = (if (deliveryFee > 0) deliveryFee else (baseFare + distanceFare + surgeBonus)) + tip + waitingPay + extraStopPay + returnTripPay + urgentBonus - platformCommission
+        get() {
+            val baseDelivery = if (feesDeliveryFee > 0.0) feesDeliveryFee else if (deliveryFee > 0.0) deliveryFee else (baseFare + distanceFare + surgeBonus)
+            val netDelivery = if (platformCommission > 0.0) (baseDelivery - platformCommission) else (baseDelivery * 0.8)
+            return netDelivery + tip + waitingPay + extraStopPay + returnTripPay + urgentBonus
+        }
+
+    val isPickup: Boolean
+        get() = fulfillment.trim().equals("pickup", ignoreCase = true)
+
+    val scheduledChipText: String
+        get() = if (scheduledDateText.isNotBlank()) "Scheduled for $scheduledDateText" else "Scheduled delivery"
+
+    val tipChipText: String
+        get() = if (tip % 1.0 == 0.0) "Tip ₱${String.format("%.0f", tip)}" else "Tip ₱${String.format("%.2f", tip)}"
 
     val isRequestRider: Boolean
         get() = serviceType == OrderStepConstants.SERVICE_REQUEST
@@ -185,9 +206,9 @@ data class Order(
                 cashCollectAt.trim().lowercase() == "sender"
 
     // Section 2: CASH TO COLLECT
-    // COD, food or convenience: orders.cashToCollect, falling back to fees.total, collected from customer at delivery.
+    // For COD, the cash to collect is fees.total, which already includes the tip.
     // COD, parcel: cashToCollect, from party in cashCollectAt ("sender" at pickup, "recipient" at delivery).
-    // COD, pabili: finalReceiptTotal (estimated items total until receipt entered) + fees.deliveryFee + fees.serviceFee, collected at delivery.
+    // COD, pabili: finalReceiptTotal + fees.deliveryFee + fees.serviceFee + tip, collected at delivery.
     // request_rider: codAmount (collected from recipient). Delivery fee shows "Paid by merchant".
     // Paid Online or wallet: no cash to collect.
     val cashAmountToCollect: Double
@@ -199,11 +220,11 @@ data class Order(
                 OrderStepConstants.SERVICE_PARCEL -> cashToCollect
                 OrderStepConstants.SERVICE_PABILI -> {
                     val itemsTotal = if (finalReceiptTotal > 0.0) finalReceiptTotal else pabiliEstimatedTotal
-                    itemsTotal + feesDeliveryFee + feesServiceFee
+                    itemsTotal + feesDeliveryFee + feesServiceFee + tip
                 }
                 OrderStepConstants.SERVICE_REQUEST, "request" -> codAmount
                 else -> {
-                    // Food or convenience (Instant)
+                    // COD food or convenience: cashToCollect, falling back to fees.total (which includes tip)
                     if (cashToCollect > 0.0) cashToCollect else feesTotal
                 }
             }
@@ -333,6 +354,7 @@ enum class RiderStep(val stepKey: String) {
 data class WalletTransaction(
     val id: String = "",
     val riderId: String = "",
+    val customerId: String = "",
     val type: String = "cash_in", // "cash_in", "adjustment", etc.
     val amount: Double = 0.0,
     val note: String = "",

@@ -43,6 +43,7 @@ fun WalletScreen(
     // 4. Wallet history query walletTransactions where riderId == current uid
     val transactions by viewModel.transactions.collectAsState()
 
+    val isSharedWallet by viewModel.isSharedWallet.collectAsState()
     val currencySymbol by viewModel.currencySymbol.collectAsState()
     val snackbarMessage by viewModel.snackbarMessage.collectAsState()
     val listenerError by viewModel.listenerError.collectAsState()
@@ -99,10 +100,10 @@ fun WalletScreen(
                 ) {
                     Column(modifier = Modifier.padding(20.dp)) {
                         Text(
-                            text = "WALLET BALANCE",
-                            fontSize = 11.sp,
+                            text = if (isSharedWallet) "Shared wallet (linked to your customer account)" else "WALLET BALANCE",
+                            fontSize = if (isSharedWallet) 12.sp else 11.sp,
                             fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = if (isSharedWallet) DelivioGreenDark else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(

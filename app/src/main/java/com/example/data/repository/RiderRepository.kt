@@ -58,6 +58,12 @@ class RiderRepository {
     private val _walletTransactions = MutableStateFlow<List<WalletTransaction>>(emptyList())
     val walletTransactions: StateFlow<List<WalletTransaction>> = _walletTransactions.asStateFlow()
 
+    private val _sharedCustomerWalletBalance = MutableStateFlow<Double?>(null)
+    val sharedCustomerWalletBalance: StateFlow<Double?> = _sharedCustomerWalletBalance.asStateFlow()
+
+    private val _riderTransactions = MutableStateFlow<List<WalletTransaction>>(emptyList())
+    private val _customerTransactions = MutableStateFlow<List<WalletTransaction>>(emptyList())
+
     private val _listenerError = MutableStateFlow<String?>(null)
     val listenerError: StateFlow<String?> = _listenerError.asStateFlow()
 
@@ -67,6 +73,9 @@ class RiderRepository {
 
     // Listener registrations
     private var riderListener: ListenerRegistration? = null
+    private var linkedUserListener: ListenerRegistration? = null
+    private var customerTransactionsListener: ListenerRegistration? = null
+    private var currentLinkedCustomerUid: String? = null
     private var activeOrdersListener: ListenerRegistration? = null
     private var offersListener: ListenerRegistration? = null
     private var deliveredOrdersListener: ListenerRegistration? = null
@@ -80,6 +89,53 @@ class RiderRepository {
     private var inboxDirectList = emptyList<MessageNotification>()
     private var inboxAllList = emptyList<MessageNotification>()
     private var readMessageIds = emptySet<String>()
+
+    private fun mergeWalletTransactions() {
+        val merged = (_riderTransactions.value + _customerTransactions.value)
+            .distinctBy { it.id }
+            .sortedByDescending { it.dateRaw }
+        _walletTransactions.value = merged
+    }
+
+    private fun syncLinkedCustomer(linkedUid: String?) {
+        if (linkedUid == currentLinkedCustomerUid) return
+        currentLinkedCustomerUid = linkedUid
+
+        linkedUserListener?.remove()
+        linkedUserListener = null
+        customerTransactionsListener?.remove()
+        customerTransactionsListener = null
+
+        if (linkedUid != null) {
+            // Live balance from users/{linkedCustomerUid}.walletBalance
+            linkedUserListener = db.collection("users").document(linkedUid)
+                .addSnapshotListener { userDoc, error ->
+                    if (error != null) {
+                        _listenerError.value = "Shared customer wallet error: ${error.localizedMessage}"
+                        return@addSnapshotListener
+                    }
+                    val bal = userDoc?.getDouble("walletBalance") ?: 0.0
+                    _sharedCustomerWalletBalance.value = bal
+                }
+
+            // Query walletTransactions where customerId == linkedCustomerUid (no orderBy; sort in code)
+            customerTransactionsListener = db.collection("walletTransactions")
+                .whereEqualTo("customerId", linkedUid)
+                .addSnapshotListener { snapshots, error ->
+                    if (error != null) {
+                        _listenerError.value = "Customer wallet history error: ${error.localizedMessage}"
+                        return@addSnapshotListener
+                    }
+                    val txs = snapshots?.documents?.mapNotNull { parseWalletTransaction(it) } ?: emptyList()
+                    _customerTransactions.value = txs
+                    mergeWalletTransactions()
+                }
+        } else {
+            _sharedCustomerWalletBalance.value = null
+            _customerTransactions.value = emptyList()
+            mergeWalletTransactions()
+        }
+    }
 
     fun startListeningForRider(uid: String, userPrefs: UserPreferencesRepository) {
         stopListening()
@@ -105,6 +161,8 @@ class RiderRepository {
                     color = vehicleMap?.get("color")?.toString() ?: ""
                 )
 
+                val linkedCustomerUid = snapshot.getString("linkedCustomerUid")?.trim()?.takeIf { it.isNotEmpty() }
+
                 val r = Rider(
                     uid = uid,
                     riderCode = snapshot.getString("riderCode") ?: snapshot.getString("code") ?: ("RD-" + uid.takeLast(4).uppercase()),
@@ -121,6 +179,7 @@ class RiderRepository {
                     allowedServices = allowed,
                     activeServices = active,
                     walletBalance = snapshot.getDouble("walletBalance") ?: 0.0,
+                    linkedCustomerUid = linkedCustomerUid,
                     cashRemitted = snapshot.getDouble("cashRemitted") ?: 0.0,
                     coins = snapshot.getLong("coins")?.toInt() ?: 0,
                     totalTrips = snapshot.getLong("totalTrips")?.toInt() ?: 0,
@@ -129,6 +188,8 @@ class RiderRepository {
                 )
                 _rider.value = r
                 _coins.value = r.coins
+
+                syncLinkedCustomer(linkedCustomerUid)
             }
 
         // 2. Listen to active orders assigned to rider (find active order by rider, not by status in query)
@@ -174,6 +235,10 @@ class RiderRepository {
                 // Find candidate offer
                 val eligibleOffer = snapshots.documents.mapNotNull { parseOrder(it) }.firstOrNull { order ->
                     if (declinedIds.contains(order.id)) return@firstOrNull false
+
+                    // Never offer orders where fulfillment == "pickup" (filter in code)
+                    if (order.isPickup) return@firstOrNull false
+
                     if (!currentRider.activeServices.contains(order.serviceType)) return@firstOrNull false
                     if (!currentRider.allowedServices.contains(order.serviceType)) return@firstOrNull false
                     if (order.cityId.isNotEmpty() && currentRider.cityId.isNotEmpty() && order.cityId != currentRider.cityId) {
@@ -186,18 +251,26 @@ class RiderRepository {
                         if (distKm > 8.0) return@firstOrNull false
                     }
 
-                    // Readiness check
-                    when (order.serviceType) {
-                        OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_INSTANT -> {
-                            order.status == OrderStepConstants.STATUS_PREPARING || order.status == OrderStepConstants.STATUS_READY
+                    // Readiness check:
+                    // Scheduled-delivery orders are offered normally once the merchant accepts
+                    if (order.isScheduled) {
+                        order.merchantAccepted ||
+                            order.status == OrderStepConstants.STATUS_PREPARING ||
+                            order.status == OrderStepConstants.STATUS_READY ||
+                            order.status != OrderStepConstants.STATUS_PLACED_ORDER
+                    } else {
+                        when (order.serviceType) {
+                            OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_INSTANT -> {
+                                order.status == OrderStepConstants.STATUS_PREPARING || order.status == OrderStepConstants.STATUS_READY
+                            }
+                            OrderStepConstants.SERVICE_REQUEST -> {
+                                order.riderRequestStatus == OrderStepConstants.REQ_SEARCHING
+                            }
+                            OrderStepConstants.SERVICE_PARCEL, OrderStepConstants.SERVICE_PABILI -> {
+                                order.status == OrderStepConstants.STATUS_PLACED_ORDER
+                            }
+                            else -> false
                         }
-                        OrderStepConstants.SERVICE_REQUEST -> {
-                            order.riderRequestStatus == OrderStepConstants.REQ_SEARCHING
-                        }
-                        OrderStepConstants.SERVICE_PARCEL, OrderStepConstants.SERVICE_PABILI -> {
-                            order.status == OrderStepConstants.STATUS_PLACED_ORDER
-                        }
-                        else -> false
                     }
                 }
 
@@ -286,9 +359,8 @@ class RiderRepository {
                     return@addSnapshotListener
                 }
                 if (snapshots == null) return@addSnapshotListener
-                val txs = snapshots.documents.mapNotNull { parseWalletTransaction(it) }
-                    .sortedByDescending { it.dateRaw } // Sort newest first in code (no orderBy)
-                _walletTransactions.value = txs
+                _riderTransactions.value = snapshots.documents.mapNotNull { parseWalletTransaction(it) }
+                mergeWalletTransactions()
             }
     }
 
@@ -857,6 +929,11 @@ class RiderRepository {
         inboxReadsListener?.remove()
         coinTxListener?.remove()
         walletTransactionsListener?.remove()
+        linkedUserListener?.remove()
+        linkedUserListener = null
+        customerTransactionsListener?.remove()
+        customerTransactionsListener = null
+        currentLinkedCustomerUid = null
     }
 
     // Helpers
@@ -864,6 +941,7 @@ class RiderRepository {
         try {
             val id = doc.id
             val riderId = doc.getString("riderId") ?: ""
+            val customerId = doc.getString("customerId") ?: ""
             val type = doc.getString("type") ?: doc.getString("transactionType") ?: "cash_in"
             val amount = doc.getDouble("amount")
                 ?: (doc.getLong("amount")?.toDouble() ?: 0.0)
@@ -911,6 +989,7 @@ class RiderRepository {
             return WalletTransaction(
                 id = id,
                 riderId = riderId,
+                customerId = customerId,
                 type = type,
                 amount = amount,
                 note = note,
@@ -924,6 +1003,30 @@ class RiderRepository {
             )
         } catch (e: Exception) {
             return null
+        }
+    }
+
+    private fun formatScheduledDate(raw: Any?): String {
+        if (raw == null) return ""
+        return when (raw) {
+            is com.google.firebase.Timestamp -> {
+                val sdf = SimpleDateFormat("MMM d, h:mm a", Locale.getDefault())
+                sdf.format(raw.toDate())
+            }
+            is Date -> {
+                val sdf = SimpleDateFormat("MMM d, h:mm a", Locale.getDefault())
+                sdf.format(raw)
+            }
+            is Number -> {
+                val num = raw.toLong()
+                val millis = if (num < 1000000000000L) num * 1000L else num
+                val sdf = SimpleDateFormat("MMM d, h:mm a", Locale.getDefault())
+                sdf.format(Date(millis))
+            }
+            is String -> {
+                raw.trim()
+            }
+            else -> raw.toString()
         }
     }
 
@@ -942,6 +1045,21 @@ class RiderRepository {
             val cityId = doc.getString("cityId") ?: ""
 
             val merchantId = doc.getString("merchantId") ?: ""
+
+            val fulfillment = doc.getString("fulfillment") ?: doc.getString("fulfillmentType") ?: "delivery"
+            val isScheduled = doc.getBoolean("isScheduled")
+                ?: (doc.getString("deliveryType")?.equals("scheduled", ignoreCase = true) == true
+                    || doc.getString("orderType")?.equals("scheduled", ignoreCase = true) == true
+                    || doc.get("scheduledFor") != null
+                    || doc.get("scheduledDeliveryAt") != null
+                    || doc.getString("scheduleDate") != null)
+            val scheduledForRaw = doc.get("scheduledFor")
+                ?: doc.get("scheduledDeliveryAt")
+                ?: doc.getString("scheduledTime")
+                ?: doc.getString("scheduleDate")
+            val scheduledDateText = formatScheduledDate(scheduledForRaw)
+            val merchantAccepted = doc.getBoolean("merchantAccepted")
+                ?: (status == OrderStepConstants.STATUS_PREPARING || status == OrderStepConstants.STATUS_READY)
 
             // 1. Pickup location: orders.pickup.lat/lng or merchant.latitude/longitude
             val pickupMap = (doc.get("pickup") as? Map<*, *>) ?: (doc.get("merchant") as? Map<*, *>)
@@ -997,15 +1115,16 @@ class RiderRepository {
 
             val baseFare = doc.getDouble("baseFare") ?: 50.0
             val distanceFare = doc.getDouble("distanceFare") ?: 30.0
-            val tip = doc.getDouble("tip") ?: 0.0
-            val surgeBonus = doc.getDouble("surgeBonus") ?: 0.0
             val feesMap = doc.get("fees") as? Map<*, *>
+            val feesTip = (feesMap?.get("tip") as? Number)?.toDouble() ?: doc.getDouble("tip") ?: 0.0
+            val tip = feesTip
+            val surgeBonus = doc.getDouble("surgeBonus") ?: 0.0
             val feesDeliveryFee = (feesMap?.get("deliveryFee") as? Number)?.toDouble() ?: doc.getDouble("deliveryFee") ?: (baseFare + distanceFare + surgeBonus)
             val feesServiceFee = (feesMap?.get("serviceFee") as? Number)?.toDouble() ?: doc.getDouble("serviceFee") ?: 0.0
             val feesTotal = (feesMap?.get("total") as? Number)?.toDouble()
                 ?: doc.getDouble("totalAmount")
                 ?: doc.getDouble("totalFee")
-                ?: (feesDeliveryFee + feesServiceFee)
+                ?: (feesDeliveryFee + feesServiceFee + tip)
 
             // 1. READ PAYMENT FROM THE ORDER (never default to "Paid Online")
             // Read orders.paymentMethod, trimmed and lower-cased. "cod", "cash", "cash on delivery" = COD. "wallet" or "online" = Paid Online. If missing or unknown, show "Payment unknown - contact support"
@@ -1055,6 +1174,11 @@ class RiderRepository {
                 riderPhotoUrl = riderPhotoUrl,
                 cityId = cityId,
                 merchantId = merchantId,
+                fulfillment = fulfillment,
+                isScheduled = isScheduled,
+                scheduledFor = scheduledForRaw,
+                scheduledDateText = scheduledDateText,
+                merchantAccepted = merchantAccepted,
                 merchantName = merchantName,
                 merchantAddress = merchantAddress,
                 merchantPhone = merchantPhone,

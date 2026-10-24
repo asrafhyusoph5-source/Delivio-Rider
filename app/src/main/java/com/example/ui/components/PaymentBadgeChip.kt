@@ -160,3 +160,92 @@ fun PaymentBadgeContent(
         }
     }
 }
+
+@Composable
+fun TipBadgeChip(
+    tipAmount: Double,
+    currencySymbol: String = "₱",
+    modifier: Modifier = Modifier,
+    isLarge: Boolean = false
+) {
+    if (tipAmount <= 0.0) return
+
+    val tipFormatted = if (tipAmount % 1.0 == 0.0) {
+        String.format("%.0f", tipAmount)
+    } else {
+        String.format("%.2f", tipAmount)
+    }
+    val text = "Tip $currencySymbol$tipFormatted"
+
+    Surface(
+        shape = RoundedCornerShape(if (isLarge) 12.dp else 8.dp),
+        color = Color(0xFFE8F5E9),
+        border = BorderStroke(1.dp, Color(0xFF4CAF50)),
+        modifier = modifier.testTag("tip_chip")
+    ) {
+        Row(
+            modifier = Modifier.padding(
+                horizontal = if (isLarge) 10.dp else 8.dp,
+                vertical = if (isLarge) 5.dp else 3.dp
+            ),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.VolunteerActivism,
+                contentDescription = "Tip",
+                tint = Color(0xFF2E7D32),
+                modifier = Modifier.size(if (isLarge) 16.dp else 12.dp)
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = text,
+                fontWeight = FontWeight.ExtraBold,
+                fontSize = if (isLarge) 13.sp else 11.sp,
+                color = Color(0xFF2E7D32)
+            )
+        }
+    }
+}
+
+@Composable
+fun ScheduledOrderChip(
+    order: Order,
+    modifier: Modifier = Modifier,
+    isLarge: Boolean = false
+) {
+    if (!order.isScheduled) return
+
+    val text = order.scheduledChipText
+
+    Surface(
+        shape = RoundedCornerShape(if (isLarge) 12.dp else 8.dp),
+        color = Color(0xFFE3F2FD),
+        border = BorderStroke(1.dp, Color(0xFF2196F3)),
+        modifier = modifier.testTag("scheduled_chip")
+    ) {
+        Row(
+            modifier = Modifier.padding(
+                horizontal = if (isLarge) 10.dp else 8.dp,
+                vertical = if (isLarge) 5.dp else 3.dp
+            ),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.Schedule,
+                contentDescription = "Scheduled",
+                tint = Color(0xFF1565C0),
+                modifier = Modifier.size(if (isLarge) 16.dp else 12.dp)
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = text,
+                fontWeight = FontWeight.Bold,
+                fontSize = if (isLarge) 12.sp else 11.sp,
+                color = Color(0xFF1565C0)
+            )
+        }
+    }
+}
+

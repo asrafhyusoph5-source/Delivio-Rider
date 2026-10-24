@@ -165,9 +165,17 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         )
     }.stateIn(viewModelScope, SharingStarted.Lazily, EarningSummary())
 
-    // Wallet balance (live from riders/{uid}.walletBalance) & Withdrawable Earnings
-    val walletBalance: StateFlow<Double> = rider.map { r ->
-        r?.walletBalance ?: 0.0
+    val isSharedWallet: StateFlow<Boolean> = rider.map { r ->
+        !r?.linkedCustomerUid.isNullOrBlank()
+    }.stateIn(viewModelScope, SharingStarted.Lazily, false)
+
+    // Wallet balance: live from users/{linkedCustomerUid}.walletBalance if linked, or riders/{uid}.walletBalance
+    val walletBalance: StateFlow<Double> = combine(rider, riderRepository.sharedCustomerWalletBalance) { r, sharedBal ->
+        if (!r?.linkedCustomerUid.isNullOrBlank() && sharedBal != null) {
+            sharedBal
+        } else {
+            r?.walletBalance ?: 0.0
+        }
     }.stateIn(viewModelScope, SharingStarted.Lazily, 0.0)
 
     val earningsAvailableToWithdraw: StateFlow<Double> = deliveredOrders.map { orders ->
