@@ -131,6 +131,23 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
         paymentMethod = "wallet",
         paymentProvider = "wallet"
     ),
+    EarningsJobRecord(
+        id = "job_104",
+        orderNumber = "DLV-9011",
+        serviceType = "Taxi",
+        merchantName = "Puerto Princesa City Hall",
+        area = "City Hall to Airport",
+        timeText = "05:10 PM",
+        dayNumber = 11,
+        dayOfWeek = "Sun",
+        baseFare = 150.0,
+        distanceFare = 50.0,
+        tip = 30.0,
+        platformCommission = 30.0, // 15% of 200 fare
+        paymentMethod = "cod",
+        cashToCollect = 230.0,
+        codCollected = 230.0
+    ),
     // Saturday Oct 10
     EarningsJobRecord(
         id = "job_201",
@@ -314,6 +331,7 @@ fun EarningsScreen(
                 "Pabili" -> job.serviceType == "Pabili"
                 "Request" -> job.serviceType == "Request"
                 "Merchant Request" -> job.serviceType == "Merchant Request"
+                "Taxi" -> job.serviceType == "Taxi"
                 else -> true
             }
             val matchesPayment = when (selectedPaymentFilter) {
@@ -544,7 +562,7 @@ fun EarningsScreen(
                                     Icon(Icons.Default.LocalAtm, contentDescription = "COD", tint = DelivioYellowDark, modifier = Modifier.size(16.dp))
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text(
-                                        text = "COD Cash Collected: $currencySymbol${String.format("%.2f", totalCodCash)} (Handled separately in Wallet, not rider earnings)",
+                                        text = "COD Cash Collected: $currencySymbol${String.format("%.2f", totalCodCash)} (Handled separately in Wallet, not driver earnings)",
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Medium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -582,13 +600,13 @@ fun EarningsScreen(
                         AnimatedVisibility(visible = isBreakdownExpanded) {
                             Column(
                                 modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(top = 8.dp),
+                                .fillMaxWidth()
+                                .padding(top = 8.dp),
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 BreakdownRow("Base Fare", "$currencySymbol${String.format("%.2f", totalBaseFare)}")
                                 BreakdownRow("Distance Fare", "$currencySymbol${String.format("%.2f", totalDistanceFare)}")
-                                if (totalTips > 0) BreakdownRow("Tips (100% to Rider)", "$currencySymbol${String.format("%.2f", totalTips)}", valueColor = DelivioGreenDark)
+                                if (totalTips > 0) BreakdownRow("Tips (100% to Driver)", "$currencySymbol${String.format("%.2f", totalTips)}", valueColor = DelivioGreenDark)
                                 if (totalSurges > 0) BreakdownRow("Surges & Demand Boosts", "$currencySymbol${String.format("%.2f", totalSurges)}", valueColor = DelivioYellowDark)
                                 if (totalWaiting > 0) BreakdownRow("Waiting Time Pay", "$currencySymbol${String.format("%.2f", totalWaiting)}")
                                 if (totalExtraStops > 0) BreakdownRow("Multi-Drop Extra Stop Pay", "$currencySymbol${String.format("%.2f", totalExtraStops)}")
@@ -596,7 +614,7 @@ fun EarningsScreen(
                                 if (totalUrgent > 0) BreakdownRow("Urgent Dispatch Bonus", "$currencySymbol${String.format("%.2f", totalUrgent)}", valueColor = DelivioRed)
                                 BreakdownRow("Platform Commission", "-$currencySymbol${String.format("%.2f", totalCommission)}", valueColor = DelivioRed)
                                 HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-                                BreakdownRow("Total Net Rider Pay", "$currencySymbol${String.format("%.2f", totalNetEarnings)}", isBold = true)
+                                BreakdownRow("Total Net Driver Pay", "$currencySymbol${String.format("%.2f", totalNetEarnings)}", isBold = true)
                             }
                         }
                     }
@@ -608,7 +626,7 @@ fun EarningsScreen(
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("Service Type Filter:", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        val services = listOf("All", "Food", "Instant", "Parcel", "Pabili", "Request", "Merchant Request")
+                        val services = listOf("All", "Food", "Instant", "Parcel", "Pabili", "Request", "Merchant Request", "Taxi")
                         items(services) { svc ->
                             FilterChip(
                                 selected = selectedServiceFilter == svc,
@@ -723,7 +741,7 @@ fun EarningsScreen(
                     if (job.urgentBonus > 0) BreakdownRow("Urgent Bonus", "$currencySymbol${String.format("%.2f", job.urgentBonus)}", valueColor = DelivioRed)
                     BreakdownRow("Platform Commission", "-$currencySymbol${String.format("%.2f", job.platformCommission)}", valueColor = DelivioRed)
                     HorizontalDivider()
-                    BreakdownRow("Net Rider Pay", "$currencySymbol${String.format("%.2f", job.netEarning)}", isBold = true)
+                    BreakdownRow("Net Driver Pay", "$currencySymbol${String.format("%.2f", job.netEarning)}", isBold = true)
 
                     Spacer(modifier = Modifier.height(6.dp))
                     PaymentBadgeContent(
@@ -762,7 +780,7 @@ fun EarningsScreen(
                             onClick = {
                                 val sendIntent = Intent().apply {
                                     action = Intent.ACTION_SEND
-                                    putExtra(Intent.EXTRA_TEXT, "Delivio Rider Receipt\nJob: #${job.orderNumber}\nService: ${job.serviceType}\nMerchant: ${job.merchantName}\nNet Earning: ₱${job.netEarning}\nDelivered on Oct ${job.dayNumber}, 2026")
+                                    putExtra(Intent.EXTRA_TEXT, "Delivio Driver Receipt\nJob: #${job.orderNumber}\nService: ${job.serviceType}\nMerchant: ${job.merchantName}\nNet Earning: ₱${job.netEarning}\nDelivered on Oct ${job.dayNumber}, 2026")
                                     type = "text/plain"
                                 }
                                 context.startActivity(Intent.createChooser(sendIntent, "Download/Share Receipt"))
@@ -791,10 +809,10 @@ fun EarningsScreen(
             title = { Text("Earnings & Pay Guide", fontWeight = FontWeight.Bold) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("How rider pay is computed:", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Text("How driver pay is computed:", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                     Text("• Net Earnings = Base Fare + Distance Fare + Tips + Surge/Boosts + Waiting Pay + Extra Stop Pay + Return Trip Pay + Urgent Bonus - Platform Commission.", fontSize = 12.sp)
                     Text("• COD Collected: Cash received from customers is recorded as Cash-on-Hand in your Wallet and must be remitted. It is not counted as net trip earnings.", fontSize = 12.sp)
-                    Text("• 100% of customer tips are paid directly to the rider with zero deductions.", fontSize = 12.sp)
+                    Text("• 100% of customer tips are paid directly to the driver with zero deductions.", fontSize = 12.sp)
                 }
             },
             confirmButton = {
@@ -848,7 +866,7 @@ fun EarningsScreen(
                                     IconButton(onClick = {
                                         val sendIntent = Intent().apply {
                                             action = Intent.ACTION_SEND
-                                            putExtra(Intent.EXTRA_TEXT, "Delivio Statement ($periodText)\nNet Rider Earnings: $amount\nPalawan Fleet • Verified")
+                                            putExtra(Intent.EXTRA_TEXT, "Delivio Statement ($periodText)\nNet Driver Earnings: $amount\nPalawan Fleet • Verified")
                                             type = "text/plain"
                                         }
                                         context.startActivity(Intent.createChooser(sendIntent, "Download Statement (CSV)"))

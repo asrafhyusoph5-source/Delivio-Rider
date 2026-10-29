@@ -116,7 +116,7 @@ fun LoginScreen(
                         ) {
                             Image(
                                 painter = painterResource(id = R.drawable.delivio_rider_icon_1791915489146),
-                                contentDescription = "Delivio Rider Logo",
+                                contentDescription = "Delivio Driver Logo",
                                 modifier = Modifier.size(76.dp)
                             )
                         }
@@ -124,7 +124,7 @@ fun LoginScreen(
                         Spacer(modifier = Modifier.height(16.dp))
 
                         Text(
-                            text = "Delivio Rider",
+                            text = "Delivio Driver",
                             fontSize = 28.sp,
                             fontWeight = FontWeight.Black,
                             color = MaterialTheme.colorScheme.onBackground
@@ -143,7 +143,7 @@ fun LoginScreen(
                             value = email,
                             onValueChange = { email = it },
                             label = { Text("Email address") },
-                            placeholder = { Text("rider@example.com") },
+                            placeholder = { Text("driver@example.com") },
                             leadingIcon = { Icon(Icons.Default.Email, contentDescription = "Email") },
                             singleLine = true,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
@@ -216,7 +216,7 @@ fun LoginScreen(
 
                         Spacer(modifier = Modifier.height(20.dp))
 
-                        // Register as a Rider Link
+                        // Register as a Driver Link
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.Center,
@@ -224,7 +224,7 @@ fun LoginScreen(
                         ) {
                             Text("New driver? ", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Text(
-                                text = "Register as a Rider",
+                                text = "Register as a Driver",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = DelivioYellow,
@@ -287,9 +287,13 @@ private fun RegistrationFormView(
     var password by remember { mutableStateOf("") }
     var confirmPassword by remember { mutableStateOf("") }
     var cityId by remember { mutableStateOf("puerto_princesa") }
-    var vehicleType by remember { mutableStateOf("motorcycle") }
+    var vehicleType by remember { mutableStateOf(com.example.data.constants.OrderStepConstants.VEHICLE_MOTORCYCLE) }
     var plate by remember { mutableStateOf("") }
     var vehicleModel by remember { mutableStateOf("") }
+    var vehicleColor by remember { mutableStateOf("") }
+    var seatsText by remember { mutableStateOf("4") }
+    var vehiclePhotoUrl by remember { mutableStateOf("") }
+    var franchiseUrl by remember { mutableStateOf("") }
     var emergencyName by remember { mutableStateOf("") }
     var emergencyPhone by remember { mutableStateOf("") }
 
@@ -300,6 +304,9 @@ private fun RegistrationFormView(
     var selfieUrl by remember { mutableStateOf("") }
 
     var termsAccepted by remember { mutableStateOf(false) }
+
+    val isCar = vehicleType == com.example.data.constants.OrderStepConstants.VEHICLE_CAR4 ||
+            vehicleType == com.example.data.constants.OrderStepConstants.VEHICLE_CAR8
 
     Column(
         modifier = Modifier
@@ -312,7 +319,7 @@ private fun RegistrationFormView(
             IconButton(onClick = onBackToLogin) {
                 Icon(Icons.Default.ArrowBack, contentDescription = "Back")
             }
-            Text("Register as a Rider", fontWeight = FontWeight.ExtraBold, fontSize = 20.sp)
+            Text("Register as a Driver", fontWeight = FontWeight.ExtraBold, fontSize = 20.sp)
         }
 
         Text("Fill out the application below. Once approved by admin, you will receive full dispatch access.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -324,35 +331,77 @@ private fun RegistrationFormView(
         OutlinedTextField(value = confirmPassword, onValueChange = { confirmPassword = it }, label = { Text("Confirm Password") }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
 
         Text("Vehicle Details", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf("motorcycle" to "Motorcycle", "bicycle" to "Bicycle", "car" to "Car").forEach { (type, label) ->
+        // 4 vehicle types
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            listOf(
+                com.example.data.constants.OrderStepConstants.VEHICLE_MOTORCYCLE to "Motorcycle",
+                com.example.data.constants.OrderStepConstants.VEHICLE_TRICYCLE to "Tricycle"
+            ).forEach { (type, label) ->
                 FilterChip(
                     selected = vehicleType == type,
-                    onClick = { vehicleType = type },
-                    label = { Text(label) }
+                    onClick = {
+                        vehicleType = type
+                        seatsText = "1"
+                    },
+                    label = { Text(label, fontSize = 12.sp) }
+                )
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            listOf(
+                com.example.data.constants.OrderStepConstants.VEHICLE_CAR4 to "4 Seater Car",
+                com.example.data.constants.OrderStepConstants.VEHICLE_CAR8 to "8 Seater Car"
+            ).forEach { (type, label) ->
+                FilterChip(
+                    selected = vehicleType == type,
+                    onClick = {
+                        vehicleType = type
+                        seatsText = if (type == com.example.data.constants.OrderStepConstants.VEHICLE_CAR8) "8" else "4"
+                    },
+                    label = { Text(label, fontSize = 12.sp) }
                 )
             }
         }
 
         OutlinedTextField(value = plate, onValueChange = { plate = it }, label = { Text("Plate Number") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(value = vehicleModel, onValueChange = { vehicleModel = it }, label = { Text("Vehicle Make & Model") }, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(value = vehicleColor, onValueChange = { vehicleColor = it }, label = { Text("Vehicle Color") }, modifier = Modifier.fillMaxWidth())
+
+        if (isCar) {
+            OutlinedTextField(
+                value = seatsText,
+                onValueChange = { seatsText = it.filter { c -> c.isDigit() } },
+                label = { Text("Number of Seats") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+
+        OutlinedTextField(value = vehiclePhotoUrl, onValueChange = { vehiclePhotoUrl = it }, label = { Text("Vehicle Photo URL") }, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(value = franchiseUrl, onValueChange = { franchiseUrl = it }, label = { Text("Franchise Document URL (Optional)") }, modifier = Modifier.fillMaxWidth())
 
         Text("Emergency Contact", fontWeight = FontWeight.Bold, fontSize = 14.sp)
         OutlinedTextField(value = emergencyName, onValueChange = { emergencyName = it }, label = { Text("Contact Name") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(value = emergencyPhone, onValueChange = { emergencyPhone = it }, label = { Text("Contact Phone") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone), modifier = Modifier.fillMaxWidth())
 
-        Text("Document Image URLs", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+        Text("Compliance Document Image URLs", fontWeight = FontWeight.Bold, fontSize = 14.sp)
         Text("Provide accessible image URLs for your compliance documents:", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         OutlinedTextField(value = licenseUrl, onValueChange = { licenseUrl = it }, label = { Text("Driver's License URL") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(value = orcrUrl, onValueChange = { orcrUrl = it }, label = { Text("OR / CR Image URL") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(value = nbiUrl, onValueChange = { nbiUrl = it }, label = { Text("NBI Clearance URL") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(value = validIdUrl, onValueChange = { validIdUrl = it }, label = { Text("Government Valid ID URL") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(value = selfieUrl, onValueChange = { selfieUrl = it }, label = { Text("Rider Selfie Photo URL") }, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(value = selfieUrl, onValueChange = { selfieUrl = it }, label = { Text("Driver Selfie Photo URL") }, modifier = Modifier.fillMaxWidth())
 
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(checked = termsAccepted, onCheckedChange = { termsAccepted = it })
             Spacer(modifier = Modifier.width(6.dp))
-            Text("I agree to the Delivio Rider terms of service and safety guidelines.", fontSize = 12.sp)
+            Text("I agree to the Delivio Driver terms of service and safety guidelines.", fontSize = 12.sp)
         }
 
         Button(
@@ -370,7 +419,9 @@ private fun RegistrationFormView(
                     return@Button
                 }
 
-                viewModel.registerAsRider(
+                val seats = seatsText.toIntOrNull() ?: if (vehicleType == com.example.data.constants.OrderStepConstants.VEHICLE_CAR8) 8 else if (vehicleType == com.example.data.constants.OrderStepConstants.VEHICLE_CAR4) 4 else 1
+
+                viewModel.registerAsDriver(
                     name = fullName,
                     phone = phone,
                     email = email,
@@ -379,6 +430,10 @@ private fun RegistrationFormView(
                     vehicleType = vehicleType,
                     plate = plate,
                     vehicleModel = vehicleModel,
+                    vehicleColor = vehicleColor,
+                    seats = seats,
+                    vehiclePhotoUrl = vehiclePhotoUrl,
+                    franchiseUrl = franchiseUrl.ifBlank { null },
                     emergencyName = emergencyName,
                     emergencyPhone = emergencyPhone,
                     licenseUrl = licenseUrl,

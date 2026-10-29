@@ -249,3 +249,87 @@ fun ScheduledOrderChip(
     }
 }
 
+@Composable
+fun MerchantPrepStatusChip(
+    order: Order,
+    modifier: Modifier = Modifier,
+    isLarge: Boolean = false
+) {
+    val text = order.prepStatusText
+    if (text.isBlank()) return
+
+    val isReady = order.status.trim().equals("ready", ignoreCase = true) ||
+            order.status.trim().equals(com.example.data.constants.OrderStepConstants.STATUS_READY, ignoreCase = true)
+
+    val bg = if (isReady) Color(0xFFE8F5E9) else Color(0xFFFFF8E1)
+    val border = if (isReady) Color(0xFF4CAF50) else Color(0xFFFFA000)
+    val textColor = if (isReady) Color(0xFF2E7D32) else Color(0xFFE65100)
+    val icon = if (isReady) Icons.Default.CheckCircle else Icons.Default.Schedule
+
+    Surface(
+        shape = RoundedCornerShape(if (isLarge) 12.dp else 8.dp),
+        color = bg,
+        border = BorderStroke(1.dp, border),
+        modifier = modifier.testTag("merchant_prep_status_chip")
+    ) {
+        Row(
+            modifier = Modifier.padding(
+                horizontal = if (isLarge) 10.dp else 8.dp,
+                vertical = if (isLarge) 5.dp else 3.dp
+            ),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = text,
+                tint = textColor,
+                modifier = Modifier.size(if (isLarge) 16.dp else 12.dp)
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = text,
+                fontWeight = FontWeight.Bold,
+                fontSize = if (isLarge) 12.sp else 11.sp,
+                color = textColor
+            )
+        }
+    }
+}
+
+@Composable
+fun OrderUpdatedByMerchantBadge(
+    modifier: Modifier = Modifier,
+    isLarge: Boolean = false
+) {
+    Surface(
+        shape = RoundedCornerShape(if (isLarge) 12.dp else 8.dp),
+        color = Color(0xFFFBE9E7),
+        border = BorderStroke(1.dp, Color(0xFFFF5722)),
+        modifier = modifier.testTag("order_updated_by_merchant_badge")
+    ) {
+        Row(
+            modifier = Modifier.padding(
+                horizontal = if (isLarge) 10.dp else 8.dp,
+                vertical = if (isLarge) 5.dp else 3.dp
+            ),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.Info,
+                contentDescription = "Order updated by merchant",
+                tint = Color(0xFFD84315),
+                modifier = Modifier.size(if (isLarge) 16.dp else 12.dp)
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = "Order updated by merchant",
+                fontWeight = FontWeight.ExtraBold,
+                fontSize = if (isLarge) 12.sp else 11.sp,
+                color = Color(0xFFD84315)
+            )
+        }
+    }
+}
+

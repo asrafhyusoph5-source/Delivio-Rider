@@ -375,6 +375,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                                     vehicleType = appDoc.getString("vehicleType") ?: "motorcycle",
                                     plate = appDoc.getString("plate") ?: "",
                                     vehicleModel = appDoc.getString("vehicleModel") ?: "",
+                                    vehicleColor = appDoc.getString("vehicleColor") ?: "",
+                                    seats = appDoc.getLong("seats")?.toInt() ?: 1,
                                     emergencyContact = emergencyMap?.entries?.associate { it.key.toString() to (it.value?.toString() ?: "") } ?: emptyMap(),
                                     documents = docsMap?.entries?.associate { it.key.toString() to (it.value?.toString() ?: "") } ?: emptyMap(),
                                     status = appDoc.getString("status") ?: "Pending",
@@ -384,7 +386,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                                 _applicationState.value = app
                                 _isLoggedIn.value = false
                             } else {
-                                _isBlocked.value = "No rider account found for this user. Please register as a rider."
+                                _isBlocked.value = "No driver account found for this user. Please register as a driver."
                                 _isLoggedIn.value = false
                             }
                         }
@@ -434,7 +436,77 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             }
     }
 
-    // REGISTER AS A RIDER
+    // REGISTER AS A DRIVER
+    fun registerAsDriver(
+        name: String,
+        phone: String,
+        email: String,
+        pass: String,
+        cityId: String,
+        vehicleType: String,
+        plate: String,
+        vehicleModel: String,
+        vehicleColor: String,
+        seats: Int,
+        vehiclePhotoUrl: String,
+        franchiseUrl: String? = null,
+        emergencyName: String,
+        emergencyPhone: String,
+        licenseUrl: String,
+        orcrUrl: String,
+        nbiUrl: String,
+        validIdUrl: String,
+        selfieUrl: String,
+        onSuccess: () -> Unit
+    ) {
+        auth.createUserWithEmailAndPassword(email.trim(), pass.trim())
+            .addOnSuccessListener { authResult ->
+                val uid = authResult.user?.uid ?: return@addOnSuccessListener
+                val docsMap = mutableMapOf(
+                    "licenseUrl" to licenseUrl.trim(),
+                    "orcrUrl" to orcrUrl.trim(),
+                    "nbiUrl" to nbiUrl.trim(),
+                    "validIdUrl" to validIdUrl.trim(),
+                    "selfieUrl" to selfieUrl.trim(),
+                    "vehiclePhotoUrl" to vehiclePhotoUrl.trim()
+                )
+                if (!franchiseUrl.isNullOrBlank()) {
+                    docsMap["franchiseUrl"] = franchiseUrl.trim()
+                }
+
+                val applicationData = mapOf(
+                    "ownerUid" to uid,
+                    "name" to name.trim(),
+                    "phone" to phone.trim(),
+                    "email" to email.trim(),
+                    "cityId" to cityId.trim(),
+                    "vehicleType" to vehicleType,
+                    "plate" to plate.trim().uppercase(),
+                    "vehicleModel" to vehicleModel.trim(),
+                    "vehicleColor" to vehicleColor.trim(),
+                    "seats" to seats,
+                    "emergencyContact" to mapOf("name" to emergencyName.trim(), "phone" to emergencyPhone.trim()),
+                    "documents" to docsMap,
+                    "status" to "Pending",
+                    "submittedAt" to FieldValue.serverTimestamp()
+                )
+
+                db.collection("riderApplications").document(uid).set(applicationData)
+                    .addOnSuccessListener {
+                        showSnackbar("Application submitted. Wait for admin approval.")
+                        checkUserRoleAndListen(uid)
+                        onSuccess()
+                    }
+                    .addOnFailureListener {
+                        showSnackbar("Application saved with error: ${it.localizedMessage}")
+                    }
+            }
+            .addOnFailureListener {
+                showSnackbar(it.localizedMessage ?: "Registration failed")
+            }
+    }
+
+    // Legacy alias
     fun registerAsRider(
         name: String,
         phone: String,
@@ -453,43 +525,28 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         selfieUrl: String,
         onSuccess: () -> Unit
     ) {
-        auth.createUserWithEmailAndPassword(email.trim(), pass.trim())
-            .addOnSuccessListener { authResult ->
-                val uid = authResult.user?.uid ?: return@addOnSuccessListener
-                val applicationData = mapOf(
-                    "ownerUid" to uid,
-                    "name" to name.trim(),
-                    "phone" to phone.trim(),
-                    "email" to email.trim(),
-                    "cityId" to cityId.trim(),
-                    "vehicleType" to vehicleType,
-                    "plate" to plate.trim().uppercase(),
-                    "vehicleModel" to vehicleModel.trim(),
-                    "emergencyContact" to mapOf("name" to emergencyName.trim(), "phone" to emergencyPhone.trim()),
-                    "documents" to mapOf(
-                        "licenseUrl" to licenseUrl.trim(),
-                        "orcrUrl" to orcrUrl.trim(),
-                        "nbiUrl" to nbiUrl.trim(),
-                        "validIdUrl" to validIdUrl.trim(),
-                        "selfieUrl" to selfieUrl.trim()
-                    ),
-                    "status" to "Pending",
-                    "submittedAt" to FieldValue.serverTimestamp()
-                )
-
-                db.collection("riderApplications").document(uid).set(applicationData)
-                    .addOnSuccessListener {
-                        showSnackbar("Application submitted. Wait for admin approval.")
-                        checkUserRoleAndListen(uid)
-                        onSuccess()
-                    }
-                    .addOnFailureListener {
-                        showSnackbar("Application saved with error: ${it.localizedMessage}")
-                    }
-            }
-            .addOnFailureListener {
-                showSnackbar(it.localizedMessage ?: "Registration failed")
-            }
+        registerAsDriver(
+            name = name,
+            phone = phone,
+            email = email,
+            pass = pass,
+            cityId = cityId,
+            vehicleType = vehicleType,
+            plate = plate,
+            vehicleModel = vehicleModel,
+            vehicleColor = "",
+            seats = if (vehicleType == OrderStepConstants.VEHICLE_CAR8) 8 else 4,
+            vehiclePhotoUrl = "",
+            franchiseUrl = null,
+            emergencyName = emergencyName,
+            emergencyPhone = emergencyPhone,
+            licenseUrl = licenseUrl,
+            orcrUrl = orcrUrl,
+            nbiUrl = nbiUrl,
+            validIdUrl = validIdUrl,
+            selfieUrl = selfieUrl,
+            onSuccess = onSuccess
+        )
     }
 
     // RESUBMIT APPLICATION (when status is Needs Info)

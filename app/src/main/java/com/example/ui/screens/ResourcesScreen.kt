@@ -55,7 +55,7 @@ fun ResourcesScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Rider Resources", fontWeight = FontWeight.Bold) },
+                title = { Text("Driver Resources", fontWeight = FontWeight.Bold) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -240,7 +240,7 @@ private fun ActivityInsightsTab(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
-                    Text("★★★★★ • \"Food arrived steaming hot, very polite rider!\"", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                    Text("★★★★★ • \"Food arrived steaming hot, very polite driver!\"", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                     Text("Maria S. • Order #DEL-9842", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
@@ -325,11 +325,11 @@ private fun RiderSafetyTab(onSosClick: () -> Unit, onShareTrip: () -> Unit) {
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Palawan Rider Safety Rules", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                    Text("1. Always strap your full-face helmet securely.", fontSize = 12.sp)
+                    Text("Palawan Driver Safety Rules", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Text("1. Always strap your full-face helmet securely or wear your seatbelt.", fontSize = 12.sp)
                     Text("2. Keep headlights on at all times on the National Highway.", fontSize = 12.sp)
                     Text("3. Never count large cash sums in open public streets.", fontSize = 12.sp)
-                    Text("4. Keep customer food insulated in the waterproof thermal box.", fontSize = 12.sp)
+                    Text("4. Keep customer items and food insulated and secured safely.", fontSize = 12.sp)
                 }
             }
         }
@@ -341,8 +341,8 @@ private fun TutorialsTab(onOpenLink: (String) -> Unit) {
     val tutorials = listOf(
         Pair("Maximizing Earnings in Puerto Princesa", "Learn how to position near top restaurant clusters in San Miguel and Rizal Ave."),
         Pair("Managing Cash-on-Delivery Discrepancies", "Step-by-step guide on customer change and remittance kiosk deposits."),
-        Pair("Handling Inclement Weather & Monsoons", "Equipment tips, waterproof phone mounts, and defensive riding habits."),
-        Pair("Rider Tier Progression: Unlocking Gold Status", "Maintain 95%+ acceptance to unlock priority batching and fuel discounts.")
+        Pair("Handling Inclement Weather & Monsoons", "Equipment tips, waterproof phone mounts, and defensive driving habits."),
+        Pair("Driver Tier Progression: Unlocking Gold Status", "Maintain 95%+ acceptance to unlock priority batching and fuel discounts.")
     )
 
     LazyColumn(
@@ -390,7 +390,7 @@ private fun ResourcesTiersTab(tierStatus: com.example.data.models.RiderTierStatu
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(18.dp)) {
-                    val tierTitle = if (tierStatus.currentTier != null) "${tierStatus.currentTier?.title?.uppercase()} RIDER" else "NO TIER YET"
+                    val tierTitle = if (tierStatus.currentTier != null) "${tierStatus.currentTier?.title?.uppercase()} DRIVER" else "NO TIER YET"
                     val ridesSubtext = when {
                         tierStatus.currentMonthRides < 500 -> "${tierStatus.currentMonthRides} rides completed this month • ${500 - tierStatus.currentMonthRides} rides to Bronze"
                         tierStatus.currentMonthRides < 650 -> "${tierStatus.currentMonthRides} rides completed this month • ${650 - tierStatus.currentMonthRides} rides to Silver"

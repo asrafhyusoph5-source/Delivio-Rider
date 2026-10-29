@@ -23,7 +23,7 @@ class ExampleRobolectricTest {
     fun `read string from context`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val appName = context.getString(R.string.app_name)
-        assertEquals("Delivio Rider", appName)
+        assertEquals("Delivio Driver", appName)
     }
 
     @Test
@@ -355,4 +355,226 @@ class ExampleRobolectricTest {
         assertEquals("tx_customer", merged.first().id)
         assertEquals("tx_rider", merged.last().id)
     }
+
+    @Test
+    fun `verify vehicle types and services by vehicle mapping`() {
+        // Motorcycle services
+        val motoServices = OrderStepConstants.SERVICES_BY_VEHICLE[OrderStepConstants.VEHICLE_MOTORCYCLE]
+        assertEquals(listOf("food", "convenience", "parcel", "pabili", "request_rider", "taxi"), motoServices)
+
+        // Tricycle services
+        val trikeServices = OrderStepConstants.SERVICES_BY_VEHICLE[OrderStepConstants.VEHICLE_TRICYCLE]
+        assertEquals(listOf("parcel", "taxi"), trikeServices)
+
+        // Car 4-seater services
+        val car4Services = OrderStepConstants.SERVICES_BY_VEHICLE[OrderStepConstants.VEHICLE_CAR4]
+        assertEquals(listOf("parcel", "taxi"), car4Services)
+
+        // Car 8-seater services
+        val car8Services = OrderStepConstants.SERVICES_BY_VEHICLE[OrderStepConstants.VEHICLE_CAR8]
+        assertEquals(listOf("parcel", "taxi"), car8Services)
+
+        // Vehicle display names
+        assertEquals("Motorcycle", OrderStepConstants.getVehicleDisplayName(OrderStepConstants.VEHICLE_MOTORCYCLE))
+        assertEquals("Tricycle", OrderStepConstants.getVehicleDisplayName(OrderStepConstants.VEHICLE_TRICYCLE))
+        assertEquals("4 Seater Car", OrderStepConstants.getVehicleDisplayName(OrderStepConstants.VEHICLE_CAR4))
+        assertEquals("8 Seater Car", OrderStepConstants.getVehicleDisplayName(OrderStepConstants.VEHICLE_CAR8))
+    }
+
+    @Test
+    fun `verify taxi earnings formula with default and custom commission`() {
+        // Taxi order with 15% default commission: net = fees.total x (1 - 0.15)
+        val taxiOrderDefault = Order(
+            id = "txi_1",
+            serviceType = OrderStepConstants.SERVICE_TAXI,
+            feesTotal = 200.0,
+            platformCommission = 15.0,
+            tip = 0.0,
+            paymentMethod = "cod"
+        )
+        assertTrue(taxiOrderDefault.isTaxi)
+        // 200 * (1 - 0.15) = 170.0
+        assertEquals(170.0, taxiOrderDefault.estimatedEarnings, 0.001)
+
+        // Taxi order with tip: net = fees.total x (1 - 0.15) + tip (no commission on tip)
+        val taxiOrderWithTip = Order(
+            id = "txi_2",
+            serviceType = OrderStepConstants.SERVICE_TAXI,
+            feesTotal = 200.0,
+            platformCommission = 15.0,
+            tip = 50.0,
+            paymentMethod = "cod"
+        )
+        assertEquals(220.0, taxiOrderWithTip.estimatedEarnings, 0.001)
+
+        // Taxi COD: fees.total is collected from passenger
+        assertEquals(200.0, taxiOrderDefault.cashAmountToCollect, 0.001)
+    }
+
+    @Test
+    fun `verify taxi stops sequencing and completion`() {
+        val taxiOrder = Order(
+            id = "txi_stops",
+            serviceType = OrderStepConstants.SERVICE_TAXI,
+            customerAddress = "Rizal Ave, Puerto Princesa",
+            customerArea = "Downtown",
+            stops = listOf(
+                com.example.data.models.TaxiStop(stopNumber = 3, address = "Airport Terminal", area = "Airport"),
+                com.example.data.models.TaxiStop(stopNumber = 4, address = "Hotel Centro", area = "San Pedro")
+            ),
+            riderStep = "to_stop_2"
+        )
+
+        assertEquals(3, taxiOrder.allTaxiStops.size) // Stop 2, Stop 3, Stop 4
+        assertEquals(4, taxiOrder.totalStopsCount) // Stop 1 pickup + 3 destination stops
+        assertEquals(2, taxiOrder.currentTaxiStopNumber)
+        assertFalse(taxiOrder.isAtLastTaxiStop)
+
+        // At Stop 4 (last stop)
+        val atLastStop = taxiOrder.copy(riderStep = "to_stop_4")
+        assertEquals(4, atLastStop.currentTaxiStopNumber)
+        assertTrue(atLastStop.isAtLastTaxiStop)
+
+        // Slide button text
+        assertEquals("Slide to confirm Arrival at Pickup", OrderStepConstants.getSlideButtonText(OrderStepConstants.SERVICE_TAXI, "to_pickup", 2, false))
+        assertEquals("Slide to Start Trip", OrderStepConstants.getSlideButtonText(OrderStepConstants.SERVICE_TAXI, "at_pickup", 2, false))
+        assertEquals("Slide to confirm Arrival at Stop 2", OrderStepConstants.getSlideButtonText(OrderStepConstants.SERVICE_TAXI, "to_stop_2", 2, false))
+        assertEquals("Slide to confirm Arrival at Stop 3", OrderStepConstants.getSlideButtonText(OrderStepConstants.SERVICE_TAXI, "to_stop_3", 3, false))
+        assertEquals("Slide to Complete Trip", OrderStepConstants.getSlideButtonText(OrderStepConstants.SERVICE_TAXI, "to_stop_4", 4, true))
+    }
+
+    @Test
+    fun `verify taxi candidate offer criteria`() {
+        val carDriver = Rider(
+            uid = "driver_car",
+            vehicle = com.example.data.models.Vehicle(type = OrderStepConstants.VEHICLE_CAR4, plateNumber = "ABC-1234"),
+            cityId = "puerto_princesa",
+            isOnline = true,
+            activeServices = listOf(OrderStepConstants.SERVICE_PARCEL, OrderStepConstants.SERVICE_TAXI),
+            allowedServices = listOf(OrderStepConstants.SERVICE_PARCEL, OrderStepConstants.SERVICE_TAXI)
+        )
+
+        val taxiOrderCar4 = Order(
+            id = "txi_car4",
+            serviceType = OrderStepConstants.SERVICE_TAXI,
+            vehicleType = OrderStepConstants.VEHICLE_CAR4,
+            cityId = "puerto_princesa",
+            pickupDistanceKm = 3.2
+        )
+
+        val taxiOrderMoto = Order(
+            id = "txi_moto",
+            serviceType = OrderStepConstants.SERVICE_TAXI,
+            vehicleType = OrderStepConstants.VEHICLE_MOTORCYCLE,
+            cityId = "puerto_princesa",
+            pickupDistanceKm = 2.0
+        )
+
+        val taxiOrderFar = Order(
+            id = "txi_far",
+            serviceType = OrderStepConstants.SERVICE_TAXI,
+            vehicleType = OrderStepConstants.VEHICLE_CAR4,
+            cityId = "puerto_princesa",
+            pickupDistanceKm = 6.5 // > 5km
+        )
+
+        // Car driver matches taxiOrderCar4
+        assertTrue(carDriver.vehicle.type == taxiOrderCar4.vehicleType)
+        assertTrue(carDriver.cityId == taxiOrderCar4.cityId)
+        assertTrue(taxiOrderCar4.pickupDistanceKm <= 5.0)
+        assertTrue(carDriver.activeServices.contains(OrderStepConstants.SERVICE_TAXI))
+
+        // Car driver does NOT match motorcycle taxi
+        assertFalse(carDriver.vehicle.type == taxiOrderMoto.vehicleType)
+
+        // Far taxi order is rejected (> 5km)
+        assertFalse(taxiOrderFar.pickupDistanceKm <= 5.0)
+    }
+
+    @Test
+    fun `verify food and convenience offer qualification when merchant accepts`() {
+        val rider = Rider(
+            uid = "rider_food",
+            isOnline = true,
+            activeServices = listOf(OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_INSTANT),
+            allowedServices = listOf(OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_INSTANT)
+        )
+
+        // Food order with status Preparing, riderId null, fulfillment delivery, NO riderRequest
+        val acceptedFoodOrder = Order(
+            id = "food_1",
+            serviceType = OrderStepConstants.SERVICE_FOOD,
+            status = OrderStepConstants.STATUS_PREPARING,
+            riderId = null,
+            fulfillment = "delivery",
+            prepMinutes = 20,
+            riderRequestStatus = "" // riderRequest does not exist
+        )
+
+        assertTrue(acceptedFoodOrder.riderId.isNullOrBlank())
+        assertFalse(acceptedFoodOrder.isPickup)
+        assertTrue(acceptedFoodOrder.status in listOf(OrderStepConstants.STATUS_PREPARING, OrderStepConstants.STATUS_READY))
+        assertEquals("Merchant is preparing - about 20 min", acceptedFoodOrder.prepStatusText)
+
+        // Ready status
+        val readyFoodOrder = acceptedFoodOrder.copy(status = OrderStepConstants.STATUS_READY)
+        assertEquals("Order is ready", readyFoodOrder.prepStatusText)
+
+        // Placed Order before merchant accepted should not qualify
+        val unacceptedOrder = acceptedFoodOrder.copy(
+            status = OrderStepConstants.STATUS_PLACED_ORDER,
+            merchantAccepted = false
+        )
+        val s = unacceptedOrder.status.trim().lowercase()
+        val qualifies = s in listOf("preparing", "ready") ||
+            (unacceptedOrder.merchantAccepted && s != "placed order")
+        assertFalse(qualifies)
+    }
+
+    @Test
+    fun `verify pickup orders are strictly never offered`() {
+        val pickupOrder1 = Order(id = "p1", fulfillment = "pickup")
+        val pickupOrder2 = Order(id = "p2", fulfillment = "pick_up")
+        val pickupOrder3 = Order(id = "p3", fulfillment = "pick-up")
+        val deliveryOrder = Order(id = "d1", fulfillment = "delivery")
+
+        assertTrue(pickupOrder1.isPickup)
+        assertTrue(pickupOrder2.isPickup)
+        assertTrue(pickupOrder3.isPickup)
+        assertFalse(deliveryOrder.isPickup)
+    }
+
+    @Test
+    fun `verify merchant edit detection and live cash to collect updates`() {
+        // Initial order before edit
+        val originalOrder = Order(
+            id = "ord_edit_1",
+            serviceType = OrderStepConstants.SERVICE_FOOD,
+            paymentMethod = "cod",
+            cashToCollect = 300.0,
+            feesTotal = 300.0,
+            editedAt = null
+        )
+        assertFalse(originalOrder.isEditedByMerchant)
+        assertEquals(300.0, originalOrder.cashAmountToCollect, 0.001)
+
+        // Merchant edits the order (editedAt timestamp set, items/total updated)
+        val updatedOrder = originalOrder.copy(
+            editedAt = "2026-10-28T21:00:00Z",
+            cashToCollect = 450.0,
+            feesTotal = 450.0
+        )
+        assertTrue(updatedOrder.isEditedByMerchant)
+        assertEquals(450.0, updatedOrder.cashAmountToCollect, 0.001)
+
+        // If cashToCollect is 0, falls back to feesTotal
+        val updatedFallback = originalOrder.copy(
+            editedAt = true,
+            cashToCollect = 0.0,
+            feesTotal = 420.0
+        )
+        assertTrue(updatedFallback.isEditedByMerchant)
+        assertEquals(420.0, updatedFallback.cashAmountToCollect, 0.001)
+    }
 }
+

@@ -211,13 +211,15 @@ class RiderRepository {
                 RiderLocationTracker.setActiveOrderIds(activeIds)
             }
 
-        // 3. Listen to incoming offers: riderId == null and status in ["Placed Order", "Preparing", "Ready"]
+        // 3. Listen to incoming offers: riderId == null and status in ["Placed Order", "Preparing", "Ready", "preparing", "ready"]
         offersListener = db.collection("orders")
             .whereEqualTo("riderId", null)
             .whereIn("status", listOf(
                 OrderStepConstants.STATUS_PLACED_ORDER,
                 OrderStepConstants.STATUS_PREPARING,
-                OrderStepConstants.STATUS_READY
+                OrderStepConstants.STATUS_READY,
+                "preparing",
+                "ready"
             ))
             .addSnapshotListener { snapshots, error ->
                 if (error != null || snapshots == null) return@addSnapshotListener
@@ -226,6 +228,12 @@ class RiderRepository {
                 val riderLoc = RiderLocationTracker.currentLocation.value
 
                 if (currentRider == null || !currentRider.isOnline || activeCount >= 2) {
+                    _incomingOffer.value = null
+                    return@addSnapshotListener
+                }
+
+                // If driver currently has an active Taxi order, no other orders can be combined
+                if (_activeOrders.value.any { it.isTaxi }) {
                     _incomingOffer.value = null
                     return@addSnapshotListener
                 }
@@ -245,6 +253,37 @@ class RiderRepository {
                         return@firstOrNull false
                     }
 
+                    val riderVehicleType = OrderStepConstants.normalizeVehicleType(currentRider.vehicle.type)
+                    val orderVehicleType = OrderStepConstants.normalizeVehicleType(order.vehicleType)
+
+                    // TAXI SPECIFIC CRITERIA:
+                    // 1. driver has no other active order (a taxi trip cannot be combined with other orders)
+                    // 2. orders.vehicleType == riders.vehicleType
+                    // 3. pickup within 5 km
+                    if (order.isTaxi) {
+                        if (activeCount > 0) return@firstOrNull false
+                        if (orderVehicleType != riderVehicleType) return@firstOrNull false
+
+                        if (riderLoc != null && order.merchantLat != 0.0 && order.merchantLng != 0.0) {
+                            val distKm = calculateDistanceKm(riderLoc.first, riderLoc.second, order.merchantLat, order.merchantLng)
+                            if (distKm > 5.0) return@firstOrNull false
+                        } else if (order.pickupDistanceKm > 5.0) {
+                            return@firstOrNull false
+                        }
+
+                        // Readiness check for Taxi
+                        return@firstOrNull order.status in listOf(
+                            OrderStepConstants.STATUS_PLACED_ORDER,
+                            OrderStepConstants.STATUS_PREPARING,
+                            OrderStepConstants.STATUS_READY
+                        )
+                    }
+
+                    // Non-taxi orders:
+                    // If driver vehicle cannot service this order type according to SERVICES_BY_VEHICLE
+                    val allowedForVehicle = OrderStepConstants.getServicesForVehicle(riderVehicleType)
+                    if (!allowedForVehicle.contains(order.serviceType)) return@firstOrNull false
+
                     // Check pickup distance within 8 km if coordinates available
                     if (riderLoc != null && order.merchantLat != 0.0 && order.merchantLng != 0.0) {
                         val distKm = calculateDistanceKm(riderLoc.first, riderLoc.second, order.merchantLat, order.merchantLng)
@@ -257,11 +296,16 @@ class RiderRepository {
                         order.merchantAccepted ||
                             order.status == OrderStepConstants.STATUS_PREPARING ||
                             order.status == OrderStepConstants.STATUS_READY ||
+                            order.status.lowercase() in listOf("preparing", "ready") ||
                             order.status != OrderStepConstants.STATUS_PLACED_ORDER
                     } else {
-                        when (order.serviceType) {
-                            OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_INSTANT -> {
-                                order.status == OrderStepConstants.STATUS_PREPARING || order.status == OrderStepConstants.STATUS_READY
+                        when (order.serviceType.lowercase()) {
+                            OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_INSTANT, "convenience", "instant" -> {
+                                val s = order.status.trim().lowercase()
+                                s in listOf("preparing", "ready") ||
+                                    order.status == OrderStepConstants.STATUS_PREPARING ||
+                                    order.status == OrderStepConstants.STATUS_READY ||
+                                    (order.merchantAccepted && s != "placed order" && s != "placed_order")
                             }
                             OrderStepConstants.SERVICE_REQUEST -> {
                                 order.riderRequestStatus == OrderStepConstants.REQ_SEARCHING
@@ -524,6 +568,33 @@ class RiderRepository {
             return
         }
 
+        if (_activeOrders.value.any { it.isTaxi }) {
+            onError(
+                AcceptOrderErrorDetails(
+                    exceptionMessage = "A taxi trip cannot be combined with other orders",
+                    orderId = orderId,
+                    currentStatus = fetchedStatus,
+                    authUid = authUid,
+                    fieldsWritten = emptyMap()
+                )
+            )
+            return
+        }
+
+        val targetService = _incomingOffer.value?.serviceType?.lowercase() ?: OrderStepConstants.SERVICE_FOOD
+        if (targetService == OrderStepConstants.SERVICE_TAXI && _activeOrders.value.isNotEmpty()) {
+            onError(
+                AcceptOrderErrorDetails(
+                    exceptionMessage = "A taxi trip cannot be combined with any active orders",
+                    orderId = orderId,
+                    currentStatus = fetchedStatus,
+                    authUid = authUid,
+                    fieldsWritten = emptyMap()
+                )
+            )
+            return
+        }
+
         if (_activeOrders.value.size >= 2) {
             onError(
                 AcceptOrderErrorDetails(
@@ -537,8 +608,8 @@ class RiderRepository {
             return
         }
 
-        val targetService = _incomingOffer.value?.serviceType?.lowercase() ?: OrderStepConstants.SERVICE_FOOD
         val initialStep = when (targetService) {
+            OrderStepConstants.SERVICE_TAXI -> OrderStepConstants.STEP_TO_PICKUP
             OrderStepConstants.SERVICE_PARCEL -> OrderStepConstants.STEP_TO_SENDER
             OrderStepConstants.SERVICE_PABILI -> OrderStepConstants.STEP_TO_VENDOR
             else -> OrderStepConstants.STEP_TO_MERCHANT
@@ -570,6 +641,7 @@ class RiderRepository {
 
             val serviceType = snapshot.getString("serviceType") ?: OrderStepConstants.SERVICE_FOOD
             val stepForOrder = when (serviceType.lowercase()) {
+                OrderStepConstants.SERVICE_TAXI -> OrderStepConstants.STEP_TO_PICKUP
                 OrderStepConstants.SERVICE_PARCEL -> OrderStepConstants.STEP_TO_SENDER
                 OrderStepConstants.SERVICE_PABILI -> OrderStepConstants.STEP_TO_VENDOR
                 else -> OrderStepConstants.STEP_TO_MERCHANT
@@ -584,12 +656,21 @@ class RiderRepository {
             updates["riderPhone"] = currentRider.phone
             // riderPhotoUrl
             updates["riderPhotoUrl"] = currentRider.photoUrl
-            // riderStep (first stage is to_merchant, to_sender, or to_vendor)
+            // riderStep (first stage is to_pickup, to_merchant, to_sender, or to_vendor)
             updates["riderStep"] = stepForOrder
+
+            // riderVehicle: {type, plate, model, color}
+            updates["riderVehicle"] = mapOf(
+                "type" to currentRider.vehicle.type,
+                "plate" to currentRider.vehicle.plateNumber,
+                "model" to currentRider.vehicle.model,
+                "color" to currentRider.vehicle.color
+            )
 
             // riderRequest
             val isRequestOrder = serviceType.equals(OrderStepConstants.SERVICE_REQUEST, ignoreCase = true) ||
                     serviceType.equals("request", ignoreCase = true) ||
+                    serviceType.equals(OrderStepConstants.SERVICE_TAXI, ignoreCase = true) ||
                     snapshot.contains("riderRequest")
             if (isRequestOrder) {
                 val existingReq = (snapshot.get("riderRequest") as? Map<*, *>)?.mapKeys { it.key.toString() }?.toMutableMap() ?: mutableMapOf()
@@ -597,10 +678,18 @@ class RiderRepository {
                 updates["riderRequest"] = existingReq
             }
 
-            // status: never change status for food, convenience, or request orders
-            // For parcel set status "Rider is on the way to sender"; for pabili set "Rider is on the way to vendor"
+            // status:
+            // For taxi: "Driver is on the way"
+            // For parcel: "Rider is on the way to sender"
+            // For pabili: "Rider is on the way to vendor"
+            // For food, convenience, or request orders: never change status
             val newStatusForHistory: String
             when (serviceType.lowercase()) {
+                OrderStepConstants.SERVICE_TAXI -> {
+                    val taxiStatus = OrderStepConstants.STATUS_DRIVER_ON_WAY
+                    updates["status"] = taxiStatus
+                    newStatusForHistory = taxiStatus
+                }
                 OrderStepConstants.SERVICE_PARCEL -> {
                     val parcelStatus = OrderStepConstants.STATUS_RIDER_ON_WAY_SENDER
                     updates["status"] = parcelStatus
@@ -612,7 +701,6 @@ class RiderRepository {
                     newStatusForHistory = pabiliStatus
                 }
                 else -> {
-                    // food, convenience, or request orders: never change status
                     newStatusForHistory = currentStatus
                 }
             }
@@ -634,11 +722,13 @@ class RiderRepository {
             _incomingOffer.value = null
             if (accepted != null && accepted.id == orderId) {
                 val stepForAccepted = when (accepted.serviceType.lowercase()) {
+                    OrderStepConstants.SERVICE_TAXI -> OrderStepConstants.STEP_TO_PICKUP
                     OrderStepConstants.SERVICE_PARCEL -> OrderStepConstants.STEP_TO_SENDER
                     OrderStepConstants.SERVICE_PABILI -> OrderStepConstants.STEP_TO_VENDOR
                     else -> OrderStepConstants.STEP_TO_MERCHANT
                 }
                 val newStatus = when (accepted.serviceType.lowercase()) {
+                    OrderStepConstants.SERVICE_TAXI -> OrderStepConstants.STATUS_DRIVER_ON_WAY
                     OrderStepConstants.SERVICE_PARCEL -> OrderStepConstants.STATUS_RIDER_ON_WAY_SENDER
                     OrderStepConstants.SERVICE_PABILI -> OrderStepConstants.STATUS_RIDER_ON_WAY_VENDOR
                     else -> accepted.status
@@ -688,6 +778,39 @@ class RiderRepository {
         var nextReqStatus: String? = null
 
         when (serviceType) {
+            OrderStepConstants.SERVICE_TAXI -> {
+                when {
+                    currentStep == OrderStepConstants.STEP_TO_PICKUP -> {
+                        nextStep = OrderStepConstants.STEP_AT_PICKUP
+                        nextStatus = OrderStepConstants.STATUS_DRIVER_ARRIVED
+                        updates["arrivedMerchantAt"] = FieldValue.serverTimestamp()
+                    }
+                    currentStep == OrderStepConstants.STEP_AT_PICKUP -> {
+                        nextStep = "to_stop_2"
+                        nextStatus = OrderStepConstants.STATUS_ON_TRIP
+                        updates["pickedUpAt"] = FieldValue.serverTimestamp()
+                    }
+                    currentStep.startsWith(OrderStepConstants.STEP_TO_STOP_PREFIX) -> {
+                        val stopNum = currentStep.removePrefix(OrderStepConstants.STEP_TO_STOP_PREFIX).toIntOrNull() ?: 2
+                        val isLast = order.isAtLastTaxiStop
+                        if (isLast) {
+                            nextStep = OrderStepConstants.STEP_COMPLETED
+                            nextStatus = OrderStepConstants.STATUS_COMPLETED
+                            updates["deliveredAt"] = FieldValue.serverTimestamp()
+                            updates["completedStops"] = FieldValue.arrayUnion(stopNum)
+                        } else {
+                            nextStep = "to_stop_${stopNum + 1}"
+                            nextStatus = OrderStepConstants.STATUS_ON_TRIP
+                            updates["completedStops"] = FieldValue.arrayUnion(stopNum)
+                        }
+                    }
+                    else -> {
+                        nextStep = OrderStepConstants.STEP_COMPLETED
+                        nextStatus = OrderStepConstants.STATUS_COMPLETED
+                        updates["deliveredAt"] = FieldValue.serverTimestamp()
+                    }
+                }
+            }
             OrderStepConstants.SERVICE_PARCEL -> {
                 when (currentStep) {
                     OrderStepConstants.STEP_TO_SENDER, OrderStepConstants.STEP_HEADING_TO_MERCHANT -> {
@@ -797,50 +920,93 @@ class RiderRepository {
         updates["statusHistory"] = FieldValue.arrayUnion(historyEntry)
 
         // If completed: compute riderEarning and codCollected
-        if (nextStep == OrderStepConstants.STEP_COMPLETED || nextStatus == OrderStepConstants.STATUS_DELIVERED) {
+        if (nextStep == OrderStepConstants.STEP_COMPLETED || nextStatus == OrderStepConstants.STATUS_DELIVERED || nextStatus == OrderStepConstants.STATUS_COMPLETED) {
             val codAmountToWrite = if (order.isCod) order.cashAmountToCollect else 0.0
             updates["codCollected"] = codAmountToWrite
 
             val cityId = order.cityId.ifEmpty { _rider.value?.cityId ?: "puerto_princesa" }
-            db.collection("deliveryRates").document(cityId).get()
-                .addOnSuccessListener { rateDoc ->
-                    val commissionPercent = rateDoc.getDouble("riderCommissionPercent") ?: 20.0
-                    val deliveryFee = if (order.deliveryFee > 0) order.deliveryFee else (order.baseFare + order.distanceFare + order.surgeBonus)
-                    val net = deliveryFee * (1.0 - commissionPercent / 100.0) + order.tip
 
-                    updates["riderEarning"] = mapOf(
-                        "deliveryFee" to deliveryFee,
-                        "commissionPercent" to commissionPercent,
-                        "tip" to order.tip,
-                        "net" to net
-                    )
+            if (serviceType == OrderStepConstants.SERVICE_TAXI) {
+                val vehicleType = OrderStepConstants.normalizeVehicleType(order.vehicleType.ifEmpty { _rider.value?.vehicle?.type })
+                db.collection("deliveryRates").document(cityId).get()
+                    .addOnSuccessListener { rateDoc ->
+                        val rideRates = rateDoc.get("rideRates") as? Map<*, *>
+                        val vRates = rideRates?.get(vehicleType) as? Map<*, *>
+                        val commissionPercent = (vRates?.get("commissionPercent") as? Number)?.toDouble() ?: 15.0
+                        val fare = if (order.feesTotal > 0) order.feesTotal else (order.baseFare + order.distanceFare)
+                        val net = fare * (1.0 - commissionPercent / 100.0)
 
-                    orderRef.update(updates)
-                        .addOnSuccessListener {
-                            _activeOrders.value = _activeOrders.value.filter { it.id != order.id }
-                            RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
-                            onSuccess()
-                        }
-                        .addOnFailureListener { onError(it.localizedMessage ?: "Failed to complete delivery") }
-                }
-                .addOnFailureListener {
-                    // Fallback default 20%
-                    val deliveryFee = if (order.deliveryFee > 0) order.deliveryFee else (order.baseFare + order.distanceFare + order.surgeBonus)
-                    val net = deliveryFee * 0.8 + order.tip
-                    updates["riderEarning"] = mapOf(
-                        "deliveryFee" to deliveryFee,
-                        "commissionPercent" to 20.0,
-                        "tip" to order.tip,
-                        "net" to net
-                    )
-                    orderRef.update(updates)
-                        .addOnSuccessListener {
-                            _activeOrders.value = _activeOrders.value.filter { it.id != order.id }
-                            RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
-                            onSuccess()
-                        }
-                        .addOnFailureListener { onError(it.localizedMessage ?: "Failed to complete delivery") }
-                }
+                        updates["riderEarning"] = mapOf(
+                            "fare" to fare,
+                            "commissionPercent" to commissionPercent,
+                            "net" to net
+                        )
+
+                        orderRef.update(updates)
+                            .addOnSuccessListener {
+                                _activeOrders.value = _activeOrders.value.filter { it.id != order.id }
+                                RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
+                                onSuccess()
+                            }
+                            .addOnFailureListener { onError(it.localizedMessage ?: "Failed to complete trip") }
+                    }
+                    .addOnFailureListener {
+                        val fare = if (order.feesTotal > 0) order.feesTotal else (order.baseFare + order.distanceFare)
+                        val net = fare * (1.0 - 15.0 / 100.0)
+                        updates["riderEarning"] = mapOf(
+                            "fare" to fare,
+                            "commissionPercent" to 15.0,
+                            "net" to net
+                        )
+                        orderRef.update(updates)
+                            .addOnSuccessListener {
+                                _activeOrders.value = _activeOrders.value.filter { it.id != order.id }
+                                RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
+                                onSuccess()
+                            }
+                            .addOnFailureListener { onError(it.localizedMessage ?: "Failed to complete trip") }
+                    }
+            } else {
+                db.collection("deliveryRates").document(cityId).get()
+                    .addOnSuccessListener { rateDoc ->
+                        val commissionPercent = rateDoc.getDouble("riderCommissionPercent") ?: 20.0
+                        val deliveryFee = if (order.deliveryFee > 0) order.deliveryFee else (order.baseFare + order.distanceFare + order.surgeBonus)
+                        val net = deliveryFee * (1.0 - commissionPercent / 100.0) + order.tip
+
+                        updates["riderEarning"] = mapOf(
+                            "deliveryFee" to deliveryFee,
+                            "commissionPercent" to commissionPercent,
+                            "tip" to order.tip,
+                            "net" to net
+                        )
+
+                        orderRef.update(updates)
+                            .addOnSuccessListener {
+                                _activeOrders.value = _activeOrders.value.filter { it.id != order.id }
+                                RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
+                                onSuccess()
+                            }
+                            .addOnFailureListener { onError(it.localizedMessage ?: "Failed to complete delivery") }
+                    }
+                    .addOnFailureListener {
+                        // Fallback default 20%
+                        val deliveryFee = if (order.deliveryFee > 0) order.deliveryFee else (order.baseFare + order.distanceFare + order.surgeBonus)
+                        val net = deliveryFee * 0.8 + order.tip
+                        updates["riderEarning"] = mapOf(
+                            "deliveryFee" to deliveryFee,
+                            "commissionPercent" to 20.0,
+                            "tip" to order.tip,
+                            "net" to net
+                        )
+                        orderRef.update(updates)
+                            .addOnSuccessListener {
+                                _activeOrders.value = _activeOrders.value.filter { it.id != order.id }
+                                RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
+                                onSuccess()
+                            }
+                            .addOnFailureListener { onError(it.localizedMessage ?: "Failed to complete delivery") }
+                    }
+            }
         } else {
             orderRef.update(updates)
                 .addOnSuccessListener {
@@ -855,12 +1021,23 @@ class RiderRepository {
 
     // RELEASE ORDER
     fun releaseOrder(order: Order, reason: String, onSuccess: () -> Unit, onError: (String) -> Unit) {
-        if (order.riderStep != OrderStepConstants.STEP_HEADING_TO_MERCHANT && order.riderStep != OrderStepConstants.STEP_ARRIVED_AT_MERCHANT) {
-            onError("Order cannot be released once items/packages are picked up")
-            return
+        if (order.isTaxi) {
+            if (order.riderStep != OrderStepConstants.STEP_TO_PICKUP && order.riderStep != OrderStepConstants.STEP_AT_PICKUP) {
+                onError("Trip cannot be released once trip has started")
+                return
+            }
+        } else {
+            if (order.riderStep != OrderStepConstants.STEP_HEADING_TO_MERCHANT && order.riderStep != OrderStepConstants.STEP_ARRIVED_AT_MERCHANT &&
+                order.riderStep != OrderStepConstants.STEP_TO_MERCHANT && order.riderStep != OrderStepConstants.STEP_AT_MERCHANT &&
+                order.riderStep != OrderStepConstants.STEP_TO_SENDER && order.riderStep != OrderStepConstants.STEP_AT_SENDER &&
+                order.riderStep != OrderStepConstants.STEP_TO_VENDOR && order.riderStep != OrderStepConstants.STEP_AT_VENDOR) {
+                onError("Order cannot be released once items/packages are picked up")
+                return
+            }
         }
 
-        val revertStatus = when (order.serviceType) {
+        val revertStatus = when (order.serviceType.lowercase()) {
+            OrderStepConstants.SERVICE_TAXI -> OrderStepConstants.STATUS_PLACED_ORDER
             OrderStepConstants.SERVICE_PARCEL, OrderStepConstants.SERVICE_PABILI -> OrderStepConstants.STATUS_PLACED_ORDER
             OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_INSTANT -> OrderStepConstants.STATUS_READY
             OrderStepConstants.SERVICE_REQUEST -> OrderStepConstants.STATUS_PLACED_ORDER
@@ -877,7 +1054,7 @@ class RiderRepository {
             "updatedAt" to FieldValue.serverTimestamp()
         )
 
-        if (order.serviceType == OrderStepConstants.SERVICE_REQUEST) {
+        if (order.serviceType == OrderStepConstants.SERVICE_REQUEST || order.serviceType == OrderStepConstants.SERVICE_TAXI) {
             updates["riderRequest.status"] = OrderStepConstants.REQ_SEARCHING
         }
 
@@ -1061,6 +1238,17 @@ class RiderRepository {
             val merchantAccepted = doc.getBoolean("merchantAccepted")
                 ?: (status == OrderStepConstants.STATUS_PREPARING || status == OrderStepConstants.STATUS_READY)
 
+            val prepMinutes = doc.getLong("prepMinutes")?.toInt()
+                ?: (doc.get("prepMinutes") as? Number)?.toInt()
+                ?: doc.getLong("preparationMinutes")?.toInt()
+                ?: (doc.get("preparationMinutes") as? Number)?.toInt()
+                ?: doc.getLong("estimatedPrepTime")?.toInt()
+                ?: (doc.get("estimatedPrepTime") as? Number)?.toInt()
+                ?: doc.getLong("prepTime")?.toInt()
+                ?: (doc.get("prepTime") as? Number)?.toInt()
+                ?: 0
+            val editedAt = doc.get("editedAt") ?: doc.get("merchantEditedAt")
+
             // 1. Pickup location: orders.pickup.lat/lng or merchant.latitude/longitude
             val pickupMap = (doc.get("pickup") as? Map<*, *>) ?: (doc.get("merchant") as? Map<*, *>)
             val merchantLat = (pickupMap?.get("lat") as? Number)?.toDouble()
@@ -1162,6 +1350,20 @@ class RiderRepository {
 
             val riderReqStatus = (doc.get("riderRequest") as? Map<*, *>)?.get("status")?.toString() ?: doc.getString("riderRequestStatus") ?: ""
 
+            val vehicleType = doc.getString("vehicleType") ?: "motorcycle"
+            val stopsRaw = doc.get("stops") as? List<*>
+            val taxiStops = stopsRaw?.mapIndexedNotNull { index, obj ->
+                val m = obj as? Map<*, *> ?: return@mapIndexedNotNull null
+                TaxiStop(
+                    stopNumber = (m["stopNumber"] as? Number)?.toInt() ?: (index + 3),
+                    address = m["address"]?.toString() ?: "",
+                    area = m["area"]?.toString() ?: "",
+                    lat = (m["lat"] as? Number)?.toDouble() ?: 0.0,
+                    lng = (m["lng"] as? Number)?.toDouble() ?: 0.0
+                )
+            } ?: emptyList()
+            val completedStopsRaw = (doc.get("completedStops") as? List<*>)?.mapNotNull { (it as? Number)?.toInt() } ?: emptyList()
+
             return Order(
                 id = id,
                 orderNumber = orderNumber,
@@ -1174,11 +1376,16 @@ class RiderRepository {
                 riderPhotoUrl = riderPhotoUrl,
                 cityId = cityId,
                 merchantId = merchantId,
+                vehicleType = vehicleType,
+                stops = taxiStops,
+                completedStops = completedStopsRaw,
                 fulfillment = fulfillment,
                 isScheduled = isScheduled,
                 scheduledFor = scheduledForRaw,
                 scheduledDateText = scheduledDateText,
                 merchantAccepted = merchantAccepted,
+                prepMinutes = prepMinutes,
+                editedAt = editedAt,
                 merchantName = merchantName,
                 merchantAddress = merchantAddress,
                 merchantPhone = merchantPhone,

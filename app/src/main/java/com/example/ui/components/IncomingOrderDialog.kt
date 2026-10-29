@@ -102,17 +102,36 @@ fun IncomingOrderDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = DelivioYellow
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text(
-                            text = badge.uppercase(),
-                            color = TextOnYellow,
-                            fontWeight = FontWeight.Black,
-                            fontSize = 13.sp,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                        )
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = DelivioYellow
+                        ) {
+                            Text(
+                                text = badge.uppercase(),
+                                color = TextOnYellow,
+                                fontWeight = FontWeight.Black,
+                                fontSize = 13.sp,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                            )
+                        }
+
+                        if (order.isTaxi) {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant
+                            ) {
+                                Text(
+                                    text = OrderStepConstants.getVehicleDisplayName(order.vehicleType),
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                                )
+                            }
+                        }
                     }
 
                     // Circular Countdown Timer
@@ -157,11 +176,50 @@ fun IncomingOrderDialog(
                             color = TextOnYellow
                         )
                         Spacer(modifier = Modifier.height(6.dp))
-                        PaymentBadgeChip(
-                            order = order,
-                            currencySymbol = currencySymbol,
-                            isLarge = true
-                        )
+                        if (order.isTaxi) {
+                            val paymentText = if (order.isCod) {
+                                "Collect $currencySymbol${String.format("%.2f", order.cashAmountToCollect)} from passenger"
+                            } else {
+                                "Paid"
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (order.isCod) DelivioYellowDark else Color(0xFF2E7D32)
+                            ) {
+                                Text(
+                                    text = paymentText,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                )
+                            }
+                        } else {
+                            PaymentBadgeChip(
+                                order = order,
+                                currencySymbol = currencySymbol,
+                                isLarge = true
+                            )
+                        }
+                        if (order.prepStatusText.isNotBlank() || order.isEditedByMerchant) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                if (order.prepStatusText.isNotBlank()) {
+                                    MerchantPrepStatusChip(
+                                        order = order,
+                                        isLarge = true
+                                    )
+                                }
+                                if (order.isEditedByMerchant) {
+                                    OrderUpdatedByMerchantBadge(
+                                        isLarge = true
+                                    )
+                                }
+                            }
+                        }
                         if (order.tip > 0 || order.isScheduled) {
                             Spacer(modifier = Modifier.height(6.dp))
                             Row(
@@ -197,14 +255,10 @@ fun IncomingOrderDialog(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Information allowed by Section 8 Offer Stage:
-                // FOOD & CONVENIENCE: merchant name and address, customer's area and distances. Hide customer name, address, phone, items!
-                // REQUEST A RIDER: merchant name and address, customer's area. Hide customer name and address!
-                // PARCEL: sender name, pickup address, recipient's area, distances. Hide package specs!
-                // PABILI: vendor name and address, customer's area. Hide customer name and items!
-                val pickupTitle = when (order.serviceType) {
-                    OrderStepConstants.SERVICE_PARCEL -> "Pickup / Sender"
-                    OrderStepConstants.SERVICE_PABILI -> "Purchase at Vendor"
+                val pickupTitle = when {
+                    order.isTaxi -> "Pickup Location"
+                    order.serviceType == OrderStepConstants.SERVICE_PARCEL -> "Pickup / Sender"
+                    order.serviceType == OrderStepConstants.SERVICE_PABILI -> "Purchase at Vendor"
                     else -> "Pickup Merchant"
                 }
 
@@ -215,14 +269,17 @@ fun IncomingOrderDialog(
                 ) {
                     Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Storefront, contentDescription = "Pickup", tint = DelivioYellowDark, modifier = Modifier.size(20.dp))
+                            Icon(
+                                if (order.isTaxi) Icons.Default.DirectionsCar else Icons.Default.Storefront,
+                                contentDescription = "Pickup",
+                                tint = DelivioYellowDark,
+                                modifier = Modifier.size(20.dp)
+                            )
                             Spacer(modifier = Modifier.width(8.dp))
                             Column {
                                 Text(pickupTitle.uppercase(), fontSize = 10.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                                Text(order.merchantName, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                if (order.merchantAddress.isNotBlank()) {
-                                    Text(order.merchantAddress, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
+                                val pickupAddr = if (order.merchantAddress.isNotBlank()) order.merchantAddress else order.merchantName
+                                Text(pickupAddr, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                             }
                         }
 
@@ -232,9 +289,14 @@ fun IncomingOrderDialog(
                             Icon(Icons.Default.LocationOn, contentDescription = "Drop-off Area", tint = DelivioRed, modifier = Modifier.size(20.dp))
                             Spacer(modifier = Modifier.width(8.dp))
                             Column {
-                                Text("DROP-OFF DESTINATION", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                                Text(
+                                    if (order.isTaxi) "DROP-OFF DESTINATION (${order.totalStopsCount} STOPS)" else "DROP-OFF DESTINATION",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
                                 Text("Area: ${order.customerArea}", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                Text("Full address & details reveal upon arrival", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("Passenger identity revealed after accepting", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
 
@@ -244,8 +306,8 @@ fun IncomingOrderDialog(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                Text("To pickup: ~${order.pickupDistanceKm} km", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text("Trip: ~${order.deliveryDistanceKm} km", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("Distance to pickup: ~${order.pickupDistanceKm} km", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("Trip distance: ~${order.deliveryDistanceKm} km", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
                     }
@@ -276,7 +338,7 @@ fun IncomingOrderDialog(
                             .weight(1.5f)
                             .height(50.dp)
                     ) {
-                        Text("Accept Order", fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
+                        Text(if (order.isTaxi) "Accept Trip" else "Accept Order", fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
                     }
                 }
             }

@@ -66,13 +66,13 @@ fun DeliverySuccessDialog(
                 Spacer(modifier = Modifier.height(14.dp))
 
                 Text(
-                    text = "Delivery Completed!",
+                    text = if (order.isTaxi) "Trip Completed!" else "Delivery Completed!",
                     fontWeight = FontWeight.ExtraBold,
                     fontSize = 22.sp,
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
-                    text = "Order #${order.orderNumber}",
+                    text = if (order.isTaxi) "Trip #${order.orderNumber}" else "Order #${order.orderNumber}",
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -128,31 +128,42 @@ fun DeliverySuccessDialog(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    FareRow("Base Pay", "$currencySymbol${String.format("%.2f", order.baseFare)}")
-                    FareRow("Per-km Pay (${String.format("%.1f", order.deliveryDistanceKm)} km)", "$currencySymbol${String.format("%.2f", order.distanceFare)}")
-                    if (order.waitingPay > 0) {
-                        FareRow("Waiting-time Pay", "+$currencySymbol${String.format("%.2f", order.waitingPay)}", isPositive = true)
+                    if (order.isTaxi) {
+                        FareRow("Total Fare", "$currencySymbol${String.format("%.2f", order.feesTotal)}")
+                        val commRate = if (order.platformCommission > 0.0) order.platformCommission else 15.0
+                        val commAmount = order.feesTotal * (commRate / 100.0)
+                        FareRow("Platform Commission (${commRate.toInt()}%)", "-$currencySymbol${String.format("%.2f", commAmount)}")
+                        if (order.tip > 0) {
+                            FareRow("Tip (100% to Driver)", "+$currencySymbol${String.format("%.2f", order.tip)}", isPositive = true)
+                        }
+                    } else {
+                        FareRow("Base Pay", "$currencySymbol${String.format("%.2f", order.baseFare)}")
+                        FareRow("Per-km Pay (${String.format("%.1f", order.deliveryDistanceKm)} km)", "$currencySymbol${String.format("%.2f", order.distanceFare)}")
+                        if (order.waitingPay > 0) {
+                            FareRow("Waiting-time Pay", "+$currencySymbol${String.format("%.2f", order.waitingPay)}", isPositive = true)
+                        }
+                        if (order.extraStopPay > 0) {
+                            FareRow("Extra-stop Pay", "+$currencySymbol${String.format("%.2f", order.extraStopPay)}", isPositive = true)
+                        }
+                        if (order.returnTripPay > 0) {
+                            FareRow("Return-trip Pay", "+$currencySymbol${String.format("%.2f", order.returnTripPay)}", isPositive = true)
+                        }
+                        if (order.urgentBonus > 0) {
+                            FareRow("Urgent Request Bonus", "+$currencySymbol${String.format("%.2f", order.urgentBonus)}", isPositive = true)
+                        }
+                        if (order.surgeBonus > 0) {
+                            FareRow("Peak Surge Bonus", "+$currencySymbol${String.format("%.2f", order.surgeBonus)}", isPositive = true)
+                        }
+                        if (order.tip > 0) {
+                            FareRow("Tip", "+$currencySymbol${String.format("%.2f", order.tip)}", isPositive = true)
+                        }
+                        FareRow("Platform Commission", "-$currencySymbol${String.format("%.2f", order.platformCommission)}")
                     }
-                    if (order.extraStopPay > 0) {
-                        FareRow("Extra-stop Pay", "+$currencySymbol${String.format("%.2f", order.extraStopPay)}", isPositive = true)
-                    }
-                    if (order.returnTripPay > 0) {
-                        FareRow("Return-trip Pay", "+$currencySymbol${String.format("%.2f", order.returnTripPay)}", isPositive = true)
-                    }
-                    if (order.urgentBonus > 0) {
-                        FareRow("Urgent Request Bonus", "+$currencySymbol${String.format("%.2f", order.urgentBonus)}", isPositive = true)
-                    }
-                    if (order.surgeBonus > 0) {
-                        FareRow("Peak Surge Bonus", "+$currencySymbol${String.format("%.2f", order.surgeBonus)}", isPositive = true)
-                    }
-                    if (order.tip > 0) {
-                        FareRow("Tip", "+$currencySymbol${String.format("%.2f", order.tip)}", isPositive = true)
-                    }
-                    FareRow("Platform Commission", "-$currencySymbol${String.format("%.2f", order.platformCommission)}")
 
                     HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
                     if (order.isCod) {
-                        FareRow("COD Cash Collected", "$currencySymbol${String.format("%.2f", order.codCollected)}", isBold = true)
+                        val collected = if (order.codCollected > 0) order.codCollected else order.cashAmountToCollect
+                        FareRow("COD Cash Collected", "$currencySymbol${String.format("%.2f", collected)}", isBold = true)
                     } else if (order.isPaidOnline) {
                         val provider = if (order.paymentProviderLabel.isNotBlank()) " (${order.paymentProviderLabel})" else ""
                         FareRow("Payment", "Paid Online$provider", isBold = true)

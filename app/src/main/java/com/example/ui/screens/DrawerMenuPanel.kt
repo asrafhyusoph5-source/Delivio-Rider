@@ -74,7 +74,7 @@ fun DrawerMenuPanel(
                         .verticalScroll(rememberScrollState())
                 ) {
                     // Header with live "Hi, <first name>"
-                    val firstName = rider?.name?.trim()?.split(" ")?.firstOrNull()?.ifBlank { "Rider" } ?: "Rider"
+                    val firstName = rider?.name?.trim()?.split(" ")?.firstOrNull()?.ifBlank { "Driver" } ?: "Driver"
 
                     Box(
                         modifier = Modifier
@@ -113,7 +113,8 @@ fun DrawerMenuPanel(
                             )
                             Spacer(modifier = Modifier.height(2.dp))
                             val ratingStr = if (rider != null) String.format("%.1f", rider.rating) else "5.0"
-                            val modelStr = rider?.vehicle?.model?.ifBlank { "Rider" } ?: "Rider"
+                            val vehicleLabel = OrderStepConstants.getVehicleDisplayName(rider?.vehicle?.type)
+                            val modelStr = rider?.vehicle?.model?.ifBlank { vehicleLabel } ?: vehicleLabel
                             Text(
                                 text = "★ $ratingStr • $modelStr",
                                 fontSize = 12.sp,
@@ -202,7 +203,7 @@ fun DrawerMenuPanel(
                             }
                         )
 
-                        // Service Type (5 Services; merge Request and Merchant Request)
+                        // Service Type: only services in SERVICES_BY_VEHICLE for riders.vehicleType appear
                         DrawerMenuItem(
                             icon = Icons.Default.Tune,
                             title = "Service Type",
@@ -214,6 +215,7 @@ fun DrawerMenuPanel(
                         AnimatedVisibility(visible = serviceTypeExpanded) {
                             val activeList = rider?.activeServices ?: emptyList()
                             val allowedList = rider?.allowedServices ?: OrderStepConstants.ALL_SERVICES
+                            val supportedServices = OrderStepConstants.getServicesForVehicle(rider?.vehicle?.type)
 
                             Column(
                                 modifier = Modifier
@@ -221,59 +223,82 @@ fun DrawerMenuPanel(
                                     .padding(start = 16.dp, end = 8.dp, top = 4.dp, bottom = 4.dp)
                             ) {
                                 // 1. Delivio Food (food)
-                                val foodAllowed = allowedList.contains(OrderStepConstants.SERVICE_FOOD)
-                                DrawerServiceTypeToggleItem(
-                                    title = "Delivio Food",
-                                    subtitle = "Restaurant & cooked food deliveries",
-                                    icon = Icons.Default.Restaurant,
-                                    isChecked = activeList.contains(OrderStepConstants.SERVICE_FOOD),
-                                    isDisabledByAdmin = !foodAllowed,
-                                    onCheckedChange = { onToggleService(OrderStepConstants.SERVICE_FOOD, it) }
-                                )
+                                if (supportedServices.contains(OrderStepConstants.SERVICE_FOOD)) {
+                                    val foodAllowed = allowedList.contains(OrderStepConstants.SERVICE_FOOD)
+                                    DrawerServiceTypeToggleItem(
+                                        title = "Delivio Food",
+                                        subtitle = "Restaurant & cooked food deliveries",
+                                        icon = Icons.Default.Restaurant,
+                                        isChecked = activeList.contains(OrderStepConstants.SERVICE_FOOD),
+                                        isDisabledByAdmin = !foodAllowed,
+                                        onCheckedChange = { onToggleService(OrderStepConstants.SERVICE_FOOD, it) }
+                                    )
+                                }
 
                                 // 2. Delivio Instant (convenience)
-                                val instantAllowed = allowedList.contains(OrderStepConstants.SERVICE_INSTANT)
-                                DrawerServiceTypeToggleItem(
-                                    title = "Delivio Instant",
-                                    subtitle = "Express point-to-point courier",
-                                    icon = Icons.Default.Bolt,
-                                    isChecked = activeList.contains(OrderStepConstants.SERVICE_INSTANT),
-                                    isDisabledByAdmin = !instantAllowed,
-                                    onCheckedChange = { onToggleService(OrderStepConstants.SERVICE_INSTANT, it) }
-                                )
+                                if (supportedServices.contains(OrderStepConstants.SERVICE_INSTANT)) {
+                                    val instantAllowed = allowedList.contains(OrderStepConstants.SERVICE_INSTANT)
+                                    DrawerServiceTypeToggleItem(
+                                        title = "Delivio Instant",
+                                        subtitle = "Express point-to-point courier",
+                                        icon = Icons.Default.Bolt,
+                                        isChecked = activeList.contains(OrderStepConstants.SERVICE_INSTANT),
+                                        isDisabledByAdmin = !instantAllowed,
+                                        onCheckedChange = { onToggleService(OrderStepConstants.SERVICE_INSTANT, it) }
+                                    )
+                                }
 
                                 // 3. Delivio Parcel (parcel)
-                                val parcelAllowed = allowedList.contains(OrderStepConstants.SERVICE_PARCEL)
-                                DrawerServiceTypeToggleItem(
-                                    title = "Delivio Parcel",
-                                    subtitle = "Boxed items, packages & documents",
-                                    icon = Icons.Default.Inventory2,
-                                    isChecked = activeList.contains(OrderStepConstants.SERVICE_PARCEL),
-                                    isDisabledByAdmin = !parcelAllowed,
-                                    onCheckedChange = { onToggleService(OrderStepConstants.SERVICE_PARCEL, it) }
-                                )
+                                if (supportedServices.contains(OrderStepConstants.SERVICE_PARCEL)) {
+                                    val parcelAllowed = allowedList.contains(OrderStepConstants.SERVICE_PARCEL)
+                                    DrawerServiceTypeToggleItem(
+                                        title = "Delivio Parcel",
+                                        subtitle = "Boxed items, packages & documents",
+                                        icon = Icons.Default.Inventory2,
+                                        isChecked = activeList.contains(OrderStepConstants.SERVICE_PARCEL),
+                                        isDisabledByAdmin = !parcelAllowed,
+                                        onCheckedChange = { onToggleService(OrderStepConstants.SERVICE_PARCEL, it) }
+                                    )
+                                }
 
                                 // 4. Delivio Pabili (pabili)
-                                val pabiliAllowed = allowedList.contains(OrderStepConstants.SERVICE_PABILI)
-                                DrawerServiceTypeToggleItem(
-                                    title = "Delivio Pabili",
-                                    subtitle = "On-demand grocery & item purchasing",
-                                    icon = Icons.Default.ShoppingBag,
-                                    isChecked = activeList.contains(OrderStepConstants.SERVICE_PABILI),
-                                    isDisabledByAdmin = !pabiliAllowed,
-                                    onCheckedChange = { onToggleService(OrderStepConstants.SERVICE_PABILI, it) }
-                                )
+                                if (supportedServices.contains(OrderStepConstants.SERVICE_PABILI)) {
+                                    val pabiliAllowed = allowedList.contains(OrderStepConstants.SERVICE_PABILI)
+                                    DrawerServiceTypeToggleItem(
+                                        title = "Delivio Pabili",
+                                        subtitle = "On-demand grocery & item purchasing",
+                                        icon = Icons.Default.ShoppingBag,
+                                        isChecked = activeList.contains(OrderStepConstants.SERVICE_PABILI),
+                                        isDisabledByAdmin = !pabiliAllowed,
+                                        onCheckedChange = { onToggleService(OrderStepConstants.SERVICE_PABILI, it) }
+                                    )
+                                }
 
-                                // 5. Delivio Request (request_rider, "Merchant rider requests")
-                                val reqAllowed = allowedList.contains(OrderStepConstants.SERVICE_REQUEST)
-                                DrawerServiceTypeToggleItem(
-                                    title = "Delivio Request",
-                                    subtitle = "Merchant rider requests",
-                                    icon = Icons.Default.DeliveryDining,
-                                    isChecked = activeList.contains(OrderStepConstants.SERVICE_REQUEST),
-                                    isDisabledByAdmin = !reqAllowed,
-                                    onCheckedChange = { onToggleService(OrderStepConstants.SERVICE_REQUEST, it) }
-                                )
+                                // 5. Delivio Request (request_rider)
+                                if (supportedServices.contains(OrderStepConstants.SERVICE_REQUEST)) {
+                                    val reqAllowed = allowedList.contains(OrderStepConstants.SERVICE_REQUEST)
+                                    DrawerServiceTypeToggleItem(
+                                        title = "Delivio Request",
+                                        subtitle = "Merchant driver requests",
+                                        icon = Icons.Default.DeliveryDining,
+                                        isChecked = activeList.contains(OrderStepConstants.SERVICE_REQUEST),
+                                        isDisabledByAdmin = !reqAllowed,
+                                        onCheckedChange = { onToggleService(OrderStepConstants.SERVICE_REQUEST, it) }
+                                    )
+                                }
+
+                                // 6. Delivio Taxi (taxi)
+                                if (supportedServices.contains(OrderStepConstants.SERVICE_TAXI)) {
+                                    val taxiAllowed = allowedList.contains(OrderStepConstants.SERVICE_TAXI)
+                                    DrawerServiceTypeToggleItem(
+                                        title = "Delivio Taxi",
+                                        subtitle = "Passenger ride-hailing & city taxi",
+                                        icon = Icons.Default.DirectionsCar,
+                                        isChecked = activeList.contains(OrderStepConstants.SERVICE_TAXI),
+                                        isDisabledByAdmin = !taxiAllowed,
+                                        onCheckedChange = { onToggleService(OrderStepConstants.SERVICE_TAXI, it) }
+                                    )
+                                }
                             }
                         }
 
@@ -299,7 +324,7 @@ fun DrawerMenuPanel(
                                     onClose()
                                     onNavigate("resources/insights")
                                 }
-                                DrawerSubMenuItem("Rider safety") {
+                                DrawerSubMenuItem("Driver safety") {
                                     onClose()
                                     onNavigate("resources/safety")
                                 }

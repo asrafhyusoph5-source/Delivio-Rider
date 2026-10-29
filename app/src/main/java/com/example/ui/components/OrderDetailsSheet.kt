@@ -215,10 +215,14 @@ fun OrderDetailsSheet(
             // ================= ACTIVE ORDER =================
             val order = currentOrder
             val badge = OrderStepConstants.getServiceBadge(order.serviceType)
-            val stageTitle = OrderStepConstants.getStageTitle(order.serviceType, order.riderStep)
+            val stageTitle = OrderStepConstants.getStageTitle(order.serviceType, order.riderStep, order.currentTaxiStopNumber)
             val isCustomerRevealed = OrderStepConstants.isCustomerAddressRevealed(order.serviceType, order.riderStep)
 
-            val allowedCallParty: Pair<String, String>? = if (isCustomerRevealed) {
+            val allowedCallParty: Pair<String, String>? = if (order.isTaxi) {
+                if (order.customerPhone.isNotBlank()) {
+                    "Passenger" to order.customerPhone
+                } else null
+            } else if (isCustomerRevealed) {
                 if (order.customerPhone.isNotBlank()) {
                     val label = if (order.serviceType.lowercase() == OrderStepConstants.SERVICE_PARCEL) "Recipient" else "Customer"
                     label to order.customerPhone
@@ -234,24 +238,46 @@ fun OrderDetailsSheet(
                 } else null
             }
 
-            val navLat = if (isCustomerRevealed) order.customerLat else order.merchantLat
-            val navLng = if (isCustomerRevealed) order.customerLng else order.merchantLng
-            val navAddr = if (isCustomerRevealed) order.customerAddress else order.merchantAddress
+            val navLat = if (order.isTaxi) {
+                if (order.riderStep == OrderStepConstants.STEP_TO_PICKUP) order.merchantLat
+                else order.currentTargetStop?.lat ?: order.customerLat
+            } else if (isCustomerRevealed) order.customerLat else order.merchantLat
+
+            val navLng = if (order.isTaxi) {
+                if (order.riderStep == OrderStepConstants.STEP_TO_PICKUP) order.merchantLng
+                else order.currentTargetStop?.lng ?: order.customerLng
+            } else if (isCustomerRevealed) order.customerLng else order.merchantLng
+
+            val navAddr = if (order.isTaxi) {
+                if (order.riderStep == OrderStepConstants.STEP_TO_PICKUP) order.merchantAddress
+                else order.currentTargetStop?.address ?: order.customerAddress
+            } else if (isCustomerRevealed) order.customerAddress else order.merchantAddress
+
             val onNavigateClick = {
                 navigateExternal(context, navLat, navLng, navAddr)
             }
 
-            val buttonText = OrderStepConstants.getSlideButtonText(order.serviceType, order.riderStep)
-            val stepLower = order.riderStep.lowercase().trim()
-            val isFinalStep = stepLower in listOf(
-                OrderStepConstants.STEP_AT_CUSTOMER,
-                OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER,
-                OrderStepConstants.STEP_AT_RECIPIENT
+            val buttonText = OrderStepConstants.getSlideButtonText(
+                order.serviceType,
+                order.riderStep,
+                order.currentTaxiStopNumber,
+                order.isAtLastTaxiStop
             )
+            val stepLower = order.riderStep.lowercase().trim()
+            val isFinalStep = if (order.isTaxi) {
+                order.isAtLastTaxiStop && stepLower.startsWith(OrderStepConstants.STEP_TO_STOP_PREFIX)
+            } else {
+                stepLower in listOf(
+                    OrderStepConstants.STEP_AT_CUSTOMER,
+                    OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER,
+                    OrderStepConstants.STEP_AT_RECIPIENT
+                )
+            }
             val isParcelPickupCashStep = order.isCod && order.isParcel && order.parcelCollectAtSender &&
                     (stepLower in listOf(OrderStepConstants.STEP_AT_SENDER, OrderStepConstants.STEP_ARRIVED_AT_MERCHANT))
             val isDeliveryCashStep = order.isCod && (
-                (!order.isParcel && isFinalStep) ||
+                (order.isTaxi && isFinalStep) ||
+                (!order.isParcel && !order.isTaxi && isFinalStep) ||
                 (order.isParcel && !order.parcelCollectAtSender && isFinalStep)
             )
             val isCashCollectionStep = isParcelPickupCashStep || isDeliveryCashStep
@@ -474,6 +500,17 @@ fun OrderDetailsSheet(
                                     currencySymbol = currencySymbol,
                                     isLarge = false
                                 )
+                                if (order.prepStatusText.isNotBlank()) {
+                                    MerchantPrepStatusChip(
+                                        order = order,
+                                        isLarge = false
+                                    )
+                                }
+                                if (order.isEditedByMerchant) {
+                                    OrderUpdatedByMerchantBadge(
+                                        isLarge = false
+                                    )
+                                }
                                 if (order.tip > 0) {
                                     TipBadgeChip(
                                         tipAmount = order.tip,
@@ -752,6 +789,26 @@ fun OrderDetailsSheet(
                             isLarge = true,
                             modifier = Modifier.fillMaxWidth()
                         )
+                        if (order.prepStatusText.isNotBlank() || order.isEditedByMerchant) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                if (order.prepStatusText.isNotBlank()) {
+                                    MerchantPrepStatusChip(
+                                        order = order,
+                                        isLarge = true
+                                    )
+                                }
+                                if (order.isEditedByMerchant) {
+                                    OrderUpdatedByMerchantBadge(
+                                        isLarge = true
+                                    )
+                                }
+                            }
+                        }
                         if (order.tip > 0 || order.isScheduled) {
                             Spacer(modifier = Modifier.height(6.dp))
                             Row(
@@ -809,6 +866,16 @@ fun OrderDetailsSheet(
                                         onNavigate = { lat, lng, addr -> navigateExternal(context, lat, lng, addr) }
                                     )
                                 }
+                                OrderStepConstants.SERVICE_TAXI -> {
+                                    TaxiOrderContent(
+                                        order = order,
+                                        currencySymbol = currencySymbol,
+                                        onContactSupport = onContactSupport,
+                                        onCall = onCallClick,
+                                        onNavigate = { lat, lng, addr -> navigateExternal(context, lat, lng, addr) },
+                                        onReportProblem = { showProblemDialog = true }
+                                    )
+                                }
                                 OrderStepConstants.SERVICE_REQUEST -> {
                                     RequestRiderOrderContent(
                                         order = order,
@@ -820,6 +887,7 @@ fun OrderDetailsSheet(
                                 else -> {
                                     FoodOrderContent(
                                         order = order,
+                                        currencySymbol = currencySymbol,
                                         onContactSupport = onContactSupport,
                                         onCall = onCallClick,
                                         onNavigate = { lat, lng, addr -> navigateExternal(context, lat, lng, addr) }
@@ -827,7 +895,7 @@ fun OrderDetailsSheet(
                                 }
                             }
 
-                            // Release button (only allowed before pickup)
+                            // Release button (only allowed before pickup / trip start)
                             val canRelease = OrderStepConstants.isPickupStage(order.serviceType, order.riderStep)
                             if (canRelease) {
                                 Spacer(modifier = Modifier.height(8.dp))
@@ -835,7 +903,7 @@ fun OrderDetailsSheet(
                                     onClick = { showReleaseDialog = true },
                                     modifier = Modifier.align(Alignment.CenterHorizontally)
                                 ) {
-                                    Text("Release order before pickup", color = DelivioRed, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    Text(if (order.isTaxi) "Release trip" else "Release order before pickup", color = DelivioRed, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
                         }
@@ -1044,6 +1112,7 @@ fun OrderDetailsSheet(
 @Composable
 private fun FoodOrderContent(
     order: Order,
+    currencySymbol: String = "₱",
     onContactSupport: () -> Unit,
     onCall: (String, String) -> Unit,
     onNavigate: (Double, Double, String) -> Unit
@@ -1071,6 +1140,13 @@ private fun FoodOrderContent(
     val isCustomerLocationMissing = isCustomerRevealed && (order.customerLat == 0.0 || order.customerLng == 0.0)
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (order.isEditedByMerchant) {
+            OrderUpdatedByMerchantBadge(
+                isLarge = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+
         if (showMerchant) {
             DestinationCard(
                 title = "Merchant",
@@ -1100,7 +1176,7 @@ private fun FoodOrderContent(
         }
 
         if (showItems && order.items.isNotEmpty()) {
-            ItemsCard(items = order.items)
+            ItemsCard(order = order, currencySymbol = currencySymbol)
         }
     }
 }
@@ -1453,17 +1529,294 @@ private fun DestinationCard(
 }
 
 @Composable
-private fun ItemsCard(items: List<com.example.data.models.OrderItem>) {
+private fun ItemsCard(
+    order: Order,
+    currencySymbol: String = "₱"
+) {
     Surface(
         shape = RoundedCornerShape(14.dp),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("order_items_card")
     ) {
-        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("Order Items (${items.size})", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-            items.forEach { item ->
-                Text("• ${item.quantity}x ${item.name}", fontSize = 12.sp)
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Order Items (${order.items.size})", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                if (order.isEditedByMerchant) {
+                    OrderUpdatedByMerchantBadge(isLarge = false)
+                }
             }
+
+            order.items.forEach { item ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("• ${item.quantity}x ${item.name}", fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                        if (item.specialInstructions.isNotBlank()) {
+                            Text("Note: ${item.specialInstructions}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                    if (item.price > 0.0) {
+                        Text(
+                            text = "$currencySymbol${String.format("%.2f", item.price * item.quantity)}",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+            // Totals breakdown (updates live from order snapshot)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Order Total", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("$currencySymbol${String.format("%.2f", order.feesTotal)}", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+
+            if (order.feesDeliveryFee > 0.0) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Delivery Fee", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("$currencySymbol${String.format("%.2f", order.feesDeliveryFee)}", fontSize = 12.sp)
+                }
+            }
+
+            if (order.tip > 0.0) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Tip", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("$currencySymbol${String.format("%.2f", order.tip)}", fontSize = 12.sp, color = DelivioGreenDark, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            if (order.isCod) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Cash to Collect (COD)", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFFE65100))
+                    Text("$currencySymbol${String.format("%.2f", order.cashAmountToCollect)}", fontSize = 13.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFFE65100))
+                }
+            } else if (order.isPaidOnline) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Payment", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Paid Online (No Cash)", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = DelivioGreenDark)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TaxiOrderContent(
+    order: Order,
+    currencySymbol: String,
+    onContactSupport: () -> Unit,
+    onCall: (String, String) -> Unit,
+    onNavigate: (Double, Double, String) -> Unit,
+    onReportProblem: () -> Unit
+) {
+    val step = order.riderStep.lowercase().trim()
+    val isToPickup = step == OrderStepConstants.STEP_TO_PICKUP
+    val isAtPickup = step == OrderStepConstants.STEP_AT_PICKUP
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        // 1. Passenger Details Card
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(CircleShape)
+                                .background(DelivioYellow),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.Person, contentDescription = "Passenger", tint = TextOnYellow)
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text("PASSENGER", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                            Text(order.customerName.ifBlank { "Passenger" }, fontWeight = FontWeight.ExtraBold, fontSize = 15.sp)
+                            if (order.customerPhone.isNotBlank()) {
+                                Text(order.customerPhone, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+
+                    if (order.customerPhone.isNotBlank()) {
+                        IconButton(
+                            onClick = { onCall("Passenger", order.customerPhone) },
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(DelivioGreenDark)
+                        ) {
+                            Icon(Icons.Default.Phone, contentDescription = "Call Passenger", tint = Color.White, modifier = Modifier.size(20.dp))
+                        }
+                    }
+                }
+
+                if (order.customerNotes.isNotBlank()) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "Note: ${order.customerNotes}",
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(8.dp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+
+        // 2. Stops / Trip Route Card
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Trip Route & Stops (${order.totalStopsCount} Stops)", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+
+                // Stop 1: Pickup
+                val isPickupActive = isToPickup || isAtPickup
+                val isPickupDone = !isPickupActive
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(CircleShape)
+                            .background(if (isPickupDone) Color(0xFF2E7D32) else DelivioYellowDark),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (isPickupDone) {
+                            Icon(Icons.Default.Check, contentDescription = "Completed", tint = Color.White, modifier = Modifier.size(16.dp))
+                        } else {
+                            Text("1", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        }
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Stop 1: Pickup Point", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        val pickupAddr = if (order.merchantAddress.isNotBlank()) order.merchantAddress else order.merchantName
+                        Text(pickupAddr, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (isToPickup) {
+                        IconButton(onClick = { onNavigate(order.merchantLat, order.merchantLng, order.merchantAddress) }) {
+                            Icon(Icons.Default.Navigation, contentDescription = "Navigate to Pickup", tint = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+                }
+
+                HorizontalDivider()
+
+                // Stops 2, 3, 4...
+                order.allTaxiStops.forEach { stop ->
+                    val isDone = order.completedStops.contains(stop.stopNumber)
+                    val isCurrent = order.currentTaxiStopNumber == stop.stopNumber && !isPickupActive && !isDone
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(CircleShape)
+                                .background(if (isDone) Color(0xFF2E7D32) else if (isCurrent) DelivioRed else Color.Gray),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (isDone) {
+                                Icon(Icons.Default.Check, contentDescription = "Done", tint = Color.White, modifier = Modifier.size(16.dp))
+                            } else {
+                                Text("${stop.stopNumber}", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            }
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            val stopTitle = if (stop.stopNumber == 2 && order.allTaxiStops.size == 1) "Stop 2: Drop-off (${stop.area})"
+                            else "Stop ${stop.stopNumber}: ${stop.area}"
+                            Text(stopTitle, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text(stop.address.ifBlank { "Destination stop" }, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        if (isCurrent) {
+                            IconButton(onClick = { onNavigate(stop.lat, stop.lng, stop.address) }) {
+                                Icon(Icons.Default.Navigation, contentDescription = "Navigate to Stop", tint = DelivioRed)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Fare and Payment Card
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Fare & Earnings", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Total Trip Fare", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("$currencySymbol${String.format("%.2f", order.feesTotal)}", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Payment Method", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    val pText = if (order.isCod) "Cash (COD): Collect $currencySymbol${String.format("%.2f", order.cashAmountToCollect)}" else "Delivio Wallet / Paid"
+                    Text(pText, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = if (order.isCod) Color(0xFFE65100) else Color(0xFF2E7D32))
+                }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Estimated Driver Net", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                    Text("$currencySymbol${String.format("%.2f", order.estimatedEarnings)}", fontSize = 14.sp, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.primary)
+                }
+            }
+        }
+
+        // 4. Report Problem button
+        OutlinedButton(
+            onClick = onReportProblem,
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(Icons.Default.ReportProblem, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(16.dp))
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Report a problem", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
         }
     }
 }

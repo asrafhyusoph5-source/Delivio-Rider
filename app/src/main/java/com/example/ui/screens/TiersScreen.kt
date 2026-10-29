@@ -69,7 +69,7 @@ fun TiersScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Rider Tier & Rewards", fontWeight = FontWeight.Bold) },
+                title = { Text("Driver Tier & Rewards", fontWeight = FontWeight.Bold) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -113,7 +113,7 @@ fun TiersScreen(
                                 )
                                 Text(
                                     text = if (tierStatus.currentTier != null) {
-                                        "${tierStatus.currentTier?.title?.uppercase()} RIDER"
+                                        "${tierStatus.currentTier?.title?.uppercase()} DRIVER"
                                     } else {
                                         "NO TIER YET"
                                     },

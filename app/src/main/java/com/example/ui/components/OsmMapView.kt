@@ -66,16 +66,36 @@ fun OsmMapView(
         Configuration.getInstance().userAgentValue = context.packageName
     }
 
-    // Determine target location for navigation & polyline (pickup first, then drop-off once revealed)
-    val targetGeoPoint: GeoPoint? = remember(currentActiveOrder, currentActiveOrder?.riderStep, currentActiveOrder?.merchantLat, currentActiveOrder?.customerLat) {
+    // Determine target location for navigation & polyline (pickup first, then drop-off once revealed; for taxi, pickup then current stop)
+    val targetGeoPoint: GeoPoint? = remember(
+        currentActiveOrder,
+        currentActiveOrder?.riderStep,
+        currentActiveOrder?.merchantLat,
+        currentActiveOrder?.customerLat,
+        currentActiveOrder?.completedStops
+    ) {
         val o = currentActiveOrder ?: return@remember null
-        val addressRevealed = OrderStepConstants.isCustomerAddressRevealed(o.serviceType, o.riderStep)
-        if (addressRevealed) {
-            // Heading to customer / recipient
-            if (o.customerLat != 0.0 && o.customerLng != 0.0) GeoPoint(o.customerLat, o.customerLng) else null
+        if (o.isTaxi) {
+            val step = o.riderStep.lowercase().trim()
+            if (step in listOf<String>(OrderStepConstants.STEP_TAXI_TO_PICKUP, OrderStepConstants.STEP_TAXI_AT_PICKUP)) {
+                if (o.merchantLat != 0.0 && o.merchantLng != 0.0) GeoPoint(o.merchantLat, o.merchantLng) else null
+            } else {
+                val targetStop = o.currentTargetStop
+                if (targetStop != null && targetStop.lat != 0.0 && targetStop.lng != 0.0) {
+                    GeoPoint(targetStop.lat, targetStop.lng)
+                } else if (o.customerLat != 0.0 && o.customerLng != 0.0) {
+                    GeoPoint(o.customerLat, o.customerLng)
+                } else null
+            }
         } else {
-            // Heading to merchant / sender / vendor
-            if (o.merchantLat != 0.0 && o.merchantLng != 0.0) GeoPoint(o.merchantLat, o.merchantLng) else null
+            val addressRevealed = OrderStepConstants.isCustomerAddressRevealed(o.serviceType, o.riderStep)
+            if (addressRevealed) {
+                // Heading to customer / recipient
+                if (o.customerLat != 0.0 && o.customerLng != 0.0) GeoPoint(o.customerLat, o.customerLng) else null
+            } else {
+                // Heading to merchant / sender / vendor
+                if (o.merchantLat != 0.0 && o.merchantLng != 0.0) GeoPoint(o.merchantLat, o.merchantLng) else null
+            }
         }
     }
 
@@ -241,28 +261,73 @@ fun OsmMapView(
                     map.overlays.add(riderMarker)
                 }
 
-                // 3. Pickup Pin (merchant, sender, or vendor icon) for active orders
+                // 3. Pickup Pin
                 currentActiveOrder?.let { order ->
-                    val isRevealed = OrderStepConstants.isCustomerAddressRevealed(order.serviceType, order.riderStep)
-                    if (!isRevealed && order.merchantLat != 0.0 && order.merchantLng != 0.0) {
-                        val pickupMarker = Marker(map).apply {
-                            position = GeoPoint(order.merchantLat, order.merchantLng)
-                            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                            icon = createPickupPinDrawable(context, order.serviceType, order.merchantName)
-                            title = "Pickup: ${order.merchantName}"
-                            infoWindow = null // Remove large address bubble
-                            setOnMarkerClickListener { m, _ ->
-                                tappedPinLabel = m.title ?: order.merchantName
-                                true
+                    if (order.isTaxi) {
+                        // Taxi pickup pin is green and disappears once the trip starts (step advances past at_pickup)
+                        val isPickupStage = order.riderStep.lowercase().trim() in listOf<String>(
+                            OrderStepConstants.STEP_TAXI_TO_PICKUP,
+                            OrderStepConstants.STEP_TAXI_AT_PICKUP
+                        )
+                        if (isPickupStage && order.merchantLat != 0.0 && order.merchantLng != 0.0) {
+                            val pickupMarker = Marker(map).apply {
+                                position = GeoPoint(order.merchantLat, order.merchantLng)
+                                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                                icon = createTaxiPickupPinDrawable(context)
+                                title = "Pickup (Stop 1): ${order.merchantAddress.ifBlank { order.merchantName }}"
+                                infoWindow = null
+                                setOnMarkerClickListener { m, _ ->
+                                    tappedPinLabel = m.title ?: "Pickup"
+                                    true
+                                }
                             }
+                            map.overlays.add(pickupMarker)
                         }
-                        map.overlays.add(pickupMarker)
+                    } else {
+                        val isRevealed = OrderStepConstants.isCustomerAddressRevealed(order.serviceType, order.riderStep)
+                        if (!isRevealed && order.merchantLat != 0.0 && order.merchantLng != 0.0) {
+                            val pickupMarker = Marker(map).apply {
+                                position = GeoPoint(order.merchantLat, order.merchantLng)
+                                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                                icon = createPickupPinDrawable(context, order.serviceType, order.merchantName)
+                                title = "Pickup: ${order.merchantName}"
+                                infoWindow = null // Remove large address bubble
+                                setOnMarkerClickListener { m, _ ->
+                                    tappedPinLabel = m.title ?: order.merchantName
+                                    true
+                                }
+                            }
+                            map.overlays.add(pickupMarker)
+                        }
                     }
                 }
 
-                // 4. Numbered Drop-off pins "1" and "2"
-                // Rule: appear on the map ONLY from the stage where customer address is revealed
-                activeOrders.forEachIndexed { index, order ->
+                // 4. Drop-off / Next Stops Pins
+                currentActiveOrder?.let { order ->
+                    if (order.isTaxi) {
+                        // For taxi: drop-off and every next stop are red pins numbered 2, 3, 4...
+                        // A stop pin disappears when it is completed (in completedStops)
+                        order.allTaxiStops.forEach { stop ->
+                            if (!order.completedStops.contains(stop.stopNumber) && stop.lat != 0.0 && stop.lng != 0.0) {
+                                val stopMarker = Marker(map).apply {
+                                    position = GeoPoint(stop.lat, stop.lng)
+                                    setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                                    icon = createDropoffPinDrawable(context, stop.stopNumber.toString())
+                                    title = "Stop ${stop.stopNumber}: ${stop.address.ifBlank { stop.area }}"
+                                    infoWindow = null
+                                    setOnMarkerClickListener { m, _ ->
+                                        tappedPinLabel = m.title ?: "Stop ${stop.stopNumber}"
+                                        true
+                                    }
+                                }
+                                map.overlays.add(stopMarker)
+                            }
+                        }
+                    }
+                }
+
+                // Non-taxi drop-off pins
+                activeOrders.filter { !it.isTaxi }.forEachIndexed { index, order ->
                     val orderNumberLabel = (index + 1).toString() // "1" or "2"
                     val dropOffRevealed = OrderStepConstants.isCustomerAddressRevealed(order.serviceType, order.riderStep)
                     if (dropOffRevealed && order.customerLat != 0.0 && order.customerLng != 0.0) {
@@ -399,6 +464,38 @@ private fun createDropoffPinDrawable(context: Context, number: String): BitmapDr
         isFakeBoldText = true
     }
     canvas.drawText(number, width / 2f, 40f, textPaint)
+
+    return BitmapDrawable(context.resources, bitmap)
+}
+
+private fun createTaxiPickupPinDrawable(context: Context): BitmapDrawable {
+    val width = 64
+    val height = 74
+    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+
+    // Green pin for taxi passenger pickup
+    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#2E7D32") // Green
+        style = Paint.Style.FILL
+    }
+    canvas.drawCircle(width / 2f, 30f, 28f, paint)
+
+    val border = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.STROKE
+        strokeWidth = 5f
+    }
+    canvas.drawCircle(width / 2f, 30f, 28f, border)
+
+    // Number text "1"
+    val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textSize = 30f
+        textAlign = Paint.Align.CENTER
+        isFakeBoldText = true
+    }
+    canvas.drawText("1", width / 2f, 40f, textPaint)
 
     return BitmapDrawable(context.resources, bitmap)
 }

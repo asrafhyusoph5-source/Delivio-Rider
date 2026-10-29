@@ -12,10 +12,11 @@ data class User(
 )
 
 data class Vehicle(
-    val type: String = "",
+    val type: String = "motorcycle",
     val model: String = "",
     val plateNumber: String = "",
-    val color: String = ""
+    val color: String = "",
+    val seats: Int = 1
 )
 
 data class Rider(
@@ -31,8 +32,8 @@ data class Rider(
     val memberSince: String = "",
     val isOnline: Boolean = false,
     val status: String = "active", // "active", "suspended", "inactive"
-    val allowedServices: List<String> = listOf("food", "convenience", "parcel", "pabili", "request_rider"),
-    val activeServices: List<String> = listOf("food", "convenience", "parcel", "pabili", "request_rider"),
+    val allowedServices: List<String> = listOf("food", "convenience", "parcel", "pabili", "request_rider", "taxi"),
+    val activeServices: List<String> = listOf("food", "convenience", "parcel", "pabili", "request_rider", "taxi"),
     val walletBalance: Double = 0.0,
     val linkedCustomerUid: String? = null,
     val cashRemitted: Double = 0.0,
@@ -54,8 +55,10 @@ data class RiderApplication(
     val vehicleType: String = "motorcycle",
     val plate: String = "",
     val vehicleModel: String = "",
+    val vehicleColor: String = "",
+    val seats: Int = 1,
     val emergencyContact: Map<String, String> = emptyMap(),
-    val documents: Map<String, String> = emptyMap(), // licenseUrl, orcrUrl, nbiUrl, validIdUrl, selfieUrl
+    val documents: Map<String, String> = emptyMap(), // licenseUrl, orcrUrl, nbiUrl, validIdUrl, selfieUrl, vehiclePhotoUrl, franchiseUrl
     val status: String = "Pending", // "Pending", "Under Review", "Needs Info", "Rejected", "Approved"
     val rejectionReason: String = "",
     val needsInfoReason: String = "",
@@ -76,6 +79,14 @@ data class PabiliItem(
     val estimatedPrice: Double = 0.0
 )
 
+data class TaxiStop(
+    val stopNumber: Int = 2,
+    val address: String = "",
+    val area: String = "",
+    val lat: Double = 0.0,
+    val lng: Double = 0.0
+)
+
 data class Order(
     val id: String = "",
     val orderNumber: String = "",
@@ -89,12 +100,21 @@ data class Order(
     val cityId: String = "",
     val merchantId: String = "",
 
+    // Vehicle type for taxi/parcel dispatch
+    val vehicleType: String = "motorcycle",
+
+    // Taxi stops (Stop 1 is pickup; Stop 2 is drop-off; Stop 3, 4... are extra stops)
+    val stops: List<TaxiStop> = emptyList(),
+    val completedStops: List<Int> = emptyList(),
+
     // Fulfillment & Scheduling
     val fulfillment: String = "delivery",
     val isScheduled: Boolean = false,
     val scheduledFor: Any? = null,
     val scheduledDateText: String = "",
     val merchantAccepted: Boolean = false,
+    val prepMinutes: Int = 0,
+    val editedAt: Any? = null,
 
     // Merchant / Pickup
     val merchantName: String = "",
@@ -164,15 +184,88 @@ data class Order(
     val deliveredAt: Any? = null,
     val releaseReason: String? = null
 ) {
+    val isTaxi: Boolean
+        get() = serviceType.lowercase() == OrderStepConstants.SERVICE_TAXI
+
+    val allTaxiStops: List<TaxiStop>
+        get() {
+            if (!isTaxi) return emptyList()
+            val list = mutableListOf<TaxiStop>()
+            // Stop 2 is the primary drop-off
+            list.add(
+                TaxiStop(
+                    stopNumber = 2,
+                    address = customerAddress,
+                    area = customerArea.ifEmpty { "Drop-off" },
+                    lat = customerLat,
+                    lng = customerLng
+                )
+            )
+            // Extra stops (3, 4...)
+            stops.forEachIndexed { index, stop ->
+                val num = if (stop.stopNumber >= 3) stop.stopNumber else (index + 3)
+                list.add(stop.copy(stopNumber = num))
+            }
+            return list
+        }
+
+    val totalStopsCount: Int
+        get() = if (isTaxi) (1 + allTaxiStops.size) else 1
+
+    val currentTaxiStopNumber: Int
+        get() {
+            if (!isTaxi) return 2
+            val step = riderStep.lowercase()
+            if (step.startsWith(OrderStepConstants.STEP_TO_STOP_PREFIX)) {
+                val numStr = step.removePrefix(OrderStepConstants.STEP_TO_STOP_PREFIX)
+                return numStr.toIntOrNull() ?: 2
+            }
+            return 2
+        }
+
+    val isAtLastTaxiStop: Boolean
+        get() {
+            if (!isTaxi) return true
+            val maxStop = allTaxiStops.maxOfOrNull { it.stopNumber } ?: 2
+            return currentTaxiStopNumber >= maxStop
+        }
+
+    val currentTargetStop: TaxiStop?
+        get() = allTaxiStops.firstOrNull { it.stopNumber == currentTaxiStopNumber }
+
     val estimatedEarnings: Double
         get() {
+            if (isTaxi) {
+                // net = fees.total x (1 - commissionPercent/100), default commission 15%
+                val commPercent = if (platformCommission > 0.0) platformCommission else 15.0
+                return feesTotal * (1.0 - commPercent / 100.0) + tip
+            }
             val baseDelivery = if (feesDeliveryFee > 0.0) feesDeliveryFee else if (deliveryFee > 0.0) deliveryFee else (baseFare + distanceFare + surgeBonus)
             val netDelivery = if (platformCommission > 0.0) (baseDelivery - platformCommission) else (baseDelivery * 0.8)
             return netDelivery + tip + waitingPay + extraStopPay + returnTripPay + urgentBonus
         }
 
     val isPickup: Boolean
-        get() = fulfillment.trim().equals("pickup", ignoreCase = true)
+        get() {
+            val f = fulfillment.trim().lowercase().replace("-", "").replace("_", "")
+            return f == "pickup"
+        }
+
+    val isEditedByMerchant: Boolean
+        get() = editedAt != null && (editedAt !is Boolean || editedAt == true) && (editedAt !is String || (editedAt as String).isNotBlank())
+
+    val prepStatusText: String
+        get() {
+            val s = status.trim().lowercase()
+            return when {
+                s == "ready" || s == OrderStepConstants.STATUS_READY.lowercase() -> "Order is ready"
+                s == "preparing" || s == OrderStepConstants.STATUS_PREPARING.lowercase() -> {
+                    val mins = if (prepMinutes > 0) prepMinutes else 15
+                    "Merchant is preparing - about $mins min"
+                }
+                else -> ""
+            }
+        }
 
     val scheduledChipText: String
         get() = if (scheduledDateText.isNotBlank()) "Scheduled for $scheduledDateText" else "Scheduled delivery"
@@ -210,6 +303,7 @@ data class Order(
     // COD, parcel: cashToCollect, from party in cashCollectAt ("sender" at pickup, "recipient" at delivery).
     // COD, pabili: finalReceiptTotal + fees.deliveryFee + fees.serviceFee + tip, collected at delivery.
     // request_rider: codAmount (collected from recipient). Delivery fee shows "Paid by merchant".
+    // Taxi COD: fees.total
     // Paid Online or wallet: no cash to collect.
     val cashAmountToCollect: Double
         get() {
@@ -217,6 +311,7 @@ data class Order(
                 return 0.0
             }
             return when (serviceType.lowercase()) {
+                OrderStepConstants.SERVICE_TAXI -> if (cashToCollect > 0.0) cashToCollect else feesTotal
                 OrderStepConstants.SERVICE_PARCEL -> cashToCollect
                 OrderStepConstants.SERVICE_PABILI -> {
                     val itemsTotal = if (finalReceiptTotal > 0.0) finalReceiptTotal else pabiliEstimatedTotal

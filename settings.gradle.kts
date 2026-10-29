@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "Delivio Rider"
+rootProject.name = "Delivio Driver"
 
 include(":app")

@@ -175,7 +175,7 @@ fun ProfileScreen(
                             modifier = Modifier.padding(top = 8.dp)
                         ) {
                             Text(
-                                text = "Only admin can change name, email, photo, or rider ID.",
+                                text = "Only admin can change name, email, photo, or driver ID.",
                                 fontSize = 10.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
@@ -217,12 +217,18 @@ fun ProfileScreen(
                 ) {
                     Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.TwoWheeler, contentDescription = "Vehicle", tint = DelivioYellowDark)
+                            Icon(Icons.Default.DirectionsCar, contentDescription = "Vehicle", tint = DelivioYellowDark)
                             Spacer(modifier = Modifier.width(10.dp))
                             Text("Registered Vehicle", fontWeight = FontWeight.Bold, fontSize = 15.sp)
                         }
-                        ProfileRow("Vehicle Type", rider.vehicle.type.ifBlank { "Motorcycle" })
+                        ProfileRow("Vehicle Type", com.example.data.constants.OrderStepConstants.getVehicleDisplayName(rider.vehicle.type))
                         ProfileRow("Model", rider.vehicle.model.ifBlank { "Registered Model" })
+                        if (rider.vehicle.color.isNotBlank()) {
+                            ProfileRow("Color", rider.vehicle.color)
+                        }
+                        if (rider.vehicle.seats > 0) {
+                            ProfileRow("Seats", "${rider.vehicle.seats} Seats")
+                        }
                         ProfileRow("Plate Number", rider.vehicle.plateNumber.ifBlank { "On File" })
                         ProfileRow("Member Since", rider.memberSince.ifBlank { "Active Member" })
                     }

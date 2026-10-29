@@ -36,10 +36,10 @@ fun SupportScreen(
     var faqSearch by remember { mutableStateOf("") }
 
     val faqs = listOf(
-        Pair("How are surge fares computed in Palawan?", "Surge bonuses (+₱20 to +₱50) activate automatically when incoming customer orders exceed active rider supply in designated hot zones such as Rizal Ave and San Pedro."),
+        Pair("How are surge fares computed in Palawan?", "Surge bonuses (+₱20 to +₱50) activate automatically when incoming customer orders exceed active driver supply in designated hot zones such as Rizal Ave and San Pedro."),
         Pair("When are earnings deposited to GCash?", "You can initiate instant payouts at any time through the Wallet tab. Instant cash-out delivers funds within 60 seconds."),
         Pair("What if the customer is unreachable?", "Wait at the customer drop-off pin. Tap 'Report Delivery Issue' > 'Customer not answering'. A 5-minute countdown starts, after which you can cancel without affecting completion rate."),
-        Pair("How do I update my motorcycle plate number?", "Open My Profile > Edit (top-right pencil icon) and enter your updated plate number or submit newly registered OR/CR.")
+        Pair("How do I update my vehicle plate number?", "Open My Profile > Edit (top-right pencil icon) and enter your updated plate number or submit newly registered OR/CR.")
     )
 
     val activeCall by viewModel.activeCall.collectAsState()
@@ -47,14 +47,14 @@ fun SupportScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Rider Support", fontWeight = FontWeight.Bold) },
+                title = { Text("Driver Support", fontWeight = FontWeight.Bold) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
                 actions = {
-                    IconButton(onClick = { viewModel.openDialer("+63 48 433 0000", "Delivio 24/7 Rider Support") }) {
+                    IconButton(onClick = { viewModel.openDialer("+63 48 433 0000", "Delivio 24/7 Driver Support") }) {
                         Icon(Icons.Default.Phone, contentDescription = "Call Support", tint = DelivioGreen)
                     }
                 },

@@ -167,7 +167,7 @@ fun SettingsScreen(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text("App Version", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text("Delivio Rider v1.4.2 (Production)", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Text("Delivio Driver v1.4.2 (Production)", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                         }
                         Row(
                             modifier = Modifier.fillMaxWidth(),

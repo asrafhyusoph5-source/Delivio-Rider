@@ -17,6 +17,13 @@ object OrderStepConstants {
     const val STEP_TO_VENDOR = "to_vendor"
     const val STEP_AT_VENDOR = "at_vendor"
 
+    // Taxi trip steps
+    const val STEP_TO_PICKUP = "to_pickup"
+    const val STEP_AT_PICKUP = "at_pickup"
+    const val STEP_TAXI_TO_PICKUP = "to_pickup"
+    const val STEP_TAXI_AT_PICKUP = "at_pickup"
+    const val STEP_TO_STOP_PREFIX = "to_stop_"
+
     // Legacy aliases for backward compatibility
     const val STEP_HEADING_TO_MERCHANT = "heading_to_merchant"
     const val STEP_ARRIVED_AT_MERCHANT = "arrived_at_merchant"
@@ -37,6 +44,12 @@ object OrderStepConstants {
     const val STATUS_ARRIVED_AT_VENDOR = "Arrived at vendor"
     const val STATUS_DELIVERED = "Delivered"
 
+    // Taxi statuses
+    const val STATUS_DRIVER_ON_WAY = "Driver is on the way"
+    const val STATUS_DRIVER_ARRIVED = "Driver arrived"
+    const val STATUS_ON_TRIP = "On trip"
+    const val STATUS_COMPLETED = "Completed"
+
     // Rider Request status strings
     const val REQ_SEARCHING = "Searching"
     const val REQ_RIDER_ASSIGNED = "Rider assigned"
@@ -45,20 +58,66 @@ object OrderStepConstants {
     const val REQ_ON_THE_WAY = "On the way"
     const val REQ_DELIVERED = "Delivered"
 
-    // Service Type keys (exactly 5 services)
+    // Vehicle types
+    const val VEHICLE_MOTORCYCLE = "motorcycle"
+    const val VEHICLE_TRICYCLE = "tricycle"
+    const val VEHICLE_CAR4 = "car4"
+    const val VEHICLE_CAR8 = "car8"
+
+    val ALL_VEHICLES = listOf(
+        VEHICLE_MOTORCYCLE,
+        VEHICLE_TRICYCLE,
+        VEHICLE_CAR4,
+        VEHICLE_CAR8
+    )
+
+    fun getVehicleDisplayName(vehicleType: String?): String {
+        return when (vehicleType?.lowercase()?.trim()) {
+            VEHICLE_MOTORCYCLE -> "Motorcycle"
+            VEHICLE_TRICYCLE -> "Tricycle"
+            VEHICLE_CAR4 -> "4 Seater Car"
+            VEHICLE_CAR8 -> "8 Seater Car"
+            else -> vehicleType?.replaceFirstChar { it.uppercase() } ?: "Motorcycle"
+        }
+    }
+
+    // Service Type keys (6 services)
     const val SERVICE_FOOD = "food"
     const val SERVICE_INSTANT = "convenience"
     const val SERVICE_PARCEL = "parcel"
     const val SERVICE_PABILI = "pabili"
     const val SERVICE_REQUEST = "request_rider"
+    const val SERVICE_TAXI = "taxi"
 
     val ALL_SERVICES = listOf(
         SERVICE_FOOD,
         SERVICE_INSTANT,
         SERVICE_PARCEL,
         SERVICE_PABILI,
-        SERVICE_REQUEST
+        SERVICE_REQUEST,
+        SERVICE_TAXI
     )
+
+    val SERVICES_BY_VEHICLE: Map<String, List<String>> = mapOf(
+        VEHICLE_MOTORCYCLE to listOf(SERVICE_FOOD, SERVICE_INSTANT, SERVICE_PARCEL, SERVICE_PABILI, SERVICE_REQUEST, SERVICE_TAXI),
+        VEHICLE_TRICYCLE to listOf(SERVICE_PARCEL, SERVICE_TAXI),
+        VEHICLE_CAR4 to listOf(SERVICE_PARCEL, SERVICE_TAXI),
+        VEHICLE_CAR8 to listOf(SERVICE_PARCEL, SERVICE_TAXI)
+    )
+
+    fun getServicesForVehicle(vehicleType: String?): List<String> {
+        val norm = normalizeVehicleType(vehicleType)
+        return SERVICES_BY_VEHICLE[norm] ?: SERVICES_BY_VEHICLE[VEHICLE_MOTORCYCLE]!!
+    }
+
+    fun normalizeVehicleType(vehicleType: String?): String {
+        return when (vehicleType?.lowercase()?.trim()) {
+            "tricycle" -> VEHICLE_TRICYCLE
+            "car4", "4 seater car", "car_4", "4-seater car" -> VEHICLE_CAR4
+            "car8", "8 seater car", "car_8", "8-seater car" -> VEHICLE_CAR8
+            else -> VEHICLE_MOTORCYCLE
+        }
+    }
 
     fun getServiceDisplayName(serviceType: String): String {
         return when (serviceType.lowercase()) {
@@ -67,6 +126,7 @@ object OrderStepConstants {
             SERVICE_PARCEL -> "Delivio Parcel"
             SERVICE_PABILI -> "Delivio Pabili"
             SERVICE_REQUEST -> "Delivio Request"
+            SERVICE_TAXI -> "Delivio Taxi"
             else -> "Delivio Delivery"
         }
     }
@@ -78,6 +138,7 @@ object OrderStepConstants {
             SERVICE_PARCEL -> "Parcel"
             SERVICE_PABILI -> "Pabili"
             SERVICE_REQUEST -> "Request"
+            SERVICE_TAXI -> "Taxi"
             else -> "Food"
         }
     }
@@ -86,6 +147,7 @@ object OrderStepConstants {
         val step = riderStep.lowercase().trim()
         return when (serviceType.lowercase().trim()) {
             SERVICE_PARCEL -> step in listOf(STEP_TO_RECIPIENT, STEP_AT_RECIPIENT, STEP_HEADING_TO_CUSTOMER, STEP_ARRIVED_AT_CUSTOMER)
+            SERVICE_TAXI -> step != STEP_TO_PICKUP
             else -> step in listOf(STEP_TO_CUSTOMER, STEP_AT_CUSTOMER, STEP_HEADING_TO_CUSTOMER, STEP_ARRIVED_AT_CUSTOMER)
         }
     }
@@ -95,13 +157,21 @@ object OrderStepConstants {
         return when (serviceType.lowercase().trim()) {
             SERVICE_PARCEL -> step in listOf(STEP_TO_SENDER, STEP_AT_SENDER, STEP_HEADING_TO_MERCHANT, STEP_ARRIVED_AT_MERCHANT)
             SERVICE_PABILI -> step in listOf(STEP_TO_VENDOR, STEP_AT_VENDOR, STEP_HEADING_TO_MERCHANT, STEP_ARRIVED_AT_MERCHANT)
+            SERVICE_TAXI -> step in listOf(STEP_TO_PICKUP, STEP_AT_PICKUP)
             else -> step in listOf(STEP_TO_MERCHANT, STEP_AT_MERCHANT, STEP_HEADING_TO_MERCHANT, STEP_ARRIVED_AT_MERCHANT)
         }
     }
 
-    fun getStageTitle(serviceType: String, riderStep: String): String {
+    fun getStageTitle(serviceType: String, riderStep: String, currentStopNum: Int = 2): String {
         val step = riderStep.lowercase().trim()
         return when (serviceType.lowercase().trim()) {
+            SERVICE_TAXI -> when {
+                step == STEP_TO_PICKUP -> "Heading to Pickup"
+                step == STEP_AT_PICKUP -> "At Pickup Point"
+                step.startsWith(STEP_TO_STOP_PREFIX) -> "Heading to Stop $currentStopNum"
+                step == STEP_COMPLETED -> "Trip Completed"
+                else -> "On Trip"
+            }
             SERVICE_PARCEL -> when (step) {
                 STEP_TO_SENDER, STEP_HEADING_TO_MERCHANT -> "Heading to Sender"
                 STEP_AT_SENDER, STEP_ARRIVED_AT_MERCHANT -> "At Sender"
@@ -131,9 +201,23 @@ object OrderStepConstants {
         }
     }
 
-    fun getSlideButtonText(serviceType: String, riderStep: String): String {
+    fun getSlideButtonText(
+        serviceType: String,
+        riderStep: String,
+        currentStopNum: Int = 2,
+        isLastStop: Boolean = true
+    ): String {
         val step = riderStep.lowercase().trim()
         return when (serviceType.lowercase().trim()) {
+            SERVICE_TAXI -> when {
+                step == STEP_TO_PICKUP -> "Slide to confirm Arrival at Pickup"
+                step == STEP_AT_PICKUP -> "Slide to Start Trip"
+                step.startsWith(STEP_TO_STOP_PREFIX) -> {
+                    if (isLastStop) "Slide to Complete Trip"
+                    else "Slide to confirm Arrival at Stop $currentStopNum"
+                }
+                else -> "Slide to Complete Trip"
+            }
             SERVICE_PARCEL -> when (step) {
                 STEP_TO_SENDER, STEP_HEADING_TO_MERCHANT -> "Slide to confirm Arrival at Sender"
                 STEP_AT_SENDER, STEP_ARRIVED_AT_MERCHANT -> "Slide to confirm Picked Up"
