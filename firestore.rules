@@ -162,6 +162,19 @@ service cloud.firestore {
       match /inboxReads/{mid} {
         allow read, write: if signedIn() && (request.auth.uid == rid || isAdmin());
       }
+      match /offerLog/{oid} {
+        allow read, write: if signedIn() && (request.auth.uid == rid || isAdmin());
+      }
+    }
+
+    match /settings/{id} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /reviews/{id} {
+      allow read: if signedIn() && (resource.data.riderId == request.auth.uid || isAdmin());
+      allow write: if signedIn();
     }
 
     match /riderApplications/{aid} {

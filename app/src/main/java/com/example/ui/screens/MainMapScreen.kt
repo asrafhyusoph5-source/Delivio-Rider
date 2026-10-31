@@ -302,7 +302,8 @@ fun MainMapScreen(
                     soundEnabled = viewModel.soundEnabled.value,
                     vibrationEnabled = viewModel.vibrationEnabled.value,
                     onAccept = { viewModel.acceptIncomingOffer(offer.id) },
-                    onDecline = { viewModel.declineIncomingOffer(offer.id) }
+                    onDecline = { viewModel.declineIncomingOffer(offer.id, offer.serviceType) },
+                    onMissed = { viewModel.missIncomingOffer(offer.id, offer.serviceType) }
                 )
             }
 

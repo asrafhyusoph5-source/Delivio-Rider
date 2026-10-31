@@ -64,6 +64,24 @@ class RiderRepository {
     private val _riderTransactions = MutableStateFlow<List<WalletTransaction>>(emptyList())
     private val _customerTransactions = MutableStateFlow<List<WalletTransaction>>(emptyList())
 
+    private val _platformServices = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    val platformServices: StateFlow<Map<String, Boolean>> = _platformServices.asStateFlow()
+
+    private val _cityServices = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    val cityServices: StateFlow<Map<String, Boolean>> = _cityServices.asStateFlow()
+
+    private val _currentCityName = MutableStateFlow<String>("")
+    val currentCityName: StateFlow<String> = _currentCityName.asStateFlow()
+
+    private val _offerLogs = MutableStateFlow<List<OfferLogEntry>>(emptyList())
+    val offerLogs: StateFlow<List<OfferLogEntry>> = _offerLogs.asStateFlow()
+
+    private val _releasedOrderIds = MutableStateFlow<Set<String>>(emptySet())
+    val releasedOrderIds: StateFlow<Set<String>> = _releasedOrderIds.asStateFlow()
+
+    private val _customerReviews = MutableStateFlow<List<CustomerReview>>(emptyList())
+    val customerReviews: StateFlow<List<CustomerReview>> = _customerReviews.asStateFlow()
+
     private val _listenerError = MutableStateFlow<String?>(null)
     val listenerError: StateFlow<String?> = _listenerError.asStateFlow()
 
@@ -71,11 +89,39 @@ class RiderRepository {
         _listenerError.value = null
     }
 
+    fun isServiceOn(serviceType: String, cityId: String = ""): Boolean {
+        val norm = serviceType.lowercase().trim()
+        val platVal = _platformServices.value[norm]
+        if (platVal == false) return false
+        val checkCity = if (cityId.isNotBlank()) cityId else (_rider.value?.cityId ?: "")
+        if (checkCity.isNotBlank()) {
+            val cityVal = _cityServices.value[norm]
+            if (cityVal == false) return false
+        }
+        return true
+    }
+
+    fun getCityDisplayName(): String {
+        val name = _currentCityName.value.trim()
+        if (name.isNotBlank()) return name
+        val cId = _rider.value?.cityId?.trim() ?: ""
+        if (cId.isNotBlank()) {
+            return cId.replace("_", " ").split(" ")
+                .joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
+        }
+        return "City"
+    }
+
     // Listener registrations
     private var riderListener: ListenerRegistration? = null
     private var linkedUserListener: ListenerRegistration? = null
     private var customerTransactionsListener: ListenerRegistration? = null
     private var currentLinkedCustomerUid: String? = null
+    private var platformSettingsListener: ListenerRegistration? = null
+    private var citySettingsListener: ListenerRegistration? = null
+    private var currentCityId: String? = null
+    private var offerLogListener: ListenerRegistration? = null
+    private var reviewsListener: ListenerRegistration? = null
     private var activeOrdersListener: ListenerRegistration? = null
     private var offersListener: ListenerRegistration? = null
     private var deliveredOrdersListener: ListenerRegistration? = null
@@ -190,6 +236,29 @@ class RiderRepository {
                 _coins.value = r.coins
 
                 syncLinkedCustomer(linkedCustomerUid)
+
+                // Sync city services when rider cityId updates
+                if (r.cityId.isNotBlank() && r.cityId != currentCityId) {
+                    currentCityId = r.cityId
+                    citySettingsListener?.remove()
+                    citySettingsListener = db.collection("cities").document(r.cityId)
+                        .addSnapshotListener { cSnap, _ ->
+                            if (cSnap != null && cSnap.exists()) {
+                                val svcs = (cSnap.get("services") as? Map<*, *>)?.mapNotNull { (k, v) ->
+                                    val key = k?.toString() ?: return@mapNotNull null
+                                    val bool = when (v) {
+                                        is Boolean -> v
+                                        is String -> v.toBooleanStrictOrNull() ?: true
+                                        else -> true
+                                    }
+                                    key to bool
+                                }?.toMap() ?: emptyMap()
+                                _cityServices.value = svcs
+                                val name = cSnap.getString("name") ?: cSnap.getString("cityName") ?: r.cityId
+                                _currentCityName.value = name
+                            }
+                        }
+                }
             }
 
         // 2. Listen to active orders assigned to rider (find active order by rider, not by status in query)
@@ -242,10 +311,15 @@ class RiderRepository {
 
                 // Find candidate offer
                 val eligibleOffer = snapshots.documents.mapNotNull { parseOrder(it) }.firstOrNull { order ->
-                    if (declinedIds.contains(order.id)) return@firstOrNull false
+                    // Never offer again an order I released or declined
+                    if (declinedIds.contains(order.id) || _releasedOrderIds.value.contains(order.id)) return@firstOrNull false
 
                     // Never offer orders where fulfillment == "pickup" (filter in code)
                     if (order.isPickup) return@firstOrNull false
+
+                    // Check if service is switched off in city or platform (missing means on)
+                    val checkCity = if (order.cityId.isNotBlank()) order.cityId else currentRider.cityId
+                    if (!isServiceOn(order.serviceType, checkCity)) return@firstOrNull false
 
                     if (!currentRider.activeServices.contains(order.serviceType)) return@firstOrNull false
                     if (!currentRider.allowedServices.contains(order.serviceType)) return@firstOrNull false
@@ -388,10 +462,22 @@ class RiderRepository {
                 } ?: emptyList()
             }
 
-        // 10. Platform settings for support phone
-        db.collection("settings").document("platform").get()
-            .addOnSuccessListener { doc ->
-                _supportPhone.value = doc.getString("supportPhone")
+        // 10. Platform settings for support phone and service status
+        platformSettingsListener = db.collection("settings").document("platform")
+            .addSnapshotListener { doc, _ ->
+                if (doc != null && doc.exists()) {
+                    _supportPhone.value = doc.getString("supportPhone")
+                    val svcs = (doc.get("services") as? Map<*, *>)?.mapNotNull { (k, v) ->
+                        val key = k?.toString() ?: return@mapNotNull null
+                        val bool = when (v) {
+                            is Boolean -> v
+                            is String -> v.toBooleanStrictOrNull() ?: true
+                            else -> true
+                        }
+                        key to bool
+                    }?.toMap() ?: emptyMap()
+                    _platformServices.value = svcs
+                }
             }
 
         // 11. Wallet history: query walletTransactions where riderId == uid (no orderBy; sort newest first in code)
@@ -405,6 +491,63 @@ class RiderRepository {
                 if (snapshots == null) return@addSnapshotListener
                 _riderTransactions.value = snapshots.documents.mapNotNull { parseWalletTransaction(it) }
                 mergeWalletTransactions()
+            }
+
+        // 12. Offer log listener: riders/{uid}/offerLog
+        offerLogListener = db.collection("riders").document(uid).collection("offerLog")
+            .addSnapshotListener { snapshots, error ->
+                if (error != null || snapshots == null) return@addSnapshotListener
+                val logs = snapshots.documents.mapNotNull { doc ->
+                    val oid = doc.getString("orderId") ?: doc.id
+                    val st = doc.getString("serviceType") ?: ""
+                    val outcome = doc.getString("outcome") ?: ""
+                    val finalOutcome = doc.getString("finalOutcome")
+                    val atTimestamp = doc.getTimestamp("at")
+                    val finalAtTimestamp = doc.getTimestamp("finalAt")
+                    OfferLogEntry(
+                        orderId = oid,
+                        serviceType = st,
+                        outcome = outcome,
+                        finalOutcome = finalOutcome,
+                        at = atTimestamp,
+                        finalAt = finalAtTimestamp
+                    )
+                }
+                _offerLogs.value = logs
+                val releasedIds = logs.filter { it.finalOutcome == "released" }.map { it.orderId }.toSet()
+                _releasedOrderIds.value = releasedIds
+            }
+
+        // 13. Customer reviews listener: reviews where riderId == uid, limit 200
+        reviewsListener = db.collection("reviews")
+            .whereEqualTo("riderId", uid)
+            .limit(200)
+            .addSnapshotListener { snapshots, error ->
+                if (error != null || snapshots == null) return@addSnapshotListener
+                val revs = snapshots.documents.mapNotNull { doc ->
+                    val ratingVal = doc.getDouble("ratingRider")
+                        ?: (doc.getDouble("stars") ?: (doc.getLong("stars")?.toDouble() ?: 0.0))
+                    val comment = doc.getString("comment") ?: doc.getString("review") ?: ""
+                    val customerName = doc.getString("customerName") ?: doc.getString("userName") ?: "Customer"
+                    val orderNum = doc.getString("orderNumber") ?: doc.getString("orderId") ?: doc.id
+                    val serviceType = doc.getString("serviceType") ?: doc.getString("service") ?: "Food"
+                    val dateStr = doc.getString("date") ?: ""
+                    val ts = doc.getTimestamp("createdAt") ?: doc.getTimestamp("timestamp") ?: doc.getTimestamp("date")
+                    val dateMillis = ts?.toDate()?.time ?: 0L
+                    CustomerReview(
+                        id = doc.id,
+                        riderId = doc.getString("riderId") ?: uid,
+                        ratingRider = ratingVal,
+                        comment = comment,
+                        customerName = customerName,
+                        orderNumber = orderNum,
+                        serviceType = serviceType,
+                        date = dateStr,
+                        createdAt = ts,
+                        dateMillis = dateMillis
+                    )
+                }.sortedByDescending { it.dateMillis }
+                _customerReviews.value = revs
             }
     }
 
@@ -720,6 +863,7 @@ class RiderRepository {
         }.addOnSuccessListener {
             val accepted = _incomingOffer.value
             _incomingOffer.value = null
+            logOfferOutcome(orderId, accepted?.serviceType ?: targetService, "accepted")
             if (accepted != null && accepted.id == orderId) {
                 val stepForAccepted = when (accepted.serviceType.lowercase()) {
                     OrderStepConstants.SERVICE_TAXI -> OrderStepConstants.STEP_TO_PICKUP
@@ -944,6 +1088,7 @@ class RiderRepository {
 
                         orderRef.update(updates)
                             .addOnSuccessListener {
+                                setOfferFinalOutcome(order.id, "completed")
                                 _activeOrders.value = _activeOrders.value.filter { it.id != order.id }
                                 RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
                                 onSuccess()
@@ -960,6 +1105,7 @@ class RiderRepository {
                         )
                         orderRef.update(updates)
                             .addOnSuccessListener {
+                                setOfferFinalOutcome(order.id, "completed")
                                 _activeOrders.value = _activeOrders.value.filter { it.id != order.id }
                                 RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
                                 onSuccess()
@@ -982,6 +1128,7 @@ class RiderRepository {
 
                         orderRef.update(updates)
                             .addOnSuccessListener {
+                                setOfferFinalOutcome(order.id, "completed")
                                 _activeOrders.value = _activeOrders.value.filter { it.id != order.id }
                                 RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
                                 onSuccess()
@@ -1000,6 +1147,7 @@ class RiderRepository {
                         )
                         orderRef.update(updates)
                             .addOnSuccessListener {
+                                setOfferFinalOutcome(order.id, "completed")
                                 _activeOrders.value = _activeOrders.value.filter { it.id != order.id }
                                 RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
                                 onSuccess()
@@ -1020,7 +1168,13 @@ class RiderRepository {
     }
 
     // RELEASE ORDER
-    fun releaseOrder(order: Order, reason: String, onSuccess: () -> Unit, onError: (String) -> Unit) {
+    fun releaseOrder(
+        order: Order,
+        reason: String,
+        userPrefs: UserPreferencesRepository? = null,
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit
+    ) {
         if (order.isTaxi) {
             if (order.riderStep != OrderStepConstants.STEP_TO_PICKUP && order.riderStep != OrderStepConstants.STEP_AT_PICKUP) {
                 onError("Trip cannot be released once trip has started")
@@ -1059,8 +1213,52 @@ class RiderRepository {
         }
 
         db.collection("orders").document(order.id).update(updates)
-            .addOnSuccessListener { onSuccess() }
+            .addOnSuccessListener {
+                setOfferFinalOutcome(order.id, "released")
+                _releasedOrderIds.value = _releasedOrderIds.value + order.id
+                userPrefs?.addDeclinedOrderId(order.id)
+                onSuccess()
+            }
             .addOnFailureListener { onError(it.localizedMessage ?: "Failed to release order") }
+    }
+
+    // OFFER LOGGING & OUTCOME HELPERS
+    fun logOfferOutcome(orderId: String, serviceType: String, outcome: String) {
+        val uid = auth.currentUser?.uid ?: _rider.value?.uid ?: return
+        val docRef = db.collection("riders").document(uid).collection("offerLog").document(orderId)
+        val data = mapOf(
+            "orderId" to orderId,
+            "serviceType" to serviceType,
+            "outcome" to outcome,
+            "at" to FieldValue.serverTimestamp()
+        )
+        docRef.set(data, SetOptions.merge())
+    }
+
+    fun setOfferFinalOutcome(orderId: String, finalOutcome: String) {
+        val uid = auth.currentUser?.uid ?: _rider.value?.uid ?: return
+        val docRef = db.collection("riders").document(uid).collection("offerLog").document(orderId)
+        val data = mapOf(
+            "finalOutcome" to finalOutcome,
+            "finalAt" to FieldValue.serverTimestamp()
+        )
+        docRef.set(data, SetOptions.merge())
+    }
+
+    fun declineOffer(orderId: String, serviceType: String, userPrefs: UserPreferencesRepository) {
+        userPrefs.addDeclinedOrderId(orderId)
+        logOfferOutcome(orderId, serviceType, "declined")
+        if (_incomingOffer.value?.id == orderId) {
+            _incomingOffer.value = null
+        }
+    }
+
+    fun missOffer(orderId: String, serviceType: String, userPrefs: UserPreferencesRepository) {
+        userPrefs.addDeclinedOrderId(orderId)
+        logOfferOutcome(orderId, serviceType, "missed")
+        if (_incomingOffer.value?.id == orderId) {
+            _incomingOffer.value = null
+        }
     }
 
     // REPORT INCIDENT / PROBLEM
@@ -1106,6 +1304,15 @@ class RiderRepository {
         inboxReadsListener?.remove()
         coinTxListener?.remove()
         walletTransactionsListener?.remove()
+        platformSettingsListener?.remove()
+        platformSettingsListener = null
+        citySettingsListener?.remove()
+        citySettingsListener = null
+        offerLogListener?.remove()
+        offerLogListener = null
+        reviewsListener?.remove()
+        reviewsListener = null
+        currentCityId = null
         linkedUserListener?.remove()
         linkedUserListener = null
         customerTransactionsListener?.remove()
@@ -1293,11 +1500,65 @@ class RiderRepository {
             val itemsRaw = doc.get("items") as? List<*>
             val items = itemsRaw?.mapNotNull { itemObj ->
                 val m = itemObj as? Map<*, *> ?: return@mapNotNull null
+                val selectionsRaw = m["selections"] ?: m["options"] ?: m["modifiers"]
+                val selectionsList = mutableListOf<String>()
+                when (selectionsRaw) {
+                    is List<*> -> {
+                        selectionsRaw.forEach { sel ->
+                            when (sel) {
+                                is String -> {
+                                    val cleaned = sel.replace("()", "").trim()
+                                    if (cleaned.isNotBlank()) selectionsList.add(cleaned)
+                                }
+                                is Map<*, *> -> {
+                                    val selName = sel["name"]?.toString()
+                                        ?: sel["title"]?.toString()
+                                        ?: sel["optionName"]?.toString()
+                                        ?: sel["value"]?.toString()
+                                        ?: ""
+                                    val cleaned = selName.replace("()", "").trim()
+                                    if (cleaned.isNotBlank()) selectionsList.add(cleaned)
+                                }
+                            }
+                        }
+                    }
+                    is Map<*, *> -> {
+                        selectionsRaw.values.forEach { v ->
+                            when (v) {
+                                is String -> {
+                                    val cleaned = v.replace("()", "").trim()
+                                    if (cleaned.isNotBlank()) selectionsList.add(cleaned)
+                                }
+                                is List<*> -> {
+                                    v.forEach { sub ->
+                                        val subStr = when (sub) {
+                                            is String -> sub
+                                            is Map<*, *> -> sub["name"]?.toString() ?: sub["title"]?.toString() ?: ""
+                                            else -> sub?.toString() ?: ""
+                                        }
+                                        val cleaned = subStr.replace("()", "").trim()
+                                        if (cleaned.isNotBlank()) selectionsList.add(cleaned)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    is String -> {
+                        if (selectionsRaw.isNotBlank()) {
+                            selectionsRaw.split(",", ";").forEach { s ->
+                                val cleaned = s.replace("()", "").trim()
+                                if (cleaned.isNotBlank()) selectionsList.add(cleaned)
+                            }
+                        }
+                    }
+                }
+
                 OrderItem(
                     name = m["name"]?.toString() ?: m["title"]?.toString() ?: "",
                     quantity = (m["quantity"] as? Number)?.toInt() ?: 1,
                     price = (m["price"] as? Number)?.toDouble() ?: 0.0,
-                    specialInstructions = m["specialInstructions"]?.toString() ?: ""
+                    specialInstructions = m["specialInstructions"]?.toString() ?: "",
+                    selections = selectionsList
                 )
             } ?: emptyList()
 

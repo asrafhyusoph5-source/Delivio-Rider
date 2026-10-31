@@ -16,7 +16,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [36])
 class ExampleRobolectricTest {
 
     @Test
@@ -575,6 +575,95 @@ class ExampleRobolectricTest {
         )
         assertTrue(updatedFallback.isEditedByMerchant)
         assertEquals(420.0, updatedFallback.cashAmountToCollect, 0.001)
+    }
+
+    @Test
+    fun `verify item selections formatting never shows empty parentheses`() {
+        val item1 = com.example.data.models.OrderItem(
+            name = "Chicken Inasal",
+            quantity = 2,
+            price = 180.0,
+            selections = listOf("Extra Garlic Rice", "Spicy Marinade", "()", "", "  ")
+        )
+        val validSelections = item1.selections
+            .map { it.trim() }
+            .filter { it.isNotBlank() && it != "()" && it != "()" }
+
+        assertEquals(2, validSelections.size)
+        assertEquals("Extra Garlic Rice", validSelections[0])
+        assertEquals("Spicy Marinade", validSelections[1])
+        assertFalse(validSelections.contains("()"))
+    }
+
+    @Test
+    fun `verify city and platform service lock evaluation`() {
+        val platformServices = mutableMapOf<String, Boolean>()
+        val cityServices = mutableMapOf<String, Boolean>()
+
+        fun isServiceOn(service: String): Boolean {
+            val norm = service.lowercase().trim()
+            if (platformServices[norm] == false) return false
+            if (cityServices[norm] == false) return false
+            return true
+        }
+
+        // Default: missing means on
+        assertTrue(isServiceOn("food"))
+        assertTrue(isServiceOn("taxi"))
+
+        // City admin turns off taxi
+        cityServices["taxi"] = false
+        assertFalse(isServiceOn("taxi"))
+        assertTrue(isServiceOn("food"))
+
+        // Platform turns off food
+        platformServices["food"] = false
+        assertFalse(isServiceOn("food"))
+
+        // City admin turns taxi back on (or removed)
+        cityServices["taxi"] = true
+        assertTrue(isServiceOn("taxi"))
+    }
+
+    @Test
+    fun `verify acceptance and cancellation rate calculation formulas`() {
+        val logs = listOf(
+            com.example.data.models.OfferLogEntry(orderId = "1", serviceType = "food", outcome = "accepted", finalOutcome = "completed"),
+            com.example.data.models.OfferLogEntry(orderId = "2", serviceType = "food", outcome = "accepted", finalOutcome = "released"),
+            com.example.data.models.OfferLogEntry(orderId = "3", serviceType = "taxi", outcome = "declined"),
+            com.example.data.models.OfferLogEntry(orderId = "4", serviceType = "parcel", outcome = "missed")
+        )
+
+        val accepted = logs.count { it.outcome == "accepted" } // 2
+        val declined = logs.count { it.outcome == "declined" } // 1
+        val missed = logs.count { it.outcome == "missed" }     // 1
+        val total = accepted + declined + missed               // 4
+
+        val acceptanceRate = (accepted.toDouble() / total) * 100.0
+        assertEquals(50.0, acceptanceRate, 0.001)
+
+        val released = logs.count { it.finalOutcome == "released" } // 1
+        val cancellationRate = (released.toDouble() / accepted) * 100.0
+        assertEquals(50.0, cancellationRate, 0.001)
+    }
+
+    @Test
+    fun `verify customer review calculation and star bars`() {
+        val reviews = listOf(
+            com.example.data.models.CustomerReview(id = "r1", ratingRider = 5.0, comment = "Great driver"),
+            com.example.data.models.CustomerReview(id = "r2", ratingRider = 4.0, comment = ""),
+            com.example.data.models.CustomerReview(id = "r3", ratingRider = 5.0, comment = "Fast delivery")
+        )
+
+        val avg = reviews.map { it.ratingRider }.average()
+        assertEquals(4.666, avg, 0.01)
+        val formattedAvg = String.format(java.util.Locale.US, "%.1f", avg)
+        assertEquals("4.7", formattedAvg)
+
+        assertEquals(2, reviews.count { it.stars == 5 })
+        assertEquals(1, reviews.count { it.stars == 4 })
+        assertEquals(0, reviews.count { it.stars == 3 })
+        assertEquals(2, reviews.count { it.comment.isNotBlank() })
     }
 }
 

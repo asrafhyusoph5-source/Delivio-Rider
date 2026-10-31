@@ -37,7 +37,8 @@ fun IncomingOrderDialog(
     soundEnabled: Boolean,
     vibrationEnabled: Boolean,
     onAccept: () -> Unit,
-    onDecline: () -> Unit
+    onDecline: () -> Unit,
+    onMissed: () -> Unit = onDecline
 ) {
     val context = LocalContext.current
     var secondsLeft by remember(order.id) { mutableIntStateOf(30) }
@@ -72,7 +73,7 @@ fun IncomingOrderDialog(
             delay(1000L)
             secondsLeft -= 1
         }
-        onDecline()
+        onMissed()
     }
 
     val badge = OrderStepConstants.getServiceBadge(order.serviceType)

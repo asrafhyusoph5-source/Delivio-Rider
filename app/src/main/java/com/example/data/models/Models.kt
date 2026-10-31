@@ -70,6 +70,7 @@ data class OrderItem(
     val quantity: Int = 1,
     val price: Double = 0.0,
     val specialInstructions: String = "",
+    val selections: List<String> = emptyList(),
     var isChecked: Boolean = false
 )
 
@@ -504,3 +505,54 @@ data class AcceptOrderErrorDetails(
     val authUid: String = "",
     val fieldsWritten: Map<String, Any?> = emptyMap()
 )
+
+data class OfferLogEntry(
+    val orderId: String = "",
+    val serviceType: String = "",
+    val outcome: String = "", // "accepted", "declined", "missed"
+    val finalOutcome: String? = null, // "released", "completed"
+    val at: com.google.firebase.Timestamp? = null,
+    val finalAt: com.google.firebase.Timestamp? = null,
+    val atMillis: Long = at?.toDate()?.time ?: 0L,
+    val finalAtMillis: Long? = finalAt?.toDate()?.time
+)
+
+data class CustomerReview(
+    val id: String = "",
+    val riderId: String = "",
+    val ratingRider: Double = 5.0,
+    val comment: String = "",
+    val customerName: String = "",
+    val orderNumber: String = "",
+    val serviceType: String = "food",
+    val date: String = "",
+    val createdAt: com.google.firebase.Timestamp? = null,
+    val dateMillis: Long = createdAt?.toDate()?.time ?: 0L
+) {
+    val stars: Int
+        get() = ratingRider.toInt().coerceIn(1, 5)
+
+    val dateText: String
+        get() = if (date.isNotBlank()) date else {
+            if (dateMillis > 0L) {
+                val sdf = java.text.SimpleDateFormat("MMM dd, yyyy", java.util.Locale.US)
+                sdf.format(java.util.Date(dateMillis))
+            } else "Recent"
+        }
+}
+
+data class ServiceRateItem(
+    val serviceType: String = "",
+    val displayName: String = "",
+    val ratePercentage: Double? = null, // null if no data
+    val numerator: Int = 0,
+    val denominator: Int = 0,
+    val countLabel: String = "" // e.g. "12 of 14 offers" or "No data yet"
+) {
+    val hasData: Boolean
+        get() = ratePercentage != null && denominator > 0
+
+    val progress: Float
+        get() = if (denominator > 0) (numerator.toFloat() / denominator.toFloat()).coerceIn(0f, 1f) else 0f
+}
+

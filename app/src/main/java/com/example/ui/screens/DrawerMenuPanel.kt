@@ -33,6 +33,8 @@ fun DrawerMenuPanel(
     isOpen: Boolean,
     rider: Rider?,
     unreadInboxCount: Int,
+    isServiceOn: (String) -> Boolean = { true },
+    cityName: String = "",
     onToggleService: (String, Boolean) -> Unit,
     onClose: () -> Unit,
     onNavigate: (String) -> Unit
@@ -216,6 +218,7 @@ fun DrawerMenuPanel(
                             val activeList = rider?.activeServices ?: emptyList()
                             val allowedList = rider?.allowedServices ?: OrderStepConstants.ALL_SERVICES
                             val supportedServices = OrderStepConstants.getServicesForVehicle(rider?.vehicle?.type)
+                            val cityLabel = if (cityName.isNotBlank()) cityName else "City"
 
                             Column(
                                 modifier = Modifier
@@ -224,78 +227,102 @@ fun DrawerMenuPanel(
                             ) {
                                 // 1. Delivio Food (food)
                                 if (supportedServices.contains(OrderStepConstants.SERVICE_FOOD)) {
-                                    val foodAllowed = allowedList.contains(OrderStepConstants.SERVICE_FOOD)
+                                    val isCityOn = isServiceOn(OrderStepConstants.SERVICE_FOOD)
+                                    val isAllowed = allowedList.contains(OrderStepConstants.SERVICE_FOOD)
+                                    val isDisabled = !isCityOn || !isAllowed
+                                    val reason = if (!isCityOn) "Disabled by admin in $cityLabel" else "Disabled by admin"
                                     DrawerServiceTypeToggleItem(
                                         title = "Delivio Food",
                                         subtitle = "Restaurant & cooked food deliveries",
                                         icon = Icons.Default.Restaurant,
-                                        isChecked = activeList.contains(OrderStepConstants.SERVICE_FOOD),
-                                        isDisabledByAdmin = !foodAllowed,
+                                        isChecked = if (isDisabled) false else activeList.contains(OrderStepConstants.SERVICE_FOOD),
+                                        isDisabledByAdmin = isDisabled,
+                                        disabledReason = reason,
                                         onCheckedChange = { onToggleService(OrderStepConstants.SERVICE_FOOD, it) }
                                     )
                                 }
 
                                 // 2. Delivio Instant (convenience)
                                 if (supportedServices.contains(OrderStepConstants.SERVICE_INSTANT)) {
-                                    val instantAllowed = allowedList.contains(OrderStepConstants.SERVICE_INSTANT)
+                                    val isCityOn = isServiceOn(OrderStepConstants.SERVICE_INSTANT)
+                                    val isAllowed = allowedList.contains(OrderStepConstants.SERVICE_INSTANT)
+                                    val isDisabled = !isCityOn || !isAllowed
+                                    val reason = if (!isCityOn) "Disabled by admin in $cityLabel" else "Disabled by admin"
                                     DrawerServiceTypeToggleItem(
                                         title = "Delivio Instant",
                                         subtitle = "Express point-to-point courier",
                                         icon = Icons.Default.Bolt,
-                                        isChecked = activeList.contains(OrderStepConstants.SERVICE_INSTANT),
-                                        isDisabledByAdmin = !instantAllowed,
+                                        isChecked = if (isDisabled) false else activeList.contains(OrderStepConstants.SERVICE_INSTANT),
+                                        isDisabledByAdmin = isDisabled,
+                                        disabledReason = reason,
                                         onCheckedChange = { onToggleService(OrderStepConstants.SERVICE_INSTANT, it) }
                                     )
                                 }
 
                                 // 3. Delivio Parcel (parcel)
                                 if (supportedServices.contains(OrderStepConstants.SERVICE_PARCEL)) {
-                                    val parcelAllowed = allowedList.contains(OrderStepConstants.SERVICE_PARCEL)
+                                    val isCityOn = isServiceOn(OrderStepConstants.SERVICE_PARCEL)
+                                    val isAllowed = allowedList.contains(OrderStepConstants.SERVICE_PARCEL)
+                                    val isDisabled = !isCityOn || !isAllowed
+                                    val reason = if (!isCityOn) "Disabled by admin in $cityLabel" else "Disabled by admin"
                                     DrawerServiceTypeToggleItem(
                                         title = "Delivio Parcel",
                                         subtitle = "Boxed items, packages & documents",
                                         icon = Icons.Default.Inventory2,
-                                        isChecked = activeList.contains(OrderStepConstants.SERVICE_PARCEL),
-                                        isDisabledByAdmin = !parcelAllowed,
+                                        isChecked = if (isDisabled) false else activeList.contains(OrderStepConstants.SERVICE_PARCEL),
+                                        isDisabledByAdmin = isDisabled,
+                                        disabledReason = reason,
                                         onCheckedChange = { onToggleService(OrderStepConstants.SERVICE_PARCEL, it) }
                                     )
                                 }
 
                                 // 4. Delivio Pabili (pabili)
                                 if (supportedServices.contains(OrderStepConstants.SERVICE_PABILI)) {
-                                    val pabiliAllowed = allowedList.contains(OrderStepConstants.SERVICE_PABILI)
+                                    val isCityOn = isServiceOn(OrderStepConstants.SERVICE_PABILI)
+                                    val isAllowed = allowedList.contains(OrderStepConstants.SERVICE_PABILI)
+                                    val isDisabled = !isCityOn || !isAllowed
+                                    val reason = if (!isCityOn) "Disabled by admin in $cityLabel" else "Disabled by admin"
                                     DrawerServiceTypeToggleItem(
                                         title = "Delivio Pabili",
                                         subtitle = "On-demand grocery & item purchasing",
                                         icon = Icons.Default.ShoppingBag,
-                                        isChecked = activeList.contains(OrderStepConstants.SERVICE_PABILI),
-                                        isDisabledByAdmin = !pabiliAllowed,
+                                        isChecked = if (isDisabled) false else activeList.contains(OrderStepConstants.SERVICE_PABILI),
+                                        isDisabledByAdmin = isDisabled,
+                                        disabledReason = reason,
                                         onCheckedChange = { onToggleService(OrderStepConstants.SERVICE_PABILI, it) }
                                     )
                                 }
 
                                 // 5. Delivio Request (request_rider)
                                 if (supportedServices.contains(OrderStepConstants.SERVICE_REQUEST)) {
-                                    val reqAllowed = allowedList.contains(OrderStepConstants.SERVICE_REQUEST)
+                                    val isCityOn = isServiceOn(OrderStepConstants.SERVICE_REQUEST)
+                                    val isAllowed = allowedList.contains(OrderStepConstants.SERVICE_REQUEST)
+                                    val isDisabled = !isCityOn || !isAllowed
+                                    val reason = if (!isCityOn) "Disabled by admin in $cityLabel" else "Disabled by admin"
                                     DrawerServiceTypeToggleItem(
                                         title = "Delivio Request",
                                         subtitle = "Merchant driver requests",
                                         icon = Icons.Default.DeliveryDining,
-                                        isChecked = activeList.contains(OrderStepConstants.SERVICE_REQUEST),
-                                        isDisabledByAdmin = !reqAllowed,
+                                        isChecked = if (isDisabled) false else activeList.contains(OrderStepConstants.SERVICE_REQUEST),
+                                        isDisabledByAdmin = isDisabled,
+                                        disabledReason = reason,
                                         onCheckedChange = { onToggleService(OrderStepConstants.SERVICE_REQUEST, it) }
                                     )
                                 }
 
                                 // 6. Delivio Taxi (taxi)
                                 if (supportedServices.contains(OrderStepConstants.SERVICE_TAXI)) {
-                                    val taxiAllowed = allowedList.contains(OrderStepConstants.SERVICE_TAXI)
+                                    val isCityOn = isServiceOn(OrderStepConstants.SERVICE_TAXI)
+                                    val isAllowed = allowedList.contains(OrderStepConstants.SERVICE_TAXI)
+                                    val isDisabled = !isCityOn || !isAllowed
+                                    val reason = if (!isCityOn) "Disabled by admin in $cityLabel" else "Disabled by admin"
                                     DrawerServiceTypeToggleItem(
                                         title = "Delivio Taxi",
                                         subtitle = "Passenger ride-hailing & city taxi",
                                         icon = Icons.Default.DirectionsCar,
-                                        isChecked = activeList.contains(OrderStepConstants.SERVICE_TAXI),
-                                        isDisabledByAdmin = !taxiAllowed,
+                                        isChecked = if (isDisabled) false else activeList.contains(OrderStepConstants.SERVICE_TAXI),
+                                        isDisabledByAdmin = isDisabled,
+                                        disabledReason = reason,
                                         onCheckedChange = { onToggleService(OrderStepConstants.SERVICE_TAXI, it) }
                                     )
                                 }
@@ -323,6 +350,10 @@ fun DrawerMenuPanel(
                                 DrawerSubMenuItem("Activity insights") {
                                     onClose()
                                     onNavigate("resources/insights")
+                                }
+                                DrawerSubMenuItem("Ratings & reviews") {
+                                    onClose()
+                                    onNavigate("resources/reviews")
                                 }
                                 DrawerSubMenuItem("Driver safety") {
                                     onClose()
@@ -508,6 +539,7 @@ private fun DrawerServiceTypeToggleItem(
     icon: ImageVector,
     isChecked: Boolean,
     isDisabledByAdmin: Boolean = false,
+    disabledReason: String? = null,
     onCheckedChange: (Boolean) -> Unit
 ) {
     Surface(
@@ -540,7 +572,7 @@ private fun DrawerServiceTypeToggleItem(
                         color = if (isDisabledByAdmin) Color.Gray else MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        text = if (isDisabledByAdmin) "Disabled by admin" else subtitle,
+                        text = if (isDisabledByAdmin) (disabledReason ?: "Disabled by admin") else subtitle,
                         fontSize = 10.sp,
                         fontWeight = if (isDisabledByAdmin) FontWeight.Bold else FontWeight.Normal,
                         color = if (isDisabledByAdmin) DelivioRed else MaterialTheme.colorScheme.onSurfaceVariant

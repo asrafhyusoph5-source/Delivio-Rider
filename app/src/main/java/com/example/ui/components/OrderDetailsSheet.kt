@@ -1560,6 +1560,17 @@ private fun ItemsCard(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("• ${item.quantity}x ${item.name}", fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                        item.selections.forEach { sel ->
+                            val cleanSel = sel.replace("()", "").trim()
+                            if (cleanSel.isNotBlank()) {
+                                Text(
+                                    text = cleanSel,
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(start = 12.dp, top = 1.dp)
+                                )
+                            }
+                        }
                         if (item.specialInstructions.isNotBlank()) {
                             Text("Note: ${item.specialInstructions}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }

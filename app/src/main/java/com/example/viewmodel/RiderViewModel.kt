@@ -204,6 +204,16 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     val transactions: StateFlow<List<WalletTransaction>> = riderRepository.walletTransactions
     val walletHistory: StateFlow<List<WalletTransaction>> = transactions
 
+    // Offer Logs and Customer Reviews
+    val offerLogs: StateFlow<List<OfferLogEntry>> = riderRepository.offerLogs
+    val customerReviews: StateFlow<List<CustomerReview>> = riderRepository.customerReviews
+    val platformServices = riderRepository.platformServices
+    val cityServices = riderRepository.cityServices
+    val currentCityName = riderRepository.currentCityName
+
+    fun isServiceOn(serviceType: String): Boolean = riderRepository.isServiceOn(serviceType)
+    fun getCityDisplayName(): String = riderRepository.getCityDisplayName()
+
     // Support chat
     private val _supportChatMessages = MutableStateFlow<List<ChatMessage>>(listOf(
         ChatMessage(
@@ -639,8 +649,15 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // DECLINE OFFER
-    fun declineIncomingOffer(orderId: String) {
-        prefsRepository.addDeclinedOrderId(orderId)
+    fun declineIncomingOffer(orderId: String, serviceType: String = "") {
+        val sType = serviceType.ifEmpty { incomingOffer.value?.serviceType ?: OrderStepConstants.SERVICE_FOOD }
+        riderRepository.declineOffer(orderId, sType, prefsRepository)
+    }
+
+    // MISS OFFER (30s timer expired)
+    fun missIncomingOffer(orderId: String, serviceType: String = "") {
+        val sType = serviceType.ifEmpty { incomingOffer.value?.serviceType ?: OrderStepConstants.SERVICE_FOOD }
+        riderRepository.missOffer(orderId, sType, prefsRepository)
     }
 
     // ADVANCE STEP
@@ -673,12 +690,136 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     // RELEASE ORDER
     fun releaseOrder(reason: String) {
         val order = currentActiveOrder.value ?: return
-        riderRepository.releaseOrder(order, reason,
+        riderRepository.releaseOrder(order, reason, prefsRepository,
             onSuccess = {
                 showSnackbar("Order released back to dispatch")
             },
             onError = { showSnackbar(it) }
         )
+    }
+
+    // ACCEPTANCE & CANCELLATION RATE STATS
+    fun getFilteredOfferLogs(period: String): List<OfferLogEntry> {
+        val allLogs = offerLogs.value
+        val now = System.currentTimeMillis()
+        val cutoff = when (period) {
+            "7 days" -> now - (7L * 24 * 60 * 60 * 1000L)
+            "30 days" -> now - (30L * 24 * 60 * 60 * 1000L)
+            else -> 0L
+        }
+        return allLogs.filter { log ->
+            if (cutoff <= 0L) true
+            else {
+                val millis = log.at?.toDate()?.time ?: log.atMillis
+                millis >= cutoff
+            }
+        }.sortedByDescending { it.at?.toDate()?.time ?: it.atMillis }
+    }
+
+    fun calculateAcceptanceRate(logs: List<OfferLogEntry>): Double? {
+        val accepted = logs.count { it.outcome == "accepted" }
+        val declined = logs.count { it.outcome == "declined" }
+        val missed = logs.count { it.outcome == "missed" }
+        val total = accepted + declined + missed
+        if (total == 0) return null
+        return (accepted.toDouble() / total) * 100.0
+    }
+
+    fun calculateCancellationRate(logs: List<OfferLogEntry>): Double? {
+        val accepted = logs.count { it.outcome == "accepted" }
+        if (accepted == 0) return null
+        val released = logs.count { it.finalOutcome == "released" }
+        return (released.toDouble() / accepted) * 100.0
+    }
+
+    fun getServiceAcceptanceBreakdown(period: String): List<ServiceRateItem> {
+        val logs = getFilteredOfferLogs(period)
+        val services = listOf(
+            "food" to "Food",
+            "convenience" to "Convenience",
+            "parcel" to "Parcel",
+            "pabili" to "Pabili",
+            "request_rider" to "Request a Rider",
+            "taxi" to "Taxi"
+        )
+        return services.map { (key, displayName) ->
+            val svcLogs = logs.filter {
+                val st = it.serviceType.lowercase().trim()
+                when (key) {
+                    "convenience" -> st == "convenience" || st == "instant"
+                    "request_rider" -> st == "request_rider" || st == "request"
+                    else -> st == key
+                }
+            }
+            val accepted = svcLogs.count { it.outcome == "accepted" }
+            val declined = svcLogs.count { it.outcome == "declined" }
+            val missed = svcLogs.count { it.outcome == "missed" }
+            val total = accepted + declined + missed
+            if (total == 0) {
+                ServiceRateItem(
+                    serviceType = key,
+                    displayName = displayName,
+                    ratePercentage = null,
+                    numerator = 0,
+                    denominator = 0,
+                    countLabel = "No data yet"
+                )
+            } else {
+                val rate = (accepted.toDouble() / total) * 100.0
+                ServiceRateItem(
+                    serviceType = key,
+                    displayName = displayName,
+                    ratePercentage = rate,
+                    numerator = accepted,
+                    denominator = total,
+                    countLabel = "$accepted of $total offers"
+                )
+            }
+        }
+    }
+
+    fun getServiceCancellationBreakdown(period: String): List<ServiceRateItem> {
+        val logs = getFilteredOfferLogs(period)
+        val services = listOf(
+            "food" to "Food",
+            "convenience" to "Convenience",
+            "parcel" to "Parcel",
+            "pabili" to "Pabili",
+            "request_rider" to "Request a Rider",
+            "taxi" to "Taxi"
+        )
+        return services.map { (key, displayName) ->
+            val svcLogs = logs.filter {
+                val st = it.serviceType.lowercase().trim()
+                when (key) {
+                    "convenience" -> st == "convenience" || st == "instant"
+                    "request_rider" -> st == "request_rider" || st == "request"
+                    else -> st == key
+                }
+            }
+            val accepted = svcLogs.count { it.outcome == "accepted" }
+            val released = svcLogs.count { it.finalOutcome == "released" }
+            if (accepted == 0) {
+                ServiceRateItem(
+                    serviceType = key,
+                    displayName = displayName,
+                    ratePercentage = null,
+                    numerator = 0,
+                    denominator = 0,
+                    countLabel = "No data yet"
+                )
+            } else {
+                val rate = (released.toDouble() / accepted) * 100.0
+                ServiceRateItem(
+                    serviceType = key,
+                    displayName = displayName,
+                    ratePercentage = rate,
+                    numerator = released,
+                    denominator = accepted,
+                    countLabel = "$released of $accepted accepted"
+                )
+            }
+        }
     }
 
     // REPORT INCIDENT

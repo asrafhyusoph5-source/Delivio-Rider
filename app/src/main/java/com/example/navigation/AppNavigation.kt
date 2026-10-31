@@ -22,6 +22,7 @@ object NavRoutes {
     const val PAYMENTS = "earnings"
     const val PROFILE = "profile"
     const val RESOURCES_INSIGHTS = "resources/insights"
+    const val RESOURCES_REVIEWS = "resources/reviews"
     const val RESOURCES_SAFETY = "resources/safety"
     const val RESOURCES_TUTORIALS = "resources/tutorials"
     const val TIERS = "resources/tiers"
@@ -129,6 +130,15 @@ fun AppNavigation(
                 )
             }
 
+            composable(NavRoutes.RESOURCES_REVIEWS) {
+                ResourcesScreen(
+                    initialSubpage = "reviews",
+                    viewModel = viewModel,
+                    onBack = { navController.popBackStack() },
+                    onOpenEarnings = { navController.navigate(NavRoutes.EARNINGS) }
+                )
+            }
+
             composable(NavRoutes.RESOURCES_TUTORIALS) {
                 ResourcesScreen(
                     initialSubpage = "tutorials",
@@ -162,6 +172,8 @@ fun AppNavigation(
             isOpen = isDrawerOpen,
             rider = rider,
             unreadInboxCount = unreadCount,
+            isServiceOn = { viewModel.isServiceOn(it) },
+            cityName = viewModel.getCityDisplayName(),
             onToggleService = { serviceKey, enabled ->
                 viewModel.toggleService(serviceKey, enabled)
             },
@@ -176,6 +188,7 @@ fun AppNavigation(
                     "profile" -> NavRoutes.PROFILE
                     "resources/tiers" -> NavRoutes.TIERS
                     "resources/insights" -> NavRoutes.RESOURCES_INSIGHTS
+                    "resources/reviews" -> NavRoutes.RESOURCES_REVIEWS
                     "resources/safety" -> NavRoutes.RESOURCES_SAFETY
                     "resources/tutorials" -> NavRoutes.RESOURCES_TUTORIALS
                     "settings" -> NavRoutes.SETTINGS
