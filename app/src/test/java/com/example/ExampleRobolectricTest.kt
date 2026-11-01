@@ -665,5 +665,50 @@ class ExampleRobolectricTest {
         assertEquals(0, reviews.count { it.stars == 3 })
         assertEquals(2, reviews.count { it.comment.isNotBlank() })
     }
+
+    @Test
+    fun `verify late tip adds 100 percent to driver earnings with zero commission`() {
+        val orderWithLateTip = Order(
+            id = "order_tip_1",
+            orderNumber = "DLV-9999",
+            serviceType = "food",
+            baseFare = 60.0,
+            distanceFare = 40.0,
+            deliveryFee = 100.0,
+            platformCommission = 10.0,
+            tip = 25.0,
+            lateTipAmount = 50.0
+        )
+
+        // base delivery = 100, platformCommission = 10 -> netDelivery = 90
+        // net = netDelivery (90) + tip (25) + lateTipAmount (50) = 165.0
+        assertEquals(165.0, orderWithLateTip.estimatedEarnings, 0.001)
+
+        val taxiOrderWithLateTip = Order(
+            id = "taxi_tip_1",
+            orderNumber = "TX-8888",
+            serviceType = OrderStepConstants.SERVICE_TAXI,
+            vehicleType = "car4",
+            feesTotal = 200.0,
+            platformCommission = 15.0, // 15%
+            tip = 30.0,
+            lateTipAmount = 40.0
+        )
+
+        // net = 200 * (1 - 0.15) + 30 + 40 = 170 + 70 = 240.0
+        assertEquals(240.0, taxiOrderWithLateTip.estimatedEarnings, 0.001)
+    }
+
+    @Test
+    fun `verify LateTipBannerInfo creation and formatting`() {
+        val banner = com.example.data.models.LateTipBannerInfo(
+            orderId = "order_123",
+            orderNumber = "DLV-1234",
+            amount = 75.0
+        )
+        assertEquals("order_123", banner.orderId)
+        assertEquals("DLV-1234", banner.orderNumber)
+        assertEquals(75.0, banner.amount, 0.001)
+    }
 }
 

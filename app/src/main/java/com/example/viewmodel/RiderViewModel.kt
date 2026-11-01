@@ -207,6 +207,50 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     // Offer Logs and Customer Reviews
     val offerLogs: StateFlow<List<OfferLogEntry>> = riderRepository.offerLogs
     val customerReviews: StateFlow<List<CustomerReview>> = riderRepository.customerReviews
+
+    val averageCustomerRating: StateFlow<Double> = customerReviews.map { revs ->
+        if (revs.isEmpty()) 5.0 else revs.map { it.ratingRider }.average()
+    }.stateIn(viewModelScope, SharingStarted.Lazily, 5.0)
+
+    val customerReviewCount: StateFlow<Int> = customerReviews.map { it.size }
+        .stateIn(viewModelScope, SharingStarted.Lazily, 0)
+
+    val lateTipBanner: StateFlow<LateTipBannerInfo?> = riderRepository.lateTipBanner
+
+    fun dismissLateTipBanner() {
+        riderRepository.dismissLateTipBanner()
+    }
+
+    // Rate the shop dialog state
+    private val _rateShopOrder = MutableStateFlow<Order?>(null)
+    val rateShopOrder: StateFlow<Order?> = _rateShopOrder.asStateFlow()
+
+    fun promptRateShop(order: Order) {
+        _rateShopOrder.value = order
+    }
+
+    fun dismissRateShop() {
+        _rateShopOrder.value = null
+    }
+
+    fun submitShopReview(order: Order, ratingMerchant: Int, comment: String) {
+        val oId = order.id
+        val mId = order.merchantId.ifBlank { "unknown_merchant" }
+        val sType = order.serviceType
+        dismissRateShop()
+        riderRepository.submitShopReview(
+            orderId = oId,
+            merchantId = mId,
+            serviceType = sType,
+            ratingMerchant = ratingMerchant,
+            comment = comment,
+            onSuccess = {
+                showSnackbar("Thank you! Shop rating submitted.")
+            },
+            onError = { showSnackbar(it) }
+        )
+    }
+
     val platformServices = riderRepository.platformServices
     val cityServices = riderRepository.cityServices
     val currentCityName = riderRepository.currentCityName
@@ -667,6 +711,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val step = order.riderStep.lowercase()
         val isFinal = when (order.serviceType.lowercase()) {
             OrderStepConstants.SERVICE_PARCEL -> step in listOf(OrderStepConstants.STEP_AT_RECIPIENT, OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER)
+            OrderStepConstants.SERVICE_TAXI -> order.isAtLastTaxiStop && step.startsWith(OrderStepConstants.STEP_TO_STOP_PREFIX)
             else -> step in listOf(OrderStepConstants.STEP_AT_CUSTOMER, OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER)
         }
         riderRepository.advanceOrderStep(order, finalReceiptTotal,
@@ -674,8 +719,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 if (isFinal) {
                     // Show celebration delivery success dialog with accurate codCollected
                     val codAmountFinal = if (order.isCod) order.cashAmountToCollect else 0.0
+                    val finalStatus = if (order.isTaxi) OrderStepConstants.STATUS_COMPLETED else OrderStepConstants.STATUS_DELIVERED
                     _completedDeliveryOrder.value = order.copy(
-                        status = OrderStepConstants.STATUS_DELIVERED,
+                        status = finalStatus,
                         riderStep = OrderStepConstants.STEP_COMPLETED,
                         codCollected = codAmountFinal
                     )

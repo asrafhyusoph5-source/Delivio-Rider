@@ -82,6 +82,16 @@ class RiderRepository {
     private val _customerReviews = MutableStateFlow<List<CustomerReview>>(emptyList())
     val customerReviews: StateFlow<List<CustomerReview>> = _customerReviews.asStateFlow()
 
+    private val _lateTipBanner = MutableStateFlow<LateTipBannerInfo?>(null)
+    val lateTipBanner: StateFlow<LateTipBannerInfo?> = _lateTipBanner.asStateFlow()
+
+    fun dismissLateTipBanner() {
+        _lateTipBanner.value = null
+    }
+
+    private val knownLateTips = mutableMapOf<String, Double>()
+    private var deliveredListenerInitialized = false
+
     private val _listenerError = MutableStateFlow<String?>(null)
     val listenerError: StateFlow<String?> = _listenerError.asStateFlow()
 
@@ -398,11 +408,28 @@ class RiderRepository {
         // 4. Delivered orders for earnings & wallet
         deliveredOrdersListener = db.collection("orders")
             .whereEqualTo("riderId", uid)
-            .whereEqualTo("status", OrderStepConstants.STATUS_DELIVERED)
+            .whereIn("status", listOf(OrderStepConstants.STATUS_DELIVERED, OrderStepConstants.STATUS_COMPLETED, "Delivered", "Completed").distinct())
             .addSnapshotListener { snapshots, error ->
                 if (error != null || snapshots == null) return@addSnapshotListener
                 val orders = snapshots.documents.mapNotNull { parseOrder(it) }
                 _deliveredOrders.value = orders
+
+                // Check for late tip updates arriving while app is open
+                for (order in orders) {
+                    val prev = knownLateTips[order.id] ?: 0.0
+                    if (deliveredListenerInitialized && order.lateTipAmount > prev) {
+                        val added = order.lateTipAmount - prev
+                        _lateTipBanner.value = LateTipBannerInfo(
+                            orderId = order.id,
+                            orderNumber = order.orderNumber,
+                            amount = added
+                        )
+                    }
+                    if (order.lateTipAmount > 0.0) {
+                        knownLateTips[order.id] = order.lateTipAmount
+                    }
+                }
+                deliveredListenerInitialized = true
 
                 // Check monthly tier progress
                 checkTierProgression(uid, _rider.value?.name ?: "Rider", orders, userPrefs)
@@ -1316,8 +1343,37 @@ class RiderRepository {
         linkedUserListener?.remove()
         linkedUserListener = null
         customerTransactionsListener?.remove()
-        customerTransactionsListener = null
         currentLinkedCustomerUid = null
+        deliveredListenerInitialized = false
+        knownLateTips.clear()
+    }
+
+    // SUBMIT SHOP REVIEW
+    fun submitShopReview(
+        orderId: String,
+        merchantId: String,
+        serviceType: String,
+        ratingMerchant: Int,
+        comment: String,
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val uid = auth.currentUser?.uid ?: run {
+            onError("Not authenticated")
+            return
+        }
+        val data = mapOf(
+            "orderId" to orderId,
+            "riderId" to uid,
+            "merchantId" to merchantId,
+            "serviceType" to serviceType,
+            "ratingMerchant" to ratingMerchant,
+            "comment" to comment.trim().take(200),
+            "createdAt" to FieldValue.serverTimestamp()
+        )
+        db.collection("riderReviews").document(orderId).set(data, SetOptions.merge())
+            .addOnSuccessListener { onSuccess() }
+            .addOnFailureListener { onError(it.localizedMessage ?: "Failed to submit review") }
     }
 
     // Helpers
@@ -1625,6 +1681,13 @@ class RiderRepository {
             } ?: emptyList()
             val completedStopsRaw = (doc.get("completedStops") as? List<*>)?.mapNotNull { (it as? Number)?.toInt() } ?: emptyList()
 
+            val lateTipMap = doc.get("lateTip") as? Map<*, *>
+            val lateTipAmount = (lateTipMap?.get("amount") as? Number)?.toDouble()
+                ?: doc.getDouble("lateTip.amount")
+                ?: doc.getDouble("lateTipAmount")
+                ?: 0.0
+            val lateTipAt = lateTipMap?.get("createdAt") ?: lateTipMap?.get("at") ?: doc.get("lateTipAt")
+
             return Order(
                 id = id,
                 orderNumber = orderNumber,
@@ -1691,7 +1754,9 @@ class RiderRepository {
                 arrivedMerchantAt = doc.get("arrivedMerchantAt"),
                 arrivedCustomerAt = doc.get("arrivedCustomerAt"),
                 deliveredAt = doc.get("deliveredAt"),
-                releaseReason = doc.getString("releaseReason")
+                releaseReason = doc.getString("releaseReason"),
+                lateTipAmount = lateTipAmount,
+                lateTipAt = lateTipAt
             )
         } catch (_: Exception) {
             return null

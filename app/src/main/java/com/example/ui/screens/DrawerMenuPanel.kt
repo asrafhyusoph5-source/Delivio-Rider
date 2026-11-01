@@ -28,11 +28,15 @@ import com.example.data.constants.OrderStepConstants
 import com.example.data.models.Rider
 import com.example.ui.theme.*
 
+import java.util.Locale
+
 @Composable
 fun DrawerMenuPanel(
     isOpen: Boolean,
     rider: Rider?,
     unreadInboxCount: Int,
+    averageRating: Double = 5.0,
+    reviewCount: Int = 0,
     isServiceOn: (String) -> Boolean = { true },
     cityName: String = "",
     onToggleService: (String, Boolean) -> Unit,
@@ -113,16 +117,52 @@ fun DrawerMenuPanel(
                                 fontWeight = FontWeight.Black,
                                 color = TextOnYellow
                             )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            val ratingStr = if (rider != null) String.format("%.1f", rider.rating) else "5.0"
+                            Spacer(modifier = Modifier.height(4.dp))
+                            val avgRatingStr = String.format(Locale.US, "%.1f", averageRating)
                             val vehicleLabel = OrderStepConstants.getVehicleDisplayName(rider?.vehicle?.type)
                             val modelStr = rider?.vehicle?.model?.ifBlank { vehicleLabel } ?: vehicleLabel
-                            Text(
-                                text = "★ $ratingStr • $modelStr",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = TextOnYellow.copy(alpha = 0.85f)
-                            )
+
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = DelivioYellowDark.copy(alpha = 0.5f),
+                                    modifier = Modifier
+                                        .clickable {
+                                            onClose()
+                                            onNavigate("resources/reviews")
+                                        }
+                                        .testTag("drawer_stars_tile")
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Star,
+                                            contentDescription = "Rating",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(13.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(3.dp))
+                                        Text(
+                                            text = "$avgRatingStr ($reviewCount)",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Black,
+                                            color = Color.White
+                                        )
+                                    }
+                                }
+
+                                Text(
+                                    text = modelStr,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextOnYellow.copy(alpha = 0.9f)
+                                )
+                            }
                         }
                     }
 
@@ -351,7 +391,11 @@ fun DrawerMenuPanel(
                                     onClose()
                                     onNavigate("resources/insights")
                                 }
-                                DrawerSubMenuItem("Ratings & reviews") {
+                                val avgRatingStr = String.format(Locale.US, "%.1f", averageRating)
+                                DrawerSubMenuItem(
+                                    title = "★ $avgRatingStr ($reviewCount)",
+                                    trailingIcon = Icons.Default.Star
+                                ) {
                                     onClose()
                                     onNavigate("resources/reviews")
                                 }

@@ -38,6 +38,8 @@ fun AppNavigation(
     val isLoggedIn by viewModel.isLoggedIn.collectAsState()
     val rider by viewModel.rider.collectAsState()
     val unreadCount by viewModel.unreadNotificationCount.collectAsState()
+    val avgRating by viewModel.averageCustomerRating.collectAsState()
+    val reviewCount by viewModel.customerReviewCount.collectAsState()
 
     var isDrawerOpen by remember { mutableStateOf(false) }
 
@@ -172,6 +174,8 @@ fun AppNavigation(
             isOpen = isDrawerOpen,
             rider = rider,
             unreadInboxCount = unreadCount,
+            averageRating = avgRating,
+            reviewCount = reviewCount,
             isServiceOn = { viewModel.isServiceOn(it) },
             cityName = viewModel.getCityDisplayName(),
             onToggleService = { serviceKey, enabled ->

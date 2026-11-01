@@ -32,6 +32,10 @@ import com.example.data.models.parsePaymentType
 import com.example.data.models.formatPaymentProvider
 import com.example.ui.components.PaymentBadgeContent
 import com.example.viewmodel.RiderViewModel
+import java.util.Locale
+import java.util.Calendar
+import java.util.Date
+import java.text.SimpleDateFormat
 
 data class EarningsJobRecord(
     val id: String,
@@ -45,6 +49,7 @@ data class EarningsJobRecord(
     val baseFare: Double,
     val distanceFare: Double,
     val tip: Double = 0.0,
+    val lateTip: Double = 0.0,
     val surgeBoost: Double = 0.0,
     val waitingPay: Double = 0.0,
     val extraStopPay: Double = 0.0,
@@ -72,7 +77,7 @@ data class EarningsJobRecord(
         get() = formatPaymentProvider(paymentProvider)
 
     val netEarning: Double
-        get() = baseFare + distanceFare + tip + surgeBoost + waitingPay + extraStopPay + returnTripPay + urgentBonus - platformCommission
+        get() = baseFare + distanceFare + tip + lateTip + surgeBoost + waitingPay + extraStopPay + returnTripPay + urgentBonus - platformCommission
 }
 
 private val SAMPLE_EARNINGS_JOBS = listOf(
@@ -110,6 +115,7 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
         baseFare = 55.0,
         distanceFare = 35.0,
         tip = 20.0,
+        lateTip = 35.0,
         surgeBoost = 30.0,
         platformCommission = 5.0,
         paymentMethod = "online",
@@ -299,6 +305,7 @@ fun EarningsScreen(
     onBack: () -> Unit
 ) {
     val currencySymbol by viewModel.currencySymbol.collectAsState()
+    val deliveredOrders by viewModel.deliveredOrders.collectAsState()
     val context = LocalContext.current
 
     var selectedPeriod by remember { mutableStateOf("Daily") } // "Daily", "Weekly", "Monthly"
@@ -311,12 +318,48 @@ fun EarningsScreen(
     var showHelpDialog by remember { mutableStateOf(false) }
     var showStatementsDialog by remember { mutableStateOf(false) }
 
+    val allJobs = remember(deliveredOrders) {
+        val liveRecords = deliveredOrders.map { order ->
+            val cal = Calendar.getInstance()
+            when (val delAt = order.deliveredAt) {
+                is com.google.firebase.Timestamp -> cal.time = delAt.toDate()
+                is Date -> cal.time = delAt
+                else -> {}
+            }
+            val dayNum = cal.get(Calendar.DAY_OF_MONTH)
+            val dayWk = SimpleDateFormat("EEE", Locale.US).format(cal.time)
+            val timeStr = SimpleDateFormat("hh:mm a", Locale.US).format(cal.time)
+            val commission = if (order.platformCommission > 0.0) order.platformCommission else (order.deliveryFee * 0.15)
+            EarningsJobRecord(
+                id = order.id,
+                orderNumber = order.orderNumber,
+                serviceType = order.serviceType.replaceFirstChar { it.uppercase() },
+                merchantName = if (order.isTaxi) (order.stops.firstOrNull()?.address ?: "Pickup Point") else order.merchantName,
+                area = if (order.isTaxi) "${order.customerArea} (${order.stops.size + 1} stops)" else "${order.merchantAddress.take(20)} to ${order.customerArea}",
+                timeText = timeStr,
+                dayNumber = dayNum,
+                dayOfWeek = dayWk,
+                baseFare = order.baseFare,
+                distanceFare = order.distanceFare,
+                tip = order.tip,
+                lateTip = order.lateTipAmount,
+                surgeBoost = order.surgeBonus,
+                platformCommission = commission,
+                paymentMethod = order.paymentMethod,
+                paymentProvider = order.paymentProvider,
+                cashToCollect = order.cashAmountToCollect,
+                codCollected = order.codCollected
+            )
+        }
+        (liveRecords + SAMPLE_EARNINGS_JOBS).distinctBy { it.id }
+    }
+
     // Filter jobs based on period
-    val periodJobs = remember(selectedPeriod, selectedDayNumber) {
+    val periodJobs = remember(allJobs, selectedPeriod, selectedDayNumber) {
         when (selectedPeriod) {
-            "Daily" -> SAMPLE_EARNINGS_JOBS.filter { it.dayNumber == selectedDayNumber }
-            "Weekly" -> SAMPLE_EARNINGS_JOBS.filter { it.dayNumber in 5..11 }
-            else -> SAMPLE_EARNINGS_JOBS // Monthly (all October jobs)
+            "Daily" -> allJobs.filter { it.dayNumber == selectedDayNumber }
+            "Weekly" -> allJobs.filter { it.dayNumber in 5..11 }
+            else -> allJobs // Monthly
         }
     }
 
@@ -734,6 +777,7 @@ fun EarningsScreen(
                     BreakdownRow("Base Fare", "$currencySymbol${String.format("%.2f", job.baseFare)}")
                     BreakdownRow("Distance Fare", "$currencySymbol${String.format("%.2f", job.distanceFare)}")
                     if (job.tip > 0) BreakdownRow("Tip", "$currencySymbol${String.format("%.2f", job.tip)}", valueColor = DelivioGreenDark)
+                    if (job.lateTip > 0) BreakdownRow("Late Tip", "+$currencySymbol${String.format("%.2f", job.lateTip)}", valueColor = DelivioGreenDark)
                     if (job.surgeBoost > 0) BreakdownRow("Surge Boost", "$currencySymbol${String.format("%.2f", job.surgeBoost)}", valueColor = DelivioYellowDark)
                     if (job.waitingPay > 0) BreakdownRow("Waiting Pay", "$currencySymbol${String.format("%.2f", job.waitingPay)}")
                     if (job.extraStopPay > 0) BreakdownRow("Extra Stop Pay", "$currencySymbol${String.format("%.2f", job.extraStopPay)}")
@@ -753,6 +797,22 @@ fun EarningsScreen(
                         isLarge = true,
                         modifier = Modifier.fillMaxWidth()
                     )
+                    if (job.lateTip > 0) {
+                        val lateTipInt = job.lateTip.toInt()
+                        val lateTipStr = if (job.lateTip == lateTipInt.toDouble()) "$lateTipInt" else String.format(Locale.US, "%.0f", job.lateTip)
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = DelivioGreen.copy(alpha = 0.15f)
+                        ) {
+                            Text(
+                                text = "Tip +$currencySymbol$lateTipStr (Late tip added)",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = DelivioGreenDark,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
                     if (job.serviceType.lowercase().contains("request")) {
                         Text(
                             text = "Delivery Fee: Paid by merchant",
@@ -979,6 +1039,24 @@ private fun JobRowCard(
                     ) {
                         Text(
                             text = "Tip included (+$currencySymbol${String.format("%.0f", job.tip)})",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = DelivioGreenDark,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+
+                // Late tip chip ("Tip +₱X")
+                if (job.lateTip > 0) {
+                    val lateTipInt = job.lateTip.toInt()
+                    val lateTipStr = if (job.lateTip == lateTipInt.toDouble()) "$lateTipInt" else String.format(Locale.US, "%.0f", job.lateTip)
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = DelivioGreen.copy(alpha = 0.15f)
+                    ) {
+                        Text(
+                            text = "Tip +$currencySymbol$lateTipStr",
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
                             color = DelivioGreenDark,

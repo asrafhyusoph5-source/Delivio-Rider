@@ -58,6 +58,8 @@ fun ResourcesScreen(
     val earningsSummary by viewModel.earningsSummary.collectAsState()
     val tierStatus by viewModel.tierStatus.collectAsState()
     val activeCall by viewModel.activeCall.collectAsState()
+    val avgRating by viewModel.averageCustomerRating.collectAsState()
+    val reviewCount by viewModel.customerReviewCount.collectAsState()
     val context = LocalContext.current
 
     Scaffold(
@@ -97,10 +99,11 @@ fun ResourcesScreen(
                     onClick = { selectedTab = 1 },
                     text = { Text("Activity Insights", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
                 )
+                val avgRatingTabStr = String.format(Locale.US, "%.1f", avgRating)
                 Tab(
                     selected = selectedTab == 2,
                     onClick = { selectedTab = 2 },
-                    text = { Text("Ratings & reviews", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
+                    text = { Text("★ $avgRatingTabStr ($reviewCount)", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
                 )
                 Tab(
                     selected = selectedTab == 3,
@@ -560,7 +563,7 @@ private fun RatingsAndReviewsTab(viewModel: RiderViewModel) {
             ) {
                 Column(modifier = Modifier.padding(18.dp)) {
                     Text(
-                        text = "Customer Ratings & Reviews",
+                        text = "Customer Ratings",
                         fontWeight = FontWeight.Bold,
                         fontSize = 16.sp
                     )
@@ -594,7 +597,7 @@ private fun RatingsAndReviewsTab(viewModel: RiderViewModel) {
                             }
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "$totalCount ${if (totalCount == 1) "review" else "reviews"}",
+                                text = "$totalCount ${if (totalCount == 1) "rating" else "ratings"}",
                                 fontSize = 11.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -671,7 +674,7 @@ private fun RatingsAndReviewsTab(viewModel: RiderViewModel) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Reviews (${filteredReviews.size})",
+                    text = "Ratings (${filteredReviews.size})",
                     fontWeight = FontWeight.Bold,
                     fontSize = 15.sp
                 )
@@ -705,12 +708,12 @@ private fun RatingsAndReviewsTab(viewModel: RiderViewModel) {
                         )
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(
-                            text = if (totalCount == 0) "No customer reviews yet" else "No reviews match the selected filter",
+                            text = if (totalCount == 0) "No ratings yet" else "No ratings match the selected filter",
                             fontWeight = FontWeight.Bold,
                             fontSize = 14.sp
                         )
                         Text(
-                            text = if (totalCount == 0) "Complete trips and deliveries to receive reviews." else "Try selecting \"All\" to see all feedback.",
+                            text = if (totalCount == 0) "Ratings from completed trips and deliveries will appear here." else "Try selecting \"All\" to see all feedback.",
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -733,7 +736,7 @@ private fun ReviewItemCard(review: CustomerReview) {
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
-            // Row 1: Stars, Service Badge, Date
+            // Row 1: Stars, Service Badge, Date (ONLY stars, service, date - NO customer names, order numbers, or identity)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -770,31 +773,9 @@ private fun ReviewItemCard(review: CustomerReview) {
                 )
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Customer Name & Order Number
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = review.customerName.ifBlank { "Customer" },
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 13.sp
-                )
-                if (review.orderNumber.isNotBlank()) {
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "• Order #${review.orderNumber}",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            // Comment text
+            // Comment text (if present)
             if (review.comment.isNotBlank()) {
-                Spacer(modifier = Modifier.height(6.dp))
+                Spacer(modifier = Modifier.height(8.dp))
                 Surface(
                     shape = RoundedCornerShape(8.dp),
                     color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),

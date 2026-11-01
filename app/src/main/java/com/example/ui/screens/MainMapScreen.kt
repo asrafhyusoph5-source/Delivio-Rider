@@ -54,6 +54,8 @@ fun MainMapScreen(
     val activeCall by viewModel.activeCall.collectAsState()
     val newlyReachedTier by viewModel.newlyReachedTier.collectAsState()
     val completedOrder by viewModel.completedDeliveryOrder.collectAsState()
+    val rateShopOrder by viewModel.rateShopOrder.collectAsState()
+    val lateTipBanner by viewModel.lateTipBanner.collectAsState()
     val acceptOrderError by viewModel.acceptOrderError.collectAsState()
     val liveLoc by viewModel.currentLocation.collectAsState()
 
@@ -312,7 +314,37 @@ fun MainMapScreen(
                 DeliverySuccessDialog(
                     order = order,
                     currencySymbol = currencySymbol,
-                    onDismiss = { viewModel.dismissDeliverySuccess() }
+                    onDismiss = {
+                        viewModel.dismissDeliverySuccess()
+                        val sType = order.serviceType.lowercase().trim()
+                        if (sType in listOf("food", "convenience", "instant")) {
+                            viewModel.promptRateShop(order)
+                        }
+                    }
+                )
+            }
+
+            // Rate The Shop Dialog (optional feedback for food/convenience deliveries)
+            rateShopOrder?.let { order ->
+                RateTheShopDialog(
+                    order = order,
+                    onSubmit = { rating, comment ->
+                        viewModel.submitShopReview(order, rating, comment)
+                    },
+                    onDismiss = { viewModel.dismissRateShop() }
+                )
+            }
+
+            // Late Tip Banner (shown when a customer adds a late tip while app is open)
+            lateTipBanner?.let { banner ->
+                LateTipBanner(
+                    bannerInfo = banner,
+                    currencySymbol = currencySymbol,
+                    onDismiss = { viewModel.dismissLateTipBanner() },
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .windowInsetsPadding(WindowInsets.statusBars)
+                        .padding(top = 70.dp, start = 16.dp, end = 16.dp)
                 )
             }
 

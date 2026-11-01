@@ -140,6 +140,8 @@ data class Order(
     val baseFare: Double = 0.0,
     val distanceFare: Double = 0.0,
     val tip: Double = 0.0,
+    val lateTipAmount: Double = 0.0,
+    val lateTipAt: Any? = null,
     val surgeBonus: Double = 0.0,
     val deliveryFee: Double = 0.0,
     val waitingPay: Double = 0.0,
@@ -239,11 +241,11 @@ data class Order(
             if (isTaxi) {
                 // net = fees.total x (1 - commissionPercent/100), default commission 15%
                 val commPercent = if (platformCommission > 0.0) platformCommission else 15.0
-                return feesTotal * (1.0 - commPercent / 100.0) + tip
+                return feesTotal * (1.0 - commPercent / 100.0) + tip + lateTipAmount
             }
             val baseDelivery = if (feesDeliveryFee > 0.0) feesDeliveryFee else if (deliveryFee > 0.0) deliveryFee else (baseFare + distanceFare + surgeBonus)
             val netDelivery = if (platformCommission > 0.0) (baseDelivery - platformCommission) else (baseDelivery * 0.8)
-            return netDelivery + tip + waitingPay + extraStopPay + returnTripPay + urgentBonus
+            return netDelivery + tip + lateTipAmount + waitingPay + extraStopPay + returnTripPay + urgentBonus
         }
 
     val isPickup: Boolean
@@ -555,4 +557,10 @@ data class ServiceRateItem(
     val progress: Float
         get() = if (denominator > 0) (numerator.toFloat() / denominator.toFloat()).coerceIn(0f, 1f) else 0f
 }
+
+data class LateTipBannerInfo(
+    val orderId: String = "",
+    val orderNumber: String = "",
+    val amount: Double = 0.0
+)
 
