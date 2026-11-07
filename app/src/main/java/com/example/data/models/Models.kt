@@ -1,6 +1,11 @@
 package com.example.data.models
 
 import com.example.data.constants.OrderStepConstants
+import java.util.TimeZone
+import java.util.Locale
+import java.util.Date
+import java.text.SimpleDateFormat
+import java.util.Calendar
 
 data class User(
     val id: String = "",
@@ -40,7 +45,8 @@ data class Rider(
     val coins: Int = 0,
     val totalTrips: Int = 0,
     val emergencyContactName: String = "",
-    val emergencyContactPhone: String = ""
+    val emergencyContactPhone: String = "",
+    val priorityRider: Boolean = false
 ) {
     val user: User
         get() = User(id = uid, name = name, email = email, phone = phone, role = "rider", avatarUrl = photoUrl)
@@ -86,6 +92,19 @@ data class TaxiStop(
     val area: String = "",
     val lat: Double = 0.0,
     val lng: Double = 0.0
+)
+
+data class SplitChildItem(
+    val orderId: String = "",
+    val items: List<String> = emptyList(),
+    val seq: Int = 1
+)
+
+data class SplitOutInfo(
+    val count: Int = 0,
+    val children: List<SplitChildItem> = emptyList(),
+    val at: Any? = null,
+    val by: String = ""
 )
 
 data class Order(
@@ -185,8 +204,63 @@ data class Order(
     val arrivedMerchantAt: Any? = null,
     val arrivedCustomerAt: Any? = null,
     val deliveredAt: Any? = null,
-    val releaseReason: String? = null
+    val releaseReason: String? = null,
+
+    // Batching & Dispatch
+    val batchId: String? = null,
+    val batchIndex: Int = 1,
+    val riderFeeEstimate: Double = 0.0,
+    val riderFeeFixed: Double? = null,
+    val badge: String = "Standard", // "Priority", "Standard", "Saver", "SPLIT"
+    val isPriority: Boolean = false,
+    val isPoolable: Boolean = false,
+    val maxBatch: Int = 2,
+    val holdMinutes: Double = 0.0,
+    val acceptedAtMillis: Long = 0L,
+    val holdUntilMillis: Long = 0L,
+    val endsWhenReady: Boolean? = null,
+    val specialRadiusExtra: Double = 0.0,
+    val excludeRiderIds: List<String> = emptyList(),
+    val riderEarning: RiderEarning? = null,
+    val splitOut: List<String> = emptyList(),
+    val splitOutInfo: SplitOutInfo? = null,
+    val splitParentOrderId: String? = null,
+    val isSplitChild: Boolean = false
 ) {
+    val hasSplitOut: Boolean
+        get() = splitOutInfo != null || splitOut.isNotEmpty()
+
+    val isSplitParent: Boolean
+        get() = !isSplitChild && hasSplitOut
+
+    val displayOrderNumber: String
+        get() {
+            val raw = orderNumber.trim()
+            val num = if (raw.isNotBlank()) {
+                raw.removePrefix("#")
+            } else {
+                id.takeLast(6).uppercase().ifBlank { "000000" }
+            }
+            return "#$num"
+        }
+
+    val deliveredAtMillis: Long
+        get() {
+            return when (val d = deliveredAt) {
+                is com.google.firebase.Timestamp -> d.toDate().time
+                is java.util.Date -> d.time
+                is Number -> d.toLong()
+                is String -> d.toLongOrNull() ?: 0L
+                else -> 0L
+            }
+        }
+
+    val resolvedEndsWhenReady: Boolean
+        get() = endsWhenReady ?: when {
+            badge.equals("saver", ignoreCase = true) -> false
+            else -> true
+        }
+
     val isTaxi: Boolean
         get() = serviceType.lowercase() == OrderStepConstants.SERVICE_TAXI
 
@@ -238,6 +312,15 @@ data class Order(
 
     val estimatedEarnings: Double
         get() {
+            if (isSplitChild && (riderFeeFixed ?: 0.0) > 0.0) {
+                return (riderFeeFixed ?: 0.0) + tip + lateTipAmount
+            }
+            if (riderEarning != null && riderEarning.total > 0.0) {
+                return riderEarning.total + lateTipAmount
+            }
+            if (riderFeeEstimate > 0.0) {
+                return riderFeeEstimate + tip + lateTipAmount
+            }
             if (isTaxi) {
                 // net = fees.total x (1 - commissionPercent/100), default commission 15%
                 val commPercent = if (platformCommission > 0.0) platformCommission else 15.0
@@ -286,7 +369,7 @@ data class Order(
         get() = parsePaymentType(paymentMethod)
 
     val isCod: Boolean
-        get() = paymentType == PaymentType.COD
+        get() = !isSplitChild && paymentType == PaymentType.COD
 
     val isPaidOnline: Boolean
         get() = paymentType == PaymentType.PAID_ONLINE
@@ -310,7 +393,7 @@ data class Order(
     // Paid Online or wallet: no cash to collect.
     val cashAmountToCollect: Double
         get() {
-            if (paymentType == PaymentType.PAID_ONLINE || paymentType == PaymentType.UNKNOWN) {
+            if (isSplitChild || paymentType == PaymentType.PAID_ONLINE || paymentType == PaymentType.UNKNOWN) {
                 return 0.0
             }
             return when (serviceType.lowercase()) {
@@ -562,5 +645,350 @@ data class LateTipBannerInfo(
     val orderId: String = "",
     val orderNumber: String = "",
     val amount: Double = 0.0
+) {
+    val displayOrderNumber: String
+        get() {
+            val raw = orderNumber.trim()
+            return when {
+                raw.isNotBlank() -> if (raw.startsWith("#")) raw else "#$raw"
+                orderId.isNotBlank() -> "#" + orderId.takeLast(6).uppercase()
+                else -> "#000000"
+            }
+        }
+}
+
+data class RiderEarning(
+    val bookingFee: Double = 0.0,
+    val pickupFee: Double = 0.0,
+    val extra: Double = 0.0,
+    val tip: Double = 0.0,
+    val total: Double = 0.0,
+    val rank: Int = 1,
+    val batchId: String = ""
 )
+
+enum class OfferType {
+    SINGLE,
+    DOUBLE_BOOKING,
+    ADD_TO_BOOKING
+}
+
+data class OrderPayBreakdown(
+    val orderId: String = "",
+    val orderNumber: String = "",
+    val rank: Int = 1,
+    val deliveryFee: Double = 0.0,
+    val pickupFee: Double = 0.0,
+    val tip: Double = 0.0,
+    val totalPay: Double = 0.0,
+    val isCod: Boolean = false,
+    val codAmount: Double = 0.0,
+    val badge: String = "Standard",
+    val customerArea: String = ""
+) {
+    val displayOrderNumber: String
+        get() {
+            val raw = orderNumber.trim()
+            val num = if (raw.isNotBlank()) {
+                raw.removePrefix("#")
+            } else {
+                orderId.takeLast(6).uppercase().ifBlank { "000000" }
+            }
+            return "#$num"
+        }
+}
+
+data class OfferBundle(
+    val id: String,
+    val type: OfferType,
+    val orders: List<Order>,
+    val firstPickupDistanceKm: Double,
+    val totalTripDistanceKm: Double,
+    val pickupFee: Double,
+    val breakdowns: List<OrderPayBreakdown>,
+    val totalDriverPay: Double,
+    val eligibleSince: Long,
+    val waveDelaySeconds: Int,
+    val badge: String = "Standard"
+) {
+    val totalStopsCount: Int
+        get() {
+            // If all taxi, use taxi stops, otherwise each food/convenience order is 2 stops (pickup & dropoff)
+            if (orders.size == 1 && orders.first().isTaxi) return orders.first().totalStopsCount
+            return orders.size * 2
+        }
+
+    val isDoubleBooking: Boolean
+        get() = type == OfferType.DOUBLE_BOOKING
+
+    val isAddToBooking: Boolean
+        get() = type == OfferType.ADD_TO_BOOKING
+
+    val firstOrder: Order
+        get() = orders.first()
+}
+
+data class SupportTicket(
+    val id: String = "",
+    val reporterType: String = "rider",
+    val riderId: String = "",
+    val riderName: String = "",
+    val orderId: String = "",
+    val orderNumber: String = "",
+    val batchId: String = "",
+    val serviceType: String = "",
+    val reason: String = "",
+    val reasonLabel: String = "",
+    val title: String = "",
+    val splitItems: List<String> = emptyList(),
+    val status: String = "open", // "open", "accepted", "resolved"
+    val resolutionNote: String = "",
+    val createdAt: com.google.firebase.Timestamp? = null,
+    val lastMessageAt: com.google.firebase.Timestamp? = null,
+    val lastMessagePreview: String = "",
+    val unreadByAdmin: Boolean = false,
+    val unreadByRider: Boolean = false
+) {
+    val displayOrderNumber: String
+        get() {
+            val raw = orderNumber.trim()
+            val num = if (raw.isNotBlank()) {
+                raw.removePrefix("#")
+            } else {
+                orderId.takeLast(6).uppercase().ifBlank { "000000" }
+            }
+            return "#$num"
+        }
+
+    val isOpen: Boolean get() = status.equals("open", ignoreCase = true)
+    val isAccepted: Boolean get() = status.equals("accepted", ignoreCase = true)
+    val isResolved: Boolean get() = status.equals("resolved", ignoreCase = true)
+    val isUnresolved: Boolean get() = isOpen || isAccepted
+}
+
+data class SupportTicketMessage(
+    val id: String = "",
+    val senderType: String = "rider", // "rider", "admin", "agent"
+    val senderId: String = "",
+    val text: String = "",
+    val imageData: String? = null,
+    val isInitial: Boolean = false,
+    val createdAt: com.google.firebase.Timestamp? = null
+) {
+    val isAdmin: Boolean get() = senderType.equals("admin", ignoreCase = true) || senderType.equals("agent", ignoreCase = true)
+    val isRider: Boolean get() = senderType.equals("rider", ignoreCase = true)
+}
+
+data class HelpCenterReason(
+    val key: String,
+    val label: String,
+    val requiresSplitChecklist: Boolean = false
+)
+
+object HelpCenterConstants {
+    val REASONS = listOf(
+        HelpCenterReason("cant_fit_bag", "Can't fit on my bag", requiresSplitChecklist = true),
+        HelpCenterReason("too_big", "Order is too big or heavy", requiresSplitChecklist = true),
+        HelpCenterReason("accident", "Accident"),
+        HelpCenterReason("wrong_items", "Wrong or missing items"),
+        HelpCenterReason("merchant_wait", "Merchant is taking too long"),
+        HelpCenterReason("merchant_closed", "Merchant is closed"),
+        HelpCenterReason("customer_unreachable", "Customer unreachable"),
+        HelpCenterReason("vehicle_breakdown", "Vehicle breakdown"),
+        HelpCenterReason("safety", "Safety concern"),
+        HelpCenterReason("other", "Other")
+    )
+
+    fun getLabelForKey(key: String): String {
+        return REASONS.firstOrNull { it.key == key }?.label ?: key.replace("_", " ").replaceFirstChar { it.uppercase() }
+    }
+}
+
+data class AdminMessageBannerInfo(
+    val ticketId: String,
+    val ticketTitle: String,
+    val senderName: String,
+    val messageText: String,
+    val timestamp: Long = System.currentTimeMillis()
+)
+
+data class QuestGoal(
+    val level: Int = 1,
+    val target: Double = 0.0,
+    val reward: Double = 0.0,
+    val minAcceptanceRate: Double? = null,
+    val maxNoShows: Int? = null
+)
+
+data class Quest(
+    val id: String = "",
+    val title: String = "",
+    val description: String = "",
+    val status: String = "active", // "active", "completed", "inactive"
+    val metric: String = "deliveries", // "deliveries" or "earnings"
+    val startAt: com.google.firebase.Timestamp? = null,
+    val endAt: com.google.firebase.Timestamp? = null,
+    val hourFrom: Int? = null,
+    val hourTo: Int? = null,
+    val cityIds: List<String> = emptyList(),
+    val vehicleTypes: List<String> = emptyList(),
+    val riderIds: List<String> = emptyList(),
+    val services: List<String> = emptyList(),
+    val goals: List<QuestGoal> = emptyList(),
+    val createdAt: com.google.firebase.Timestamp? = null
+) {
+    val startAtMillis: Long get() = startAt?.toDate()?.time ?: 0L
+    val endAtMillis: Long get() = endAt?.toDate()?.time ?: 0L
+
+    val sortedGoals: List<QuestGoal>
+        get() = goals.sortedBy { it.target }
+
+    val topReward: Double
+        get() = sortedGoals.lastOrNull()?.reward ?: 0.0
+
+    val topTarget: Double
+        get() = sortedGoals.lastOrNull()?.target ?: 1.0
+
+    fun formattedPeriod(): String {
+        val tz = TimeZone.getTimeZone("Asia/Manila")
+        val sdf = SimpleDateFormat("EEE, MMM d, HH:mm", Locale.US).apply { timeZone = tz }
+        val startStr = if (startAtMillis > 0L) sdf.format(Date(startAtMillis)) else "Start"
+        val endStr = if (endAtMillis > 0L) sdf.format(Date(endAtMillis)) else "End"
+        return "$startStr - $endStr"
+    }
+
+    fun timeLeftText(now: Long = System.currentTimeMillis()): String {
+        return when {
+            now < startAtMillis -> {
+                val diff = startAtMillis - now
+                val days = diff / 86400000L
+                val hours = (diff / 3600000L) % 24L
+                if (days > 0L) "Starts in ${days}d ${hours}h" else "Starts in ${hours}h"
+            }
+            now in startAtMillis..endAtMillis -> {
+                val diff = endAtMillis - now
+                val days = diff / 86400000L
+                val hours = (diff / 3600000L) % 24L
+                val mins = (diff / 60000L) % 60L
+                when {
+                    days > 0L -> "${days}d ${hours}h left"
+                    hours > 0L -> "${hours}h ${mins}m left"
+                    else -> "${mins}m left"
+                }
+            }
+            else -> "Ended"
+        }
+    }
+
+    fun appliesTo(rider: Rider?): Boolean {
+        if (rider == null) return false
+        return appliesTo(rider.cityId, rider.vehicle.type, rider.uid, rider.allowedServices)
+    }
+
+    fun appliesTo(
+        cityId: String,
+        vehicleType: String,
+        riderId: String,
+        allowedServices: List<String>
+    ): Boolean {
+        if (cityIds.isNotEmpty() && cityId.isNotBlank() && !cityIds.contains(cityId)) {
+            return false
+        }
+        if (vehicleTypes.isNotEmpty()) {
+            val riderVeh = OrderStepConstants.normalizeVehicleType(vehicleType)
+            val matched = vehicleTypes.any { OrderStepConstants.normalizeVehicleType(it) == riderVeh }
+            if (!matched) return false
+        }
+        if (riderIds.isNotEmpty() && !riderIds.contains(riderId)) {
+            return false
+        }
+        if (services.isNotEmpty()) {
+            val hasService = services.any { svc ->
+                allowedServices.any { it.equals(svc, ignoreCase = true) }
+            }
+            if (!hasService) return false
+        }
+        return true
+    }
+}
+
+data class QuestClaim(
+    val id: String = "",
+    val questId: String = "",
+    val questTitle: String = "",
+    val riderId: String = "",
+    val riderName: String = "",
+    val metric: String = "deliveries",
+    val value: Double = 0.0,
+    val deliveries: Int = 0,
+    val earnings: Double = 0.0,
+    val acceptanceRate: Double = 100.0,
+    val noShows: Int = 0,
+    val levelReached: Int = -1,
+    val rewardAmount: Double = 0.0,
+    val status: String = "Pending", // "Pending", "Credited", "Rejected", "Not achieved"
+    val note: String = "",
+    val createdAt: com.google.firebase.Timestamp? = null
+)
+
+data class QuestProgress(
+    val quest: Quest,
+    val currentValue: Double,
+    val currentDeliveries: Int,
+    val currentEarnings: Double,
+    val acceptanceRate: Double,
+    val noShows: Int,
+    val levelReachedIndex: Int,
+    val currentReward: Double,
+    val nextGoal: QuestGoal?,
+    val claim: QuestClaim? = null
+) {
+    val isCompleted: Boolean get() = levelReachedIndex >= 0 && levelReachedIndex == quest.sortedGoals.size - 1
+    val fraction: Float
+        get() {
+            val top = quest.topTarget
+            return if (top > 0.0) (currentValue / top).coerceIn(0.0, 1.0).toFloat() else 0f
+        }
+}
+
+fun formatGoalDescription(goal: QuestGoal, quest: Quest, currencySymbol: String = "₱"): String {
+    val actionText = if (quest.metric.lowercase().contains("earning")) {
+        "Earn $currencySymbol${String.format(Locale.US, "%.0f", goal.target)}"
+    } else {
+        "Complete ${goal.target.toInt()} deliveries"
+    }
+
+    val rewardText = "for $currencySymbol${String.format(Locale.US, "%.2f", goal.reward).replace(".00", "")}"
+
+    val parts = mutableListOf<String>()
+    parts.add("$actionText $rewardText")
+
+    val conditions = mutableListOf<String>()
+    if (goal.minAcceptanceRate != null && goal.minAcceptanceRate > 0.0) {
+        val rateInt = goal.minAcceptanceRate.toInt()
+        conditions.add("a $rateInt% acceptance rate")
+    }
+    if (goal.maxNoShows != null) {
+        conditions.add("${goal.maxNoShows} no-shows")
+    }
+
+    if (conditions.isNotEmpty()) {
+        parts.add("with " + conditions.joinToString(" and "))
+    }
+
+    if (quest.hourFrom != null && quest.hourTo != null) {
+        val hFrom = String.format(Locale.US, "%02d:00", quest.hourFrom)
+        val hTo = String.format(Locale.US, "%02d:00", quest.hourTo)
+        parts.add("between $hFrom - $hTo")
+    }
+
+    if (quest.services.isNotEmpty()) {
+        val sText = quest.services.joinToString(" or ") { OrderStepConstants.getServiceDisplayName(it) }
+        parts.add("on $sText")
+    }
+
+    return parts.joinToString(" ")
+}
+
+
 

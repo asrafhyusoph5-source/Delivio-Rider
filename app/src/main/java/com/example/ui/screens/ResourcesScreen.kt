@@ -44,11 +44,12 @@ fun ResourcesScreen(
     var selectedTab by remember {
         mutableIntStateOf(
             when (initialSubpage) {
-                "tiers" -> 0
-                "insights" -> 1
-                "reviews" -> 2
-                "safety" -> 3
-                "tutorials" -> 4
+                "quests" -> 0
+                "tiers" -> 1
+                "insights" -> 2
+                "reviews" -> 3
+                "safety" -> 4
+                "tutorials" -> 5
                 else -> 0
             }
         )
@@ -92,36 +93,42 @@ fun ResourcesScreen(
                 Tab(
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
-                    text = { Text("Tiers", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
+                    text = { Text("Quests", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
                 )
                 Tab(
                     selected = selectedTab == 1,
                     onClick = { selectedTab = 1 },
+                    text = { Text("Tiers", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
+                )
+                Tab(
+                    selected = selectedTab == 2,
+                    onClick = { selectedTab = 2 },
                     text = { Text("Activity Insights", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
                 )
                 val avgRatingTabStr = String.format(Locale.US, "%.1f", avgRating)
                 Tab(
-                    selected = selectedTab == 2,
-                    onClick = { selectedTab = 2 },
-                    text = { Text("★ $avgRatingTabStr ($reviewCount)", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
-                )
-                Tab(
                     selected = selectedTab == 3,
                     onClick = { selectedTab = 3 },
-                    text = { Text("Safety & SOS", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
+                    text = { Text("★ $avgRatingTabStr ($reviewCount)", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
                 )
                 Tab(
                     selected = selectedTab == 4,
                     onClick = { selectedTab = 4 },
+                    text = { Text("Safety & SOS", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
+                )
+                Tab(
+                    selected = selectedTab == 5,
+                    onClick = { selectedTab = 5 },
                     text = { Text("Tutorials", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
                 )
             }
 
             when (selectedTab) {
-                0 -> ResourcesTiersTab(tierStatus = tierStatus)
-                1 -> ActivityInsightsTab(viewModel = viewModel, currencySymbol = currencySymbol, onOpenEarnings = onOpenEarnings)
-                2 -> RatingsAndReviewsTab(viewModel = viewModel)
-                3 -> RiderSafetyTab(
+                0 -> QuestsTabContent(viewModel = viewModel)
+                1 -> ResourcesTiersTab(tierStatus = tierStatus)
+                2 -> ActivityInsightsTab(viewModel = viewModel, currencySymbol = currencySymbol, onOpenEarnings = onOpenEarnings)
+                3 -> RatingsAndReviewsTab(viewModel = viewModel)
+                4 -> RiderSafetyTab(
                     onSosClick = {
                         viewModel.openDialer("911", "Emergency Services (911)")
                         viewModel.showToast("Emergency SOS triggered. Connecting to 911...")
@@ -135,7 +142,7 @@ fun ResourcesScreen(
                         context.startActivity(Intent.createChooser(sendIntent, "Share Live Trip"))
                     }
                 )
-                4 -> TutorialsTab(onOpenLink = { url ->
+                5 -> TutorialsTab(onOpenLink = { url ->
                     try {
                         val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
                         context.startActivity(browserIntent)
@@ -511,12 +518,12 @@ private fun RatingsAndReviewsTab(viewModel: RiderViewModel) {
         "2 ★",
         "1 ★",
         "With comments",
-        "Food",
-        "Convenience",
-        "Parcel",
-        "Pabili",
-        "Request a Rider",
-        "Taxi"
+        "FOOD",
+        "MART",
+        "PARCEL",
+        "PABILI",
+        "INSTANT",
+        "TAXI"
     )
 
     val averageRating = remember(reviews) {
@@ -527,6 +534,7 @@ private fun RatingsAndReviewsTab(viewModel: RiderViewModel) {
 
     val filteredReviews = remember(reviews, selectedFilter) {
         reviews.filter { review ->
+            val svc = review.serviceType.lowercase().trim()
             when (selectedFilter) {
                 "All" -> true
                 "5 ★" -> review.stars == 5
@@ -535,12 +543,12 @@ private fun RatingsAndReviewsTab(viewModel: RiderViewModel) {
                 "2 ★" -> review.stars == 2
                 "1 ★" -> review.stars == 1
                 "With comments" -> review.comment.trim().isNotBlank()
-                "Food" -> review.serviceType.lowercase().trim() == "food"
-                "Convenience" -> review.serviceType.lowercase().trim() in listOf("convenience", "instant")
-                "Parcel" -> review.serviceType.lowercase().trim() == "parcel"
-                "Pabili" -> review.serviceType.lowercase().trim() == "pabili"
-                "Request a Rider" -> review.serviceType.lowercase().trim() in listOf("request_rider", "request")
-                "Taxi" -> review.serviceType.lowercase().trim() == "taxi"
+                "FOOD" -> svc == "food"
+                "MART" -> svc in listOf("convenience", "mart", "instant")
+                "PARCEL" -> svc == "parcel"
+                "PABILI" -> svc == "pabili"
+                "INSTANT" -> svc in listOf("request_rider", "request")
+                "TAXI" -> svc == "taxi"
                 else -> true
             }
         }
@@ -758,7 +766,7 @@ private fun ReviewItemCard(review: CustomerReview) {
                         color = MaterialTheme.colorScheme.surfaceVariant
                     ) {
                         Text(
-                            text = review.serviceType.replaceFirstChar { it.uppercase() },
+                            text = OrderStepConstants.getServiceBadge(review.serviceType),
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)

@@ -36,6 +36,7 @@ object OrderStepConstants {
     const val STATUS_PREPARING = "Preparing"
     const val STATUS_READY = "Ready"
     const val STATUS_RIDER_ON_THE_WAY = "Rider is on the way"
+    const val STATUS_ON_ANOTHER_DELIVERY = "On another delivery"
     const val STATUS_RIDER_ON_WAY_SENDER = "Rider is on the way to sender"
     const val STATUS_ARRIVED_AT_SENDER = "Arrived at sender"
     const val STATUS_RIDER_ON_WAY_RECIPIENT = "Rider is on the way to recipient"
@@ -81,17 +82,67 @@ object OrderStepConstants {
         }
     }
 
-    // Service Type keys (6 services)
+    // Service Type keys (6 services) in exact required order
     const val SERVICE_FOOD = "food"
-    const val SERVICE_INSTANT = "convenience"
+    const val SERVICE_MART = "convenience"
+    const val SERVICE_CONVENIENCE = "convenience"
+    const val SERVICE_INSTANT_LEGACY = "convenience" // backward compatibility alias
+    const val SERVICE_INSTANT = "convenience"        // stored key for Mart is "convenience"
     const val SERVICE_PARCEL = "parcel"
     const val SERVICE_PABILI = "pabili"
-    const val SERVICE_REQUEST = "request_rider"
+    const val SERVICE_REQUEST = "request_rider"      // stored key for Delivio Instant
+    const val SERVICE_REQUEST_RIDER = "request_rider"
     const val SERVICE_TAXI = "taxi"
+
+    data class ServiceTypeDefinition(
+        val key: String,
+        val displayName: String,
+        val subtitle: String,
+        val badgeName: String
+    )
+
+    val SERVICE_DEFINITIONS = listOf(
+        ServiceTypeDefinition(
+            key = SERVICE_FOOD,
+            displayName = "Delivio Food",
+            subtitle = "Restaurant and cooked food deliveries",
+            badgeName = "FOOD"
+        ),
+        ServiceTypeDefinition(
+            key = SERVICE_MART,
+            displayName = "Delivio Mart",
+            subtitle = "Convenience store, grocery, and pharmacy deliveries",
+            badgeName = "MART"
+        ),
+        ServiceTypeDefinition(
+            key = SERVICE_PARCEL,
+            displayName = "Delivio Parcel",
+            subtitle = "Boxed items, packages, and documents",
+            badgeName = "PARCEL"
+        ),
+        ServiceTypeDefinition(
+            key = SERVICE_PABILI,
+            displayName = "Delivio Pabili",
+            subtitle = "On-demand grocery and item purchasing",
+            badgeName = "PABILI"
+        ),
+        ServiceTypeDefinition(
+            key = SERVICE_REQUEST,
+            displayName = "Delivio Instant",
+            subtitle = "Rider requests booked by merchants (the Request a Rider button in the Partner app)",
+            badgeName = "INSTANT"
+        ),
+        ServiceTypeDefinition(
+            key = SERVICE_TAXI,
+            displayName = "Delivio Taxi",
+            subtitle = "Passenger rides",
+            badgeName = "TAXI"
+        )
+    )
 
     val ALL_SERVICES = listOf(
         SERVICE_FOOD,
-        SERVICE_INSTANT,
+        SERVICE_MART,
         SERVICE_PARCEL,
         SERVICE_PABILI,
         SERVICE_REQUEST,
@@ -99,7 +150,7 @@ object OrderStepConstants {
     )
 
     val SERVICES_BY_VEHICLE: Map<String, List<String>> = mapOf(
-        VEHICLE_MOTORCYCLE to listOf(SERVICE_FOOD, SERVICE_INSTANT, SERVICE_PARCEL, SERVICE_PABILI, SERVICE_REQUEST, SERVICE_TAXI),
+        VEHICLE_MOTORCYCLE to listOf(SERVICE_FOOD, SERVICE_MART, SERVICE_PARCEL, SERVICE_PABILI, SERVICE_REQUEST, SERVICE_TAXI),
         VEHICLE_TRICYCLE to listOf(SERVICE_PARCEL, SERVICE_TAXI),
         VEHICLE_CAR4 to listOf(SERVICE_PARCEL, SERVICE_TAXI),
         VEHICLE_CAR8 to listOf(SERVICE_PARCEL, SERVICE_TAXI)
@@ -113,33 +164,60 @@ object OrderStepConstants {
     fun normalizeVehicleType(vehicleType: String?): String {
         return when (vehicleType?.lowercase()?.trim()) {
             "tricycle" -> VEHICLE_TRICYCLE
-            "car4", "4 seater car", "car_4", "4-seater car" -> VEHICLE_CAR4
+            "car4", "4 seater car", "car_4", "4-seater car", "car" -> VEHICLE_CAR4
             "car8", "8 seater car", "car_8", "8-seater car" -> VEHICLE_CAR8
             else -> VEHICLE_MOTORCYCLE
         }
     }
 
     fun getServiceDisplayName(serviceType: String): String {
-        return when (serviceType.lowercase()) {
+        return when (serviceType.lowercase().trim()) {
             SERVICE_FOOD -> "Delivio Food"
-            SERVICE_INSTANT -> "Delivio Instant"
+            "convenience", "mart" -> "Delivio Mart"
             SERVICE_PARCEL -> "Delivio Parcel"
             SERVICE_PABILI -> "Delivio Pabili"
-            SERVICE_REQUEST -> "Delivio Request"
+            "request_rider", "request", "instant" -> "Delivio Instant"
             SERVICE_TAXI -> "Delivio Taxi"
-            else -> "Delivio Delivery"
+            else -> "Delivio Food"
+        }
+    }
+
+    fun getServiceSubtitle(serviceType: String): String {
+        return when (serviceType.lowercase().trim()) {
+            SERVICE_FOOD -> "Restaurant and cooked food deliveries"
+            "convenience", "mart" -> "Convenience store, grocery, and pharmacy deliveries"
+            SERVICE_PARCEL -> "Boxed items, packages, and documents"
+            SERVICE_PABILI -> "On-demand grocery and item purchasing"
+            "request_rider", "request", "instant" -> "Rider requests booked by merchants (the Request a Rider button in the Partner app)"
+            SERVICE_TAXI -> "Passenger rides"
+            else -> "Deliveries"
         }
     }
 
     fun getServiceBadge(serviceType: String): String {
-        return when (serviceType.lowercase()) {
-            SERVICE_FOOD -> "Food"
-            SERVICE_INSTANT -> "Instant"
-            SERVICE_PARCEL -> "Parcel"
-            SERVICE_PABILI -> "Pabili"
-            SERVICE_REQUEST -> "Request"
-            SERVICE_TAXI -> "Taxi"
-            else -> "Food"
+        return when (serviceType.lowercase().trim()) {
+            SERVICE_FOOD -> "FOOD"
+            "convenience", "mart" -> "MART"
+            SERVICE_PARCEL -> "PARCEL"
+            SERVICE_PABILI -> "PABILI"
+            "request_rider", "request", "instant" -> "INSTANT"
+            SERVICE_TAXI -> "TAXI"
+            else -> "FOOD"
+        }
+    }
+
+    fun getServiceLockReason(
+        isPlatformOn: Boolean,
+        isCityOn: Boolean,
+        isAllowed: Boolean,
+        cityName: String = ""
+    ): String? {
+        val city = if (cityName.isNotBlank()) cityName else "your city"
+        return when {
+            !isPlatformOn -> "Disabled platform-wide"
+            !isCityOn -> "Disabled in $city"
+            !isAllowed -> "Disabled for your account by admin"
+            else -> null
         }
     }
 

@@ -142,7 +142,7 @@ service cloud.firestore {
         || (isActiveRider()
             && resource.data.get('riderId', null) == request.auth.uid
             && request.resource.data.get('riderId', null) == request.auth.uid
-            && request.resource.data.status in ['Preparing','Ready','Rider is on the way','Delivered',
+            && request.resource.data.status in ['Preparing','Ready','Rider is on the way','On another delivery','Delivered',
                 'Rider is on the way to sender','Arrived at sender','Rider is on the way to recipient','Arrived at recipient',
                 'Rider is on the way to vendor','Arrived at vendor']
             && onlyChanges(['status','statusHistory','riderName','riderPhone','riderPhotoUrl','riderLocation','riderRequest','riderStep','riderEarning','finalReceiptTotal','proofPhotoUrl','codCollected','arrivedMerchantAt','pickedUpAt','arrivedCustomerAt','deliveredAt','updatedAt']))
@@ -204,6 +204,17 @@ service cloud.firestore {
         || isAdmin()
       );
       allow write: if isAdmin();
+    }
+
+    match /quests/{qid} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /questClaims/{cid} {
+      allow read: if signedIn() && (resource.data.riderId == request.auth.uid || isAdmin());
+      allow create: if signedIn() && request.resource.data.riderId == request.auth.uid;
+      allow update, delete: if isAdmin();
     }
   }
 }

@@ -1,13 +1,15 @@
 package com.example.ui.components
 
 import android.content.Context
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
+import android.graphics.*
 import android.graphics.drawable.BitmapDrawable
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -18,42 +20,52 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import com.example.data.constants.OrderStepConstants
-import com.example.data.models.Order
+import com.example.data.models.OsrmRouteResult
+import com.example.data.models.OsrmRouteService
+import com.example.data.models.RouteStop
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
 import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polyline
-import java.net.HttpURLConnection
-import java.net.URL
-import kotlin.math.roundToInt
 
 @Composable
 fun OsmMapView(
     riderLat: Double,
     riderLng: Double,
-    activeOrders: List<Order>,
-    currentActiveOrder: Order?,
-    recenterTrigger: Int,
+    driverHeading: Float = 0f,
+    batchStops: List<RouteStop>,
+    focusedStop: RouteStop? = null,
+    recenterTrigger: Int = 0,
     sheetHeightFraction: Float = 0.28f,
     isSatelliteLayer: Boolean = false,
-    onRouteChange: (Double, Int) -> Unit = { _, _ -> },
+    onRouteCalculated: (OsrmRouteResult) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     var mapViewInstance by remember { mutableStateOf<MapView?>(null) }
-    var routePoints by remember { mutableStateOf<List<GeoPoint>>(emptyList()) }
 
-    var routeDistanceKm by remember { mutableDoubleStateOf(0.0) }
-    var routeEtaMinutes by remember { mutableIntStateOf(0) }
+    // Remaining (unfinished) stops
+    val remainingStops = remember(batchStops) {
+        batchStops.filter { !it.isFinished }
+    }
+
+    var routeResult by remember { mutableStateOf<OsrmRouteResult?>(null) }
+    var finishedLegPoints by remember { mutableStateOf<List<GeoPoint>>(emptyList()) }
     var tappedPinLabel by remember { mutableStateOf<String?>(null) }
+    var lastFetchedRemainingStopIds by remember { mutableStateOf<List<String>>(emptyList()) }
+    var lastFetchTime by remember { mutableLongStateOf(0L) }
+    var lastOffRouteRerouteTime by remember { mutableLongStateOf(0L) }
 
-    // Auto-dismiss pin label after 3 seconds
+    // Init osmdroid config
+    LaunchedEffect(Unit) {
+        Configuration.getInstance().userAgentValue = context.packageName
+    }
+
+    // Auto-dismiss tapped pin label after 3 seconds
     LaunchedEffect(tappedPinLabel) {
         if (tappedPinLabel != null) {
             kotlinx.coroutines.delay(3000)
@@ -61,125 +73,91 @@ fun OsmMapView(
         }
     }
 
-    // Init osmdroid config once
-    LaunchedEffect(Unit) {
-        Configuration.getInstance().userAgentValue = context.packageName
+    // Check if remaining stops changed -> store previous current leg as finished leg
+    val remainingIds = remember(remainingStops) {
+        remainingStops.map { "${it.orderId}_${it.type.name}" }
     }
 
-    // Determine target location for navigation & polyline (pickup first, then drop-off once revealed; for taxi, pickup then current stop)
-    val targetGeoPoint: GeoPoint? = remember(
-        currentActiveOrder,
-        currentActiveOrder?.riderStep,
-        currentActiveOrder?.merchantLat,
-        currentActiveOrder?.customerLat,
-        currentActiveOrder?.completedStops
-    ) {
-        val o = currentActiveOrder ?: return@remember null
-        if (o.isTaxi) {
-            val step = o.riderStep.lowercase().trim()
-            if (step in listOf<String>(OrderStepConstants.STEP_TAXI_TO_PICKUP, OrderStepConstants.STEP_TAXI_AT_PICKUP)) {
-                if (o.merchantLat != 0.0 && o.merchantLng != 0.0) GeoPoint(o.merchantLat, o.merchantLng) else null
-            } else {
-                val targetStop = o.currentTargetStop
-                if (targetStop != null && targetStop.lat != 0.0 && targetStop.lng != 0.0) {
-                    GeoPoint(targetStop.lat, targetStop.lng)
-                } else if (o.customerLat != 0.0 && o.customerLng != 0.0) {
-                    GeoPoint(o.customerLat, o.customerLng)
-                } else null
-            }
-        } else {
-            val addressRevealed = OrderStepConstants.isCustomerAddressRevealed(o.serviceType, o.riderStep)
-            if (addressRevealed) {
-                // Heading to customer / recipient
-                if (o.customerLat != 0.0 && o.customerLng != 0.0) GeoPoint(o.customerLat, o.customerLng) else null
-            } else {
-                // Heading to merchant / sender / vendor
-                if (o.merchantLat != 0.0 && o.merchantLng != 0.0) GeoPoint(o.merchantLat, o.merchantLng) else null
-            }
-        }
-    }
-
-    // Fetch OSRM Polyline with straight-line fallback, calculating distance & ETA
-    LaunchedEffect(riderLat, riderLng, targetGeoPoint) {
-        if (riderLat == 0.0 || riderLng == 0.0 || targetGeoPoint == null) {
-            routePoints = emptyList()
-            routeDistanceKm = 0.0
-            routeEtaMinutes = 0
+    // Route calculation with OSRM (real roads driving profile)
+    // Limits:
+    // - Request a new route at most once every 5 seconds (plus when a stop is added or finished)
+    // - Re-route when off-route (>40m) no more often than every 15 seconds
+    LaunchedEffect(riderLat, riderLng, remainingIds) {
+        if (riderLat == 0.0 || riderLng == 0.0 || remainingStops.isEmpty()) {
+            routeResult = null
+            finishedLegPoints = emptyList()
             return@LaunchedEffect
         }
 
-        withContext(Dispatchers.IO) {
-            var fetchedDistKm = 0.0
-            var fetchedEta = 0
-            val fetched = try {
-                val urlStr = "https://router.project-osrm.org/route/v1/driving/$riderLng,$riderLat;${targetGeoPoint.longitude},${targetGeoPoint.latitude}?overview=full&geometries=geojson"
-                val conn = URL(urlStr).openConnection() as HttpURLConnection
-                conn.connectTimeout = 4000
-                conn.readTimeout = 4000
-                conn.requestMethod = "GET"
-                conn.setRequestProperty("User-Agent", "DelivioRiderApp/1.0")
+        val now = System.currentTimeMillis()
+        val currentPoints = routeResult?.currentLegPoints ?: emptyList()
+        val isOffRoute = OsrmRouteService.isOffRoute(riderLat, riderLng, currentPoints, thresholdMeters = 40.0)
+        val stopsChanged = remainingIds != lastFetchedRemainingStopIds
 
-                if (conn.responseCode == 200) {
-                    val stream = conn.inputStream
-                    val jsonStr = stream.bufferedReader().use { it.readText() }
-                    val json = JSONObject(jsonStr)
-                    val routes = json.optJSONArray("routes")
-                    val firstRoute = routes?.optJSONObject(0)
-                    val distMeters = firstRoute?.optDouble("distance", 0.0) ?: 0.0
-                    val durSeconds = firstRoute?.optDouble("duration", 0.0) ?: 0.0
-                    if (distMeters > 0) fetchedDistKm = distMeters / 1000.0
-                    if (durSeconds > 0) fetchedEta = Math.round(durSeconds / 60.0).toInt().coerceAtLeast(1)
+        val shouldFetch = when {
+            stopsChanged -> true // Stop added or finished -> immediate
+            routeResult == null -> true // Initial load -> immediate
+            isOffRoute -> (now - lastOffRouteRerouteTime >= 15000L) // Off-route: at most once every 15s
+            else -> (now - lastFetchTime >= 5000L) // Regular request / retry: at most once every 5s
+        }
 
-                    val geometry = firstRoute?.optJSONObject("geometry")
-                    val coords = geometry?.optJSONArray("coordinates")
-                    val points = mutableListOf<GeoPoint>()
-                    if (coords != null) {
-                        for (i in 0 until coords.length()) {
-                            val coord = coords.getJSONArray(i)
-                            val lon = coord.getDouble(0)
-                            val lat = coord.getDouble(1)
-                            points.add(GeoPoint(lat, lon))
-                        }
-                    }
-                    if (points.isNotEmpty()) points else null
-                } else null
-            } catch (_: Exception) {
-                null
+        if (shouldFetch) {
+            if (isOffRoute) {
+                lastOffRouteRerouteTime = now
+            }
+            lastFetchTime = now
+
+            // If a stop finished, append previously finished leg points to finishedLegPoints
+            if (stopsChanged && lastFetchedRemainingStopIds.isNotEmpty() && currentPoints.isNotEmpty()) {
+                finishedLegPoints = (finishedLegPoints + currentPoints).takeLast(100)
             }
 
-            // Fallback straight-line
-            if (fetched != null && fetchedDistKm > 0) {
-                routePoints = fetched
-                routeDistanceKm = fetchedDistKm
-                routeEtaMinutes = fetchedEta
-            } else {
-                val r = 6371.0
-                val dLat = Math.toRadians(targetGeoPoint.latitude - riderLat)
-                val dLon = Math.toRadians(targetGeoPoint.longitude - riderLng)
-                val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-                        Math.cos(Math.toRadians(riderLat)) * Math.cos(Math.toRadians(targetGeoPoint.latitude)) *
-                        Math.sin(dLon / 2) * Math.sin(dLon / 2)
-                val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-                val straightDist = r * c
-                routePoints = listOf(GeoPoint(riderLat, riderLng), targetGeoPoint)
-                routeDistanceKm = straightDist
-                routeEtaMinutes = Math.round(straightDist / 25.0 * 60).toInt().coerceAtLeast(1)
+            lastFetchedRemainingStopIds = remainingIds
+
+            withContext(Dispatchers.IO) {
+                val result = OsrmRouteService.fetchRoute(
+                    riderLat = riderLat,
+                    riderLng = riderLng,
+                    remainingStops = remainingStops
+                )
+                routeResult = result
+                withContext(Dispatchers.Main) {
+                    onRouteCalculated(result)
+                }
             }
         }
     }
 
-    // Report route changes to caller
-    LaunchedEffect(routeDistanceKm, routeEtaMinutes) {
-        onRouteChange(routeDistanceKm, routeEtaMinutes)
+    // Focus on specific stop if requested (e.g. user tapped stop in timeline)
+    LaunchedEffect(focusedStop) {
+        focusedStop?.let { stop ->
+            mapViewInstance?.let { map ->
+                map.controller.animateTo(GeoPoint(stop.lat, stop.lng))
+                map.controller.setZoom(17.0)
+            }
+        }
     }
 
-    // Fit route in the area above the sheet whenever sheet state, step, or recenter changes
-    LaunchedEffect(sheetHeightFraction, currentActiveOrder?.riderStep, routePoints, recenterTrigger) {
+    // Camera fitting: center route above the bottom sheet
+    LaunchedEffect(
+        sheetHeightFraction,
+        recenterTrigger,
+        remainingStops.size,
+        routeResult?.currentLegPoints?.size
+    ) {
         mapViewInstance?.let { map ->
-            val points = if (routePoints.size >= 2) routePoints
-            else if (targetGeoPoint != null && riderLat != 0.0 && riderLng != 0.0) listOf(GeoPoint(riderLat, riderLng), targetGeoPoint)
-            else if (riderLat != 0.0 && riderLng != 0.0) listOf(GeoPoint(riderLat, riderLng))
-            else emptyList()
+            val points = mutableListOf<GeoPoint>()
+            if (riderLat != 0.0 && riderLng != 0.0) {
+                points.add(GeoPoint(riderLat, riderLng))
+            }
+            routeResult?.currentLegPoints?.let { pts ->
+                points.addAll(pts)
+            }
+            if (points.isEmpty()) {
+                remainingStops.firstOrNull()?.let {
+                    points.add(GeoPoint(it.lat, it.lng))
+                }
+            }
 
             if (points.isNotEmpty()) {
                 val minLat = points.minOf { it.latitude }
@@ -187,10 +165,10 @@ fun OsmMapView(
                 val minLng = points.minOf { it.longitude }
                 val maxLng = points.maxOf { it.longitude }
 
-                val latSpan = (maxLat - minLat).coerceAtLeast(0.004)
-                val lngSpan = (maxLng - minLng).coerceAtLeast(0.004)
+                val latSpan = (maxLat - minLat).coerceAtLeast(0.0035)
+                val lngSpan = (maxLng - minLng).coerceAtLeast(0.0035)
 
-                // Offset center downwards so route is centered in the visible area above the sheet
+                // Offset center downwards so route is centered in visible area above sheet
                 val centerLat = (minLat + maxLat) / 2.0 - (latSpan * sheetHeightFraction * 0.45)
                 val centerLng = (minLng + maxLng) / 2.0
 
@@ -219,130 +197,104 @@ fun OsmMapView(
                     setMultiTouchControls(true)
                     isTilesScaledToDpi = true
                     controller.setZoom(16.5)
-                    val initPoint = if (riderLat != 0.0 && riderLng != 0.0) GeoPoint(riderLat, riderLng) else GeoPoint(9.7392, 118.7353) // Puerto Princesa center
+                    val initPoint = if (riderLat != 0.0 && riderLng != 0.0) {
+                        GeoPoint(riderLat, riderLng)
+                    } else {
+                        GeoPoint(9.7392, 118.7353) // Puerto Princesa center
+                    }
                     controller.setCenter(initPoint)
                     mapViewInstance = this
                 }
             },
             update = { map ->
-                // Switch tile layer if requested
                 val targetTileSource = if (isSatelliteLayer) TileSourceFactory.USGS_SAT else TileSourceFactory.MAPNIK
                 if (map.tileProvider.tileSource != targetTileSource) {
                     map.setTileSource(targetTileSource)
                 }
 
-                // Clear current overlays
                 map.overlays.clear()
 
-                // 1. Draw route polyline
-                if (routePoints.size >= 2) {
-                    val poly = Polyline(map).apply {
-                        setPoints(routePoints)
-                        outlinePaint.color = Color.parseColor("#FFC107") // Delivio Yellow
-                        outlinePaint.strokeWidth = 12f
+                val result = routeResult
+
+                // 1. Finished legs: Grey line
+                if (finishedLegPoints.size >= 2) {
+                    val finishedPoly = Polyline(map).apply {
+                        setPoints(finishedLegPoints)
+                        outlinePaint.color = Color.parseColor("#9E9E9E") // Grey
+                        outlinePaint.strokeWidth = 9f
                         outlinePaint.strokeCap = Paint.Cap.ROUND
                     }
-                    map.overlays.add(poly)
+                    map.overlays.add(finishedPoly)
                 }
 
-                // 2. Rider Live Location Marker
+                // 2. Future remaining legs (legs after the current stop): Lighter blue line
+                if (result != null && result.futureLegPoints.size >= 2) {
+                    val futurePoly = Polyline(map).apply {
+                        setPoints(result.futureLegPoints)
+                        outlinePaint.color = Color.parseColor("#64B5F6") // Soft Sky Blue
+                        outlinePaint.strokeWidth = 10f
+                        outlinePaint.strokeCap = Paint.Cap.ROUND
+                    }
+                    map.overlays.add(futurePoly)
+                }
+
+                // 3. Current leg: Bright blue line over real roads
+                if (result != null && result.currentLegPoints.size >= 2) {
+                    val currentPoly = Polyline(map).apply {
+                        setPoints(result.currentLegPoints)
+                        outlinePaint.color = Color.parseColor("#1E88E5") // Bright Blue
+                        outlinePaint.strokeWidth = 14f
+                        outlinePaint.strokeCap = Paint.Cap.ROUND
+                    }
+                    map.overlays.add(currentPoly)
+                }
+
+                // 4. Midpoint Bubble on current leg: "X min - Y km"
+                if (result != null && result.midpointCurrentLeg != null && result.currentLegDistanceKm > 0.0) {
+                    val bubbleText = "${result.currentLegEtaMinutes} min • ${String.format(java.util.Locale.US, "%.1f", result.currentLegDistanceKm)} km"
+                    val bubbleMarker = Marker(map).apply {
+                        position = result.midpointCurrentLeg
+                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+                        icon = createRouteBubbleDrawable(context, bubbleText)
+                        infoWindow = null
+                    }
+                    map.overlays.add(bubbleMarker)
+                }
+
+                // 5. Driver Location: Blue arrow that follows heading
                 if (riderLat != 0.0 && riderLng != 0.0) {
                     val riderMarker = Marker(map).apply {
                         position = GeoPoint(riderLat, riderLng)
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-                        icon = createRiderPinDrawable(context)
-                        title = "My Location"
-                        infoWindow = null // Remove large address bubble
+                        icon = createHeadingArrowDrawable(context, driverHeading)
+                        title = "My Position"
+                        infoWindow = null
                         setOnMarkerClickListener { m, _ ->
-                            tappedPinLabel = m.title ?: "My Location"
+                            tappedPinLabel = m.title ?: "My Position"
                             true
                         }
                     }
                     map.overlays.add(riderMarker)
                 }
 
-                // 3. Pickup Pin
-                currentActiveOrder?.let { order ->
-                    if (order.isTaxi) {
-                        // Taxi pickup pin is green and disappears once the trip starts (step advances past at_pickup)
-                        val isPickupStage = order.riderStep.lowercase().trim() in listOf<String>(
-                            OrderStepConstants.STEP_TAXI_TO_PICKUP,
-                            OrderStepConstants.STEP_TAXI_AT_PICKUP
-                        )
-                        if (isPickupStage && order.merchantLat != 0.0 && order.merchantLng != 0.0) {
-                            val pickupMarker = Marker(map).apply {
-                                position = GeoPoint(order.merchantLat, order.merchantLng)
-                                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                                icon = createTaxiPickupPinDrawable(context)
-                                title = "Pickup (Stop 1): ${order.merchantAddress.ifBlank { order.merchantName }}"
-                                infoWindow = null
-                                setOnMarkerClickListener { m, _ ->
-                                    tappedPinLabel = m.title ?: "Pickup"
-                                    true
-                                }
-                            }
-                            map.overlays.add(pickupMarker)
-                        }
-                    } else {
-                        val isRevealed = OrderStepConstants.isCustomerAddressRevealed(order.serviceType, order.riderStep)
-                        if (!isRevealed && order.merchantLat != 0.0 && order.merchantLng != 0.0) {
-                            val pickupMarker = Marker(map).apply {
-                                position = GeoPoint(order.merchantLat, order.merchantLng)
-                                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                                icon = createPickupPinDrawable(context, order.serviceType, order.merchantName)
-                                title = "Pickup: ${order.merchantName}"
-                                infoWindow = null // Remove large address bubble
-                                setOnMarkerClickListener { m, _ ->
-                                    tappedPinLabel = m.title ?: order.merchantName
-                                    true
-                                }
-                            }
-                            map.overlays.add(pickupMarker)
-                        }
-                    }
-                }
-
-                // 4. Drop-off / Next Stops Pins
-                currentActiveOrder?.let { order ->
-                    if (order.isTaxi) {
-                        // For taxi: drop-off and every next stop are red pins numbered 2, 3, 4...
-                        // A stop pin disappears when it is completed (in completedStops)
-                        order.allTaxiStops.forEach { stop ->
-                            if (!order.completedStops.contains(stop.stopNumber) && stop.lat != 0.0 && stop.lng != 0.0) {
-                                val stopMarker = Marker(map).apply {
-                                    position = GeoPoint(stop.lat, stop.lng)
-                                    setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                                    icon = createDropoffPinDrawable(context, stop.stopNumber.toString())
-                                    title = "Stop ${stop.stopNumber}: ${stop.address.ifBlank { stop.area }}"
-                                    infoWindow = null
-                                    setOnMarkerClickListener { m, _ ->
-                                        tappedPinLabel = m.title ?: "Stop ${stop.stopNumber}"
-                                        true
-                                    }
-                                }
-                                map.overlays.add(stopMarker)
-                            }
-                        }
-                    }
-                }
-
-                // Non-taxi drop-off pins
-                activeOrders.filter { !it.isTaxi }.forEachIndexed { index, order ->
-                    val orderNumberLabel = (index + 1).toString() // "1" or "2"
-                    val dropOffRevealed = OrderStepConstants.isCustomerAddressRevealed(order.serviceType, order.riderStep)
-                    if (dropOffRevealed && order.customerLat != 0.0 && order.customerLng != 0.0) {
-                        val dropPin = Marker(map).apply {
-                            position = GeoPoint(order.customerLat, order.customerLng)
+                // 6. Remaining Stop Pins:
+                // Merchant stops are GREEN numbered pins (1, 2, 3...)
+                // Customer stops are RED numbered pins continuing the numbering (e.g. 1 and 2 green, 3 and 4 red)
+                // Finished stop pins disappear!
+                remainingStops.forEach { stop ->
+                    if (stop.lat != 0.0 && stop.lng != 0.0) {
+                        val pinMarker = Marker(map).apply {
+                            position = GeoPoint(stop.lat, stop.lng)
                             setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                            icon = createDropoffPinDrawable(context, orderNumberLabel)
-                            title = "Drop-off $orderNumberLabel: ${order.customerAddress.ifBlank { order.customerName }}"
-                            infoWindow = null // Remove large address bubble
+                            icon = createNumberedPinDrawable(context, stop.stopNumber, stop.isMerchant)
+                            title = "Stop ${stop.stopNumber}: ${stop.name} (${if (stop.isMerchant) "Pickup" else "Drop-off"})"
+                            infoWindow = null
                             setOnMarkerClickListener { m, _ ->
-                                tappedPinLabel = m.title ?: order.customerName
+                                tappedPinLabel = m.title ?: stop.name
                                 true
                             }
                         }
-                        map.overlays.add(dropPin)
+                        map.overlays.add(pinMarker)
                     }
                 }
 
@@ -350,7 +302,57 @@ fun OsmMapView(
             }
         )
 
-        // Tapping a pin shows a small label that disappears after 3 seconds
+        // Route Fallback Direct warning banner if OSRM failed (429, 5xx, or timeout)
+        AnimatedVisibility(
+            visible = routeResult?.isFallbackDirect == true,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 80.dp)
+        ) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = androidx.compose.ui.graphics.Color(0xFFFFC107),
+                shadowElevation = 4.dp
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = "Warning",
+                        tint = androidx.compose.ui.graphics.Color(0xFF212121),
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Route unavailable",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = androidx.compose.ui.graphics.Color(0xFF212121)
+                    )
+                }
+            }
+        }
+
+        // Attribution: "Routing by OSRM, © OpenStreetMap contributors"
+        Surface(
+            shape = RoundedCornerShape(4.dp),
+            color = androidx.compose.ui.graphics.Color(0xCCFFFFFF),
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = 6.dp, bottom = 4.dp)
+        ) {
+            Text(
+                text = "Routing by OSRM, © OpenStreetMap contributors",
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Medium,
+                color = androidx.compose.ui.graphics.Color(0xFF333333),
+                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+            )
+        }
+
+        // Tapped pin toast label (auto-dismisses after 3 seconds)
         tappedPinLabel?.let { label ->
             Surface(
                 shape = RoundedCornerShape(20.dp),
@@ -358,144 +360,164 @@ fun OsmMapView(
                 shadowElevation = 6.dp,
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .padding(top = 96.dp)
+                    .padding(top = 110.dp)
             ) {
                 Text(
                     text = label,
                     color = androidx.compose.ui.graphics.Color.White,
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 13.sp,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 7.dp)
                 )
             }
         }
     }
 }
 
-// Helpers for marker icons
-private fun createRiderPinDrawable(context: Context): BitmapDrawable {
-    val size = 56
+/**
+ * Creates green pin for merchants or red pin for customers, with white bold number.
+ */
+private fun createNumberedPinDrawable(context: Context, number: Int, isMerchant: Boolean): BitmapDrawable {
+    val width = 72
+    val height = 86
+    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+
+    val pinColor = if (isMerchant) {
+        Color.parseColor("#2E7D32") // Deep Green
+    } else {
+        Color.parseColor("#E53935") // Vivid Red
+    }
+
+    val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#40000000")
+        style = Paint.Style.FILL
+    }
+    canvas.drawCircle(width / 2f + 2f, 32f + 2f, 26f, shadowPaint)
+
+    // Teardrop pointer path
+    val pointerPath = Path().apply {
+        moveTo(width / 2f, height.toFloat() - 4f)
+        lineTo(width / 2f - 14f, 44f)
+        lineTo(width / 2f + 14f, 44f)
+        close()
+    }
+    val pointerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = pinColor
+        style = Paint.Style.FILL
+    }
+    canvas.drawPath(pointerPath, pointerPaint)
+
+    // Circle head
+    val circlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = pinColor
+        style = Paint.Style.FILL
+    }
+    canvas.drawCircle(width / 2f, 30f, 26f, circlePaint)
+
+    // White border
+    val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.STROKE
+        strokeWidth = 5f
+    }
+    canvas.drawCircle(width / 2f, 30f, 26f, borderPaint)
+
+    // Centered number text
+    val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textSize = if (number >= 10) 24f else 28f
+        textAlign = Paint.Align.CENTER
+        isFakeBoldText = true
+    }
+    canvas.drawText("$number", width / 2f, 40f, textPaint)
+
+    return BitmapDrawable(context.resources, bitmap)
+}
+
+/**
+ * Creates blue directional navigation arrow that follows driver heading.
+ */
+private fun createHeadingArrowDrawable(context: Context, headingDeg: Float): BitmapDrawable {
+    val size = 76
     val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap)
 
-    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#FFC107") // Yellow circle
+    canvas.save()
+    // Rotate canvas around center by heading
+    canvas.rotate(headingDeg, size / 2f, size / 2f)
+
+    // Outer glow / halo
+    val haloPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#442196F3")
         style = Paint.Style.FILL
     }
-    canvas.drawCircle(size / 2f, size / 2f, size / 2f - 4, paint)
+    canvas.drawCircle(size / 2f, size / 2f, size / 2f - 2f, haloPaint)
+
+    // Directional chevron arrow
+    val arrowPath = Path().apply {
+        moveTo(size / 2f, 6f) // Tip pointing up
+        lineTo(size - 14f, size - 14f)
+        lineTo(size / 2f, size - 24f)
+        lineTo(14f, size - 14f)
+        close()
+    }
+
+    val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#1E88E5") // Bright Blue
+        style = Paint.Style.FILL
+    }
+    canvas.drawPath(arrowPath, arrowPaint)
 
     val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         style = Paint.Style.STROKE
-        strokeWidth = 6f
+        strokeWidth = 5f
+        strokeJoin = Paint.Join.ROUND
     }
-    canvas.drawCircle(size / 2f, size / 2f, size / 2f - 4, borderPaint)
+    canvas.drawPath(arrowPath, borderPaint)
 
-    val centerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#1A1A1A")
-        style = Paint.Style.FILL
-    }
-    canvas.drawCircle(size / 2f, size / 2f, 10f, centerPaint)
-
+    canvas.restore()
     return BitmapDrawable(context.resources, bitmap)
 }
 
-private fun createPickupPinDrawable(context: Context, serviceType: String, label: String): BitmapDrawable {
-    val width = 64
-    val height = 74
-    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(bitmap)
-
-    val (pinColor, letter) = when (serviceType.lowercase().trim()) {
-        OrderStepConstants.SERVICE_PARCEL -> Color.parseColor("#E65100") to "S" // Orange / Sender
-        OrderStepConstants.SERVICE_PABILI -> Color.parseColor("#7B1FA2") to "V" // Purple / Vendor
-        else -> Color.parseColor("#1E88E5") to "M" // Delivio Blue / Merchant
-    }
-
-    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = pinColor
-        style = Paint.Style.FILL
-    }
-    canvas.drawCircle(width / 2f, 30f, 26f, paint)
-
-    val border = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        style = Paint.Style.STROKE
-        strokeWidth = 4f
-    }
-    canvas.drawCircle(width / 2f, 30f, 26f, border)
-
+/**
+ * Creates bubble for current leg showing "X min • Y km".
+ */
+private fun createRouteBubbleDrawable(context: Context, text: String): BitmapDrawable {
     val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         textSize = 24f
-        textAlign = Paint.Align.CENTER
         isFakeBoldText = true
+        textAlign = Paint.Align.CENTER
     }
-    canvas.drawText(letter, width / 2f, 38f, textPaint)
 
-    return BitmapDrawable(context.resources, bitmap)
-}
+    val textBounds = Rect()
+    textPaint.getTextBounds(text, 0, text.length, textBounds)
+    val paddingH = 24
+    val paddingV = 16
+    val width = textBounds.width() + paddingH * 2
+    val height = textBounds.height() + paddingV * 2
 
-private fun createDropoffPinDrawable(context: Context, number: String): BitmapDrawable {
-    val width = 64
-    val height = 74
     val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap)
 
-    // Red drop pin for customer destination
-    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#E53935") // Red
+    val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#DD212121") // Dark semi-transparent
         style = Paint.Style.FILL
     }
-    canvas.drawCircle(width / 2f, 30f, 28f, paint)
-
-    val border = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
+    val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#88FFFFFF")
         style = Paint.Style.STROKE
-        strokeWidth = 5f
+        strokeWidth = 3f
     }
-    canvas.drawCircle(width / 2f, 30f, 28f, border)
 
-    // Number text "1" or "2"
-    val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        textSize = 30f
-        textAlign = Paint.Align.CENTER
-        isFakeBoldText = true
-    }
-    canvas.drawText(number, width / 2f, 40f, textPaint)
+    val rect = RectF(2f, 2f, width - 2f, height - 2f)
+    canvas.drawRoundRect(rect, height / 2f, height / 2f, bgPaint)
+    canvas.drawRoundRect(rect, height / 2f, height / 2f, borderPaint)
 
-    return BitmapDrawable(context.resources, bitmap)
-}
-
-private fun createTaxiPickupPinDrawable(context: Context): BitmapDrawable {
-    val width = 64
-    val height = 74
-    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(bitmap)
-
-    // Green pin for taxi passenger pickup
-    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#2E7D32") // Green
-        style = Paint.Style.FILL
-    }
-    canvas.drawCircle(width / 2f, 30f, 28f, paint)
-
-    val border = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        style = Paint.Style.STROKE
-        strokeWidth = 5f
-    }
-    canvas.drawCircle(width / 2f, 30f, 28f, border)
-
-    // Number text "1"
-    val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        textSize = 30f
-        textAlign = Paint.Align.CENTER
-        isFakeBoldText = true
-    }
-    canvas.drawText("1", width / 2f, 40f, textPaint)
+    val textY = (height / 2f) - ((textPaint.descent() + textPaint.ascent()) / 2f)
+    canvas.drawText(text, width / 2f, textY, textPaint)
 
     return BitmapDrawable(context.resources, bitmap)
 }

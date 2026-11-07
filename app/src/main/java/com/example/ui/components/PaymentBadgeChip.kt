@@ -24,15 +24,55 @@ fun PaymentBadgeChip(
     modifier: Modifier = Modifier,
     isLarge: Boolean = true
 ) {
-    PaymentBadgeContent(
-        paymentType = order.paymentType,
-        providerLabel = order.paymentProviderLabel,
-        amountToCollect = order.cashAmountToCollect,
-        isRequestRider = order.isRequestRider,
-        currencySymbol = currencySymbol,
-        isLarge = isLarge,
-        modifier = modifier
-    )
+    if (order.isSplitChild || order.badge.equals("split", ignoreCase = true)) {
+        NoCashCollectedChip(modifier = modifier, isLarge = isLarge)
+    } else {
+        PaymentBadgeContent(
+            paymentType = order.paymentType,
+            providerLabel = order.paymentProviderLabel,
+            amountToCollect = order.cashAmountToCollect,
+            isRequestRider = order.isRequestRider,
+            currencySymbol = currencySymbol,
+            isLarge = isLarge,
+            modifier = modifier
+        )
+    }
+}
+
+@Composable
+fun NoCashCollectedChip(
+    modifier: Modifier = Modifier,
+    isLarge: Boolean = true
+) {
+    Surface(
+        shape = RoundedCornerShape(if (isLarge) 12.dp else 8.dp),
+        color = Color(0xFFECEFF1),
+        border = BorderStroke(1.dp, Color(0xFF78909C)),
+        modifier = modifier.testTag("payment_chip_no_cash")
+    ) {
+        Row(
+            modifier = Modifier.padding(
+                horizontal = if (isLarge) 12.dp else 8.dp,
+                vertical = if (isLarge) 6.dp else 4.dp
+            ),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.MoneyOff,
+                contentDescription = "No Cash Collected",
+                tint = Color(0xFF37474F),
+                modifier = Modifier.size(if (isLarge) 18.dp else 14.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = "No Cash Collected",
+                fontWeight = FontWeight.ExtraBold,
+                fontSize = if (isLarge) 13.sp else 11.sp,
+                color = Color(0xFF37474F)
+            )
+        }
+    }
 }
 
 @Composable

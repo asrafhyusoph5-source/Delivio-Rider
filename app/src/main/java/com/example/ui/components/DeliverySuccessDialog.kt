@@ -71,11 +71,31 @@ fun DeliverySuccessDialog(
                     fontSize = 22.sp,
                     color = MaterialTheme.colorScheme.onSurface
                 )
-                Text(
-                    text = if (order.isTaxi) "Trip #${order.orderNumber}" else "Order #${order.orderNumber}",
-                    fontSize = 13.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Text(
+                        text = if (order.isTaxi) "Trip ${order.displayOrderNumber}" else "Order ${order.displayOrderNumber}",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (order.isSplitChild || order.badge.equals("split", ignoreCase = true)) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = Color(0xFF7B1FA2)
+                        ) {
+                            Text(
+                                text = "SPLIT",
+                                color = Color.White,
+                                fontWeight = FontWeight.Black,
+                                fontSize = 10.sp,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
 
                 Spacer(modifier = Modifier.height(18.dp))
 
@@ -128,7 +148,20 @@ fun DeliverySuccessDialog(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    if (order.isTaxi) {
+                    val earning = order.riderEarning
+                    if (earning != null) {
+                        FareRow("Booking Fee (Rank ${earning.rank})", "$currencySymbol${String.format("%.2f", earning.bookingFee)}")
+                        if (earning.pickupFee > 0.0) {
+                            FareRow("Stop 1 Pickup Fee", "$currencySymbol${String.format("%.2f", earning.pickupFee)}")
+                        }
+                        if (earning.extra > 0.0) {
+                            FareRow("Special Radius Extra", "+$currencySymbol${String.format("%.2f", earning.extra)}", isPositive = true)
+                        }
+                        if (earning.tip > 0.0) {
+                            FareRow("Tip (100% to Driver)", "+$currencySymbol${String.format("%.2f", earning.tip)}", isPositive = true)
+                        }
+                        FareRow("Total Net Earned", "$currencySymbol${String.format("%.2f", earning.total)}", isBold = true, isPositive = true)
+                    } else if (order.isTaxi) {
                         FareRow("Total Fare", "$currencySymbol${String.format("%.2f", order.feesTotal)}")
                         val commRate = if (order.platformCommission > 0.0) order.platformCommission else 15.0
                         val commAmount = order.feesTotal * (commRate / 100.0)
@@ -161,7 +194,9 @@ fun DeliverySuccessDialog(
                     }
 
                     HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-                    if (order.isCod) {
+                    if (order.isSplitChild || order.badge.equals("split", ignoreCase = true)) {
+                        FareRow("Cash Collected", "No Cash Collected", isBold = true)
+                    } else if (order.isCod) {
                         val collected = if (order.codCollected > 0) order.codCollected else order.cashAmountToCollect
                         FareRow("COD Cash Collected", "$currencySymbol${String.format("%.2f", collected)}", isBold = true)
                     } else if (order.isPaidOnline) {

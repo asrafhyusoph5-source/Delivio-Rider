@@ -27,6 +27,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.theme.*
+import com.example.data.constants.OrderStepConstants
 import com.example.data.models.PaymentType
 import com.example.data.models.parsePaymentType
 import com.example.data.models.formatPaymentProvider
@@ -59,7 +60,8 @@ data class EarningsJobRecord(
     val paymentMethod: String = "cod",
     val paymentProvider: String = "",
     val cashToCollect: Double = 0.0,
-    val codCollected: Double = 0.0
+    val codCollected: Double = 0.0,
+    val riderEarning: com.example.data.models.RiderEarning? = null
 ) {
     val paymentType: PaymentType
         get() = parsePaymentType(paymentMethod)
@@ -77,7 +79,22 @@ data class EarningsJobRecord(
         get() = formatPaymentProvider(paymentProvider)
 
     val netEarning: Double
-        get() = baseFare + distanceFare + tip + lateTip + surgeBoost + waitingPay + extraStopPay + returnTripPay + urgentBonus - platformCommission
+        get() {
+            if (riderEarning != null && riderEarning.total > 0.0) {
+                return riderEarning.total + lateTip
+            }
+            return baseFare + distanceFare + tip + lateTip + surgeBoost + waitingPay + extraStopPay + returnTripPay + urgentBonus - platformCommission
+        }
+
+    val displayOrderNumber: String
+        get() {
+            val raw = orderNumber.trim()
+            return when {
+                raw.isNotBlank() -> if (raw.startsWith("#")) raw else "#$raw"
+                id.isNotBlank() -> "#" + id.takeLast(6).uppercase()
+                else -> "#000000"
+            }
+        }
 }
 
 private val SAMPLE_EARNINGS_JOBS = listOf(
@@ -85,7 +102,7 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
     EarningsJobRecord(
         id = "job_101",
         orderNumber = "DLV-8821",
-        serviceType = "Request",
+        serviceType = "INSTANT",
         merchantName = "City Health Logistics",
         area = "Rizal Ave to Ospital ng Palawan",
         timeText = "03:45 PM",
@@ -106,7 +123,7 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
     EarningsJobRecord(
         id = "job_102",
         orderNumber = "DLV-7740",
-        serviceType = "Food",
+        serviceType = "FOOD",
         merchantName = "Kalui Restaurant",
         area = "Rizal Ave to Bancao-Bancao",
         timeText = "01:15 PM",
@@ -124,8 +141,8 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
     EarningsJobRecord(
         id = "job_103",
         orderNumber = "DLV-6612",
-        serviceType = "Instant",
-        merchantName = "Express Courier Hub",
+        serviceType = "MART",
+        merchantName = "Express Convenience Hub",
         area = "San Pedro to Tiniguiban",
         timeText = "11:30 AM",
         dayNumber = 11,
@@ -140,7 +157,7 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
     EarningsJobRecord(
         id = "job_104",
         orderNumber = "DLV-9011",
-        serviceType = "Taxi",
+        serviceType = "TAXI",
         merchantName = "Puerto Princesa City Hall",
         area = "City Hall to Airport",
         timeText = "05:10 PM",
@@ -158,7 +175,7 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
     EarningsJobRecord(
         id = "job_201",
         orderNumber = "DLV-5519",
-        serviceType = "Food",
+        serviceType = "FOOD",
         merchantName = "Kinabuchs Grill & Bar",
         area = "Rizal Ave to San Manuel",
         timeText = "08:10 PM",
@@ -176,7 +193,7 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
     EarningsJobRecord(
         id = "job_202",
         orderNumber = "DLV-5502",
-        serviceType = "Pabili",
+        serviceType = "PABILI",
         merchantName = "Puregold Supermarket",
         area = "Malvar St to Sta. Monica",
         timeText = "04:20 PM",
@@ -193,7 +210,7 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
     EarningsJobRecord(
         id = "job_301",
         orderNumber = "DLV-4411",
-        serviceType = "Merchant Request",
+        serviceType = "INSTANT",
         merchantName = "Palawan Bakery Partner",
         area = "Valencia to San Jose",
         timeText = "02:00 PM",
@@ -211,7 +228,7 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
     EarningsJobRecord(
         id = "job_302",
         orderNumber = "DLV-4390",
-        serviceType = "Parcel",
+        serviceType = "PARCEL",
         merchantName = "Rizal Print Center",
         area = "Rizal Ave to Puerto Airport",
         timeText = "10:15 AM",
@@ -228,7 +245,7 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
     EarningsJobRecord(
         id = "job_401",
         orderNumber = "DLV-3310",
-        serviceType = "Food",
+        serviceType = "FOOD",
         merchantName = "Badjao Seafront",
         area = "Abueg Rd to City Center",
         timeText = "07:30 PM",
@@ -246,7 +263,7 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
     EarningsJobRecord(
         id = "job_501",
         orderNumber = "DLV-2218",
-        serviceType = "Request",
+        serviceType = "INSTANT",
         merchantName = "Provincial Capitol Admin",
         area = "Fernandez St to Bgy. Irawan",
         timeText = "01:45 PM",
@@ -264,7 +281,7 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
     EarningsJobRecord(
         id = "job_601",
         orderNumber = "DLV-1180",
-        serviceType = "Instant",
+        serviceType = "MART",
         merchantName = "Palawan Tech Supplies",
         area = "Lacao St to San Pedro",
         timeText = "11:10 AM",
@@ -282,7 +299,7 @@ private val SAMPLE_EARNINGS_JOBS = listOf(
     EarningsJobRecord(
         id = "job_701",
         orderNumber = "DLV-0912",
-        serviceType = "Food",
+        serviceType = "FOOD",
         merchantName = "La Terrasse Restaurant",
         area = "Rizal Ave to Bancao-Bancao",
         timeText = "06:50 PM",
@@ -333,7 +350,7 @@ fun EarningsScreen(
             EarningsJobRecord(
                 id = order.id,
                 orderNumber = order.orderNumber,
-                serviceType = order.serviceType.replaceFirstChar { it.uppercase() },
+                serviceType = OrderStepConstants.getServiceBadge(order.serviceType),
                 merchantName = if (order.isTaxi) (order.stops.firstOrNull()?.address ?: "Pickup Point") else order.merchantName,
                 area = if (order.isTaxi) "${order.customerArea} (${order.stops.size + 1} stops)" else "${order.merchantAddress.take(20)} to ${order.customerArea}",
                 timeText = timeStr,
@@ -348,7 +365,8 @@ fun EarningsScreen(
                 paymentMethod = order.paymentMethod,
                 paymentProvider = order.paymentProvider,
                 cashToCollect = order.cashAmountToCollect,
-                codCollected = order.codCollected
+                codCollected = order.codCollected,
+                riderEarning = order.riderEarning
             )
         }
         (liveRecords + SAMPLE_EARNINGS_JOBS).distinctBy { it.id }
@@ -366,15 +384,15 @@ fun EarningsScreen(
     // Apply service and payment filter
     val filteredJobs = remember(periodJobs, selectedServiceFilter, selectedPaymentFilter) {
         periodJobs.filter { job ->
+            val jobSvc = job.serviceType.uppercase().trim()
             val matchesService = when (selectedServiceFilter) {
                 "All" -> true
-                "Food" -> job.serviceType == "Food"
-                "Instant" -> job.serviceType == "Instant"
-                "Parcel" -> job.serviceType == "Parcel"
-                "Pabili" -> job.serviceType == "Pabili"
-                "Request" -> job.serviceType == "Request"
-                "Merchant Request" -> job.serviceType == "Merchant Request"
-                "Taxi" -> job.serviceType == "Taxi"
+                "FOOD" -> jobSvc in listOf("FOOD")
+                "MART" -> jobSvc in listOf("MART", "CONVENIENCE")
+                "PARCEL" -> jobSvc in listOf("PARCEL")
+                "PABILI" -> jobSvc in listOf("PABILI")
+                "INSTANT" -> jobSvc in listOf("INSTANT", "REQUEST", "MERCHANT REQUEST")
+                "TAXI" -> jobSvc in listOf("TAXI")
                 else -> true
             }
             val matchesPayment = when (selectedPaymentFilter) {
@@ -669,7 +687,7 @@ fun EarningsScreen(
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("Service Type Filter:", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        val services = listOf("All", "Food", "Instant", "Parcel", "Pabili", "Request", "Merchant Request", "Taxi")
+                        val services = listOf("All", "FOOD", "MART", "PARCEL", "PABILI", "INSTANT", "TAXI")
                         items(services) { svc ->
                             FilterChip(
                                 selected = selectedServiceFilter == svc,
@@ -762,7 +780,7 @@ fun EarningsScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Job #${job.orderNumber}", fontWeight = FontWeight.Bold)
+                    Text("Job ${job.displayOrderNumber}", fontWeight = FontWeight.Bold)
                     Surface(shape = RoundedCornerShape(8.dp), color = DelivioYellowLight) {
                         Text(job.serviceType, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = TextOnYellow, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
                     }
@@ -774,18 +792,37 @@ fun EarningsScreen(
                     Text("Completed at ${job.timeText}, Oct ${job.dayNumber}, 2026", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     HorizontalDivider()
 
-                    BreakdownRow("Base Fare", "$currencySymbol${String.format("%.2f", job.baseFare)}")
-                    BreakdownRow("Distance Fare", "$currencySymbol${String.format("%.2f", job.distanceFare)}")
-                    if (job.tip > 0) BreakdownRow("Tip", "$currencySymbol${String.format("%.2f", job.tip)}", valueColor = DelivioGreenDark)
-                    if (job.lateTip > 0) BreakdownRow("Late Tip", "+$currencySymbol${String.format("%.2f", job.lateTip)}", valueColor = DelivioGreenDark)
-                    if (job.surgeBoost > 0) BreakdownRow("Surge Boost", "$currencySymbol${String.format("%.2f", job.surgeBoost)}", valueColor = DelivioYellowDark)
-                    if (job.waitingPay > 0) BreakdownRow("Waiting Pay", "$currencySymbol${String.format("%.2f", job.waitingPay)}")
-                    if (job.extraStopPay > 0) BreakdownRow("Extra Stop Pay", "$currencySymbol${String.format("%.2f", job.extraStopPay)}")
-                    if (job.returnTripPay > 0) BreakdownRow("Return Trip Pay", "$currencySymbol${String.format("%.2f", job.returnTripPay)}")
-                    if (job.urgentBonus > 0) BreakdownRow("Urgent Bonus", "$currencySymbol${String.format("%.2f", job.urgentBonus)}", valueColor = DelivioRed)
-                    BreakdownRow("Platform Commission", "-$currencySymbol${String.format("%.2f", job.platformCommission)}", valueColor = DelivioRed)
-                    HorizontalDivider()
-                    BreakdownRow("Net Driver Pay", "$currencySymbol${String.format("%.2f", job.netEarning)}", isBold = true)
+                    val earning = job.riderEarning
+                    if (earning != null) {
+                        BreakdownRow("Booking Fee (Rank ${earning.rank})", "$currencySymbol${String.format("%.2f", earning.bookingFee)}")
+                        if (earning.pickupFee > 0.0) {
+                            BreakdownRow("Stop 1 Pickup Fee", "$currencySymbol${String.format("%.2f", earning.pickupFee)}")
+                        }
+                        if (earning.extra > 0.0) {
+                            BreakdownRow("Special Radius Extra", "+$currencySymbol${String.format("%.2f", earning.extra)}", valueColor = DelivioGreenDark)
+                        }
+                        if (earning.tip > 0.0) {
+                            BreakdownRow("Tip", "+$currencySymbol${String.format("%.2f", earning.tip)}", valueColor = DelivioGreenDark)
+                        }
+                        if (job.lateTip > 0.0) {
+                            BreakdownRow("Late Tip", "+$currencySymbol${String.format("%.2f", job.lateTip)}", valueColor = DelivioGreenDark)
+                        }
+                        HorizontalDivider()
+                        BreakdownRow("Net Driver Pay", "$currencySymbol${String.format("%.2f", job.netEarning)}", isBold = true)
+                    } else {
+                        BreakdownRow("Base Fare", "$currencySymbol${String.format("%.2f", job.baseFare)}")
+                        BreakdownRow("Distance Fare", "$currencySymbol${String.format("%.2f", job.distanceFare)}")
+                        if (job.tip > 0) BreakdownRow("Tip", "$currencySymbol${String.format("%.2f", job.tip)}", valueColor = DelivioGreenDark)
+                        if (job.lateTip > 0) BreakdownRow("Late Tip", "+$currencySymbol${String.format("%.2f", job.lateTip)}", valueColor = DelivioGreenDark)
+                        if (job.surgeBoost > 0) BreakdownRow("Surge Boost", "$currencySymbol${String.format("%.2f", job.surgeBoost)}", valueColor = DelivioYellowDark)
+                        if (job.waitingPay > 0) BreakdownRow("Waiting Pay", "$currencySymbol${String.format("%.2f", job.waitingPay)}")
+                        if (job.extraStopPay > 0) BreakdownRow("Extra Stop Pay", "$currencySymbol${String.format("%.2f", job.extraStopPay)}")
+                        if (job.returnTripPay > 0) BreakdownRow("Return Trip Pay", "$currencySymbol${String.format("%.2f", job.returnTripPay)}")
+                        if (job.urgentBonus > 0) BreakdownRow("Urgent Bonus", "$currencySymbol${String.format("%.2f", job.urgentBonus)}", valueColor = DelivioRed)
+                        BreakdownRow("Platform Commission", "-$currencySymbol${String.format("%.2f", job.platformCommission)}", valueColor = DelivioRed)
+                        HorizontalDivider()
+                        BreakdownRow("Net Driver Pay", "$currencySymbol${String.format("%.2f", job.netEarning)}", isBold = true)
+                    }
 
                     Spacer(modifier = Modifier.height(6.dp))
                     PaymentBadgeContent(
@@ -829,7 +866,7 @@ fun EarningsScreen(
                     ) {
                         OutlinedButton(
                             onClick = {
-                                viewModel.showToast("Incident report opened for #${job.orderNumber}")
+                                viewModel.showToast("Incident report opened for ${job.displayOrderNumber}")
                                 selectedJobForDetail = null
                             },
                             modifier = Modifier.weight(1f)
@@ -840,7 +877,7 @@ fun EarningsScreen(
                             onClick = {
                                 val sendIntent = Intent().apply {
                                     action = Intent.ACTION_SEND
-                                    putExtra(Intent.EXTRA_TEXT, "Delivio Driver Receipt\nJob: #${job.orderNumber}\nService: ${job.serviceType}\nMerchant: ${job.merchantName}\nNet Earning: ₱${job.netEarning}\nDelivered on Oct ${job.dayNumber}, 2026")
+                                    putExtra(Intent.EXTRA_TEXT, "Delivio Driver Receipt\nJob: ${job.displayOrderNumber}\nService: ${job.serviceType}\nMerchant: ${job.merchantName}\nNet Earning: ₱${job.netEarning}\nDelivered on Oct ${job.dayNumber}, 2026")
                                     type = "text/plain"
                                 }
                                 context.startActivity(Intent.createChooser(sendIntent, "Download/Share Receipt"))
@@ -970,7 +1007,7 @@ private fun JobRowCard(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "${job.timeText} • ${job.merchantName}",
+                        text = "${job.displayOrderNumber} • ${job.timeText} • ${job.merchantName}",
                         fontWeight = FontWeight.Bold,
                         fontSize = 14.sp,
                         color = MaterialTheme.colorScheme.onSurface

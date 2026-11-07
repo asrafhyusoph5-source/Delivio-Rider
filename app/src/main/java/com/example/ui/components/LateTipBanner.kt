@@ -91,7 +91,7 @@ fun LateTipBanner(
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
-                        text = "Customer added a tip for Order #${bannerInfo.orderNumber}. 100% added to your earnings!",
+                        text = "Customer added a tip for Order ${bannerInfo.displayOrderNumber}. 100% added to your earnings!",
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         lineHeight = 15.sp

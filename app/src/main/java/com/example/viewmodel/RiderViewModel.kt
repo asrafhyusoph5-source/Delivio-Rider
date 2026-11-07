@@ -38,6 +38,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     val rider = riderRepository.rider
     val activeOrders = riderRepository.activeOrders
     val incomingOffer = riderRepository.incomingOffer
+    val incomingOfferBundle = riderRepository.incomingOfferBundle
     val deliveredOrders = riderRepository.deliveredOrders
     val tierConfigs = riderRepository.tierConfigs
     val inboxMessages = riderRepository.inboxMessages
@@ -47,14 +48,49 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     val newlyReachedTier = riderRepository.newlyReachedTier
     val listenerError = riderRepository.listenerError
     val currentLocation = RiderLocationTracker.currentLocation
+    val heading: StateFlow<Float> = RiderLocationTracker.heading
+    val speedKmh: StateFlow<Int> = RiderLocationTracker.speedKmh
 
     // Order Switcher (index 0 or 1)
     private val _selectedOrderIndex = MutableStateFlow(0)
     val selectedOrderIndex: StateFlow<Int> = _selectedOrderIndex.asStateFlow()
 
-    val currentActiveOrder: StateFlow<Order?> = combine(activeOrders, _selectedOrderIndex) { orders, idx ->
+    private var previousStopsCache = listOf<RouteStop>()
+
+    val batchStops: StateFlow<List<RouteStop>> = combine(
+        activeOrders,
+        currentLocation
+    ) { orders, loc ->
+        val lat = loc?.first ?: 0.0
+        val lng = loc?.second ?: 0.0
+        val computed = RouteStopCalculator.computeBatchStops(
+            activeOrders = orders,
+            driverLat = lat,
+            driverLng = lng,
+            previousStops = previousStopsCache
+        )
+        previousStopsCache = computed
+        computed
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    val currentRouteStop: StateFlow<RouteStop?> = batchStops.map { stops ->
+        stops.firstOrNull { it.status == StopStatus.CURRENT }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    private val _focusedStopOnMap = MutableStateFlow<RouteStop?>(null)
+    val focusedStopOnMap: StateFlow<RouteStop?> = _focusedStopOnMap.asStateFlow()
+
+    fun focusStopOnMap(stop: RouteStop?) {
+        _focusedStopOnMap.value = stop
+    }
+
+    val currentActiveOrder: StateFlow<Order?> = combine(activeOrders, currentRouteStop, _selectedOrderIndex) { orders, currentStop, idx ->
         if (orders.isEmpty()) null
-        else orders.getOrNull(idx) ?: orders.firstOrNull()
+        else if (currentStop != null) {
+            orders.firstOrNull { it.id == currentStop.orderId } ?: orders.getOrNull(idx) ?: orders.firstOrNull()
+        } else {
+            orders.getOrNull(idx) ?: orders.firstOrNull()
+        }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     // Auth & Application State
@@ -221,6 +257,97 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         riderRepository.dismissLateTipBanner()
     }
 
+    // Live Support Tickets
+    val supportTickets: StateFlow<List<SupportTicket>> = riderRepository.supportTickets
+    val unresolvedTickets: StateFlow<List<SupportTicket>> = riderRepository.unresolvedTickets
+    val activeTicket: StateFlow<SupportTicket?> = riderRepository.activeTicket
+    val activeTicketMessages: StateFlow<List<SupportTicketMessage>> = riderRepository.activeTicketMessages
+    val adminMessageBanner: StateFlow<AdminMessageBannerInfo?> = riderRepository.adminMessageBanner
+
+    val hasUnresolvedTicket: StateFlow<Boolean> = unresolvedTickets.map { it.isNotEmpty() }
+        .stateIn(viewModelScope, SharingStarted.Lazily, false)
+
+    val hasUnreadAdminMessage: StateFlow<Boolean> = unresolvedTickets.map { tickets ->
+        tickets.any { it.unreadByRider }
+    }.stateIn(viewModelScope, SharingStarted.Lazily, false)
+
+    // Live Quests & Claims
+    val quests: StateFlow<List<Quest>> = riderRepository.quests
+    val questClaims: StateFlow<Map<String, QuestClaim>> = riderRepository.questClaims
+
+    val questProgressList: StateFlow<List<QuestProgress>> = combine(
+        riderRepository.quests,
+        riderRepository.deliveredOrders,
+        riderRepository.offerLogs,
+        riderRepository.questClaims,
+        riderRepository.rider
+    ) { questsList, delivered, logs, claims, currentRider ->
+        questsList.filter { it.appliesTo(currentRider) }.map { q ->
+            riderRepository.computeQuestProgress(q, delivered, logs, claims[q.id])
+        }
+    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    fun refreshQuests() {
+        riderRepository.checkAndCreateClaimsForEndedQuests()
+    }
+
+    val hasOrderAtMerchant: StateFlow<Boolean> = activeOrders.map { orders ->
+        orders.any { ord ->
+            val s = ord.serviceType.lowercase().trim()
+            val isFoodOrConv = s in listOf("food", "convenience", "instant", OrderStepConstants.SERVICE_FOOD)
+            val step = ord.riderStep.lowercase().trim()
+            val atMerchant = step in setOf(
+                OrderStepConstants.STEP_AT_MERCHANT,
+                OrderStepConstants.STEP_ARRIVED_AT_MERCHANT,
+                "at_merchant",
+                "arrived_at_merchant"
+            )
+            isFoodOrConv && atMerchant
+        }
+    }.stateIn(viewModelScope, SharingStarted.Lazily, false)
+
+    fun selectSupportTicket(ticketId: String) {
+        riderRepository.selectTicket(ticketId)
+    }
+
+    fun dismissAdminMessageBanner() {
+        riderRepository.dismissAdminMessageBanner()
+    }
+
+    fun createSupportTicket(
+        order: Order,
+        reasonKey: String,
+        reasonLabel: String,
+        splitItems: List<String>,
+        title: String,
+        details: String,
+        photosBase64: List<String>,
+        onSuccess: (String) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        riderRepository.createSupportTicket(
+            order = order,
+            reasonKey = reasonKey,
+            reasonLabel = reasonLabel,
+            splitItems = splitItems,
+            title = title,
+            details = details,
+            photosBase64 = photosBase64,
+            onSuccess = onSuccess,
+            onError = onError
+        )
+    }
+
+    fun sendTicketMessage(
+        ticketId: String,
+        text: String,
+        imageData: String? = null,
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        riderRepository.sendTicketMessage(ticketId, text, imageData, onSuccess, onError)
+    }
+
     // Rate the shop dialog state
     private val _rateShopOrder = MutableStateFlow<Order?>(null)
     val rateShopOrder: StateFlow<Order?> = _rateShopOrder.asStateFlow()
@@ -256,7 +383,22 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     val currentCityName = riderRepository.currentCityName
 
     fun isServiceOn(serviceType: String): Boolean = riderRepository.isServiceOn(serviceType)
+    fun isPlatformServiceOn(serviceType: String): Boolean = riderRepository.isPlatformServiceOn(serviceType)
+    fun isCityServiceOn(serviceType: String): Boolean = riderRepository.isCityServiceOn(serviceType)
     fun getCityDisplayName(): String = riderRepository.getCityDisplayName()
+
+    fun getServiceLockReason(serviceType: String): String? {
+        val currentRider = rider.value
+        val isAllowed = currentRider?.allowedServices?.contains(serviceType) ?: true
+        val isPlatformOn = isPlatformServiceOn(serviceType)
+        val isCityOn = isCityServiceOn(serviceType)
+        return OrderStepConstants.getServiceLockReason(
+            isPlatformOn = isPlatformOn,
+            isCityOn = isCityOn,
+            isAllowed = isAllowed,
+            cityName = getCityDisplayName()
+        )
+    }
 
     // Support chat
     private val _supportChatMessages = MutableStateFlow<List<ChatMessage>>(listOf(
@@ -679,8 +821,41 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    // ACCEPT OFFER
+    // ACCEPT OFFER BUNDLE
+    fun acceptIncomingOfferBundle(bundle: OfferBundle) {
+        triggerVibration()
+        riderRepository.acceptOfferBundle(bundle,
+            onSuccess = {
+                val msg = when (bundle.type) {
+                    OfferType.DOUBLE_BOOKING -> "Double booking accepted! Heading to pickup."
+                    OfferType.ADD_TO_BOOKING -> "Order added to your booking! Heading to pickup."
+                    else -> "Order accepted! Heading to pickup."
+                }
+                showSnackbar(msg)
+            },
+            onError = { errorDetails ->
+                _acceptOrderError.value = errorDetails
+            }
+        )
+    }
+
+    // DECLINE OFFER BUNDLE
+    fun declineIncomingOfferBundle(bundle: OfferBundle) {
+        riderRepository.declineOfferBundle(bundle, prefsRepository)
+    }
+
+    // MISS OFFER BUNDLE
+    fun missIncomingOfferBundle(bundle: OfferBundle) {
+        riderRepository.missOfferBundle(bundle, prefsRepository)
+    }
+
+    // ACCEPT OFFER (Single or fallback)
     fun acceptIncomingOffer(orderId: String) {
+        val bundle = incomingOfferBundle.value
+        if (bundle != null && bundle.orders.any { it.id == orderId }) {
+            acceptIncomingOfferBundle(bundle)
+            return
+        }
         triggerVibration()
         riderRepository.acceptOrder(orderId,
             onSuccess = {
@@ -694,19 +869,30 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
     // DECLINE OFFER
     fun declineIncomingOffer(orderId: String, serviceType: String = "") {
+        val bundle = incomingOfferBundle.value
+        if (bundle != null && bundle.orders.any { it.id == orderId }) {
+            declineIncomingOfferBundle(bundle)
+            return
+        }
         val sType = serviceType.ifEmpty { incomingOffer.value?.serviceType ?: OrderStepConstants.SERVICE_FOOD }
         riderRepository.declineOffer(orderId, sType, prefsRepository)
     }
 
     // MISS OFFER (30s timer expired)
     fun missIncomingOffer(orderId: String, serviceType: String = "") {
+        val bundle = incomingOfferBundle.value
+        if (bundle != null && bundle.orders.any { it.id == orderId }) {
+            missIncomingOfferBundle(bundle)
+            return
+        }
         val sType = serviceType.ifEmpty { incomingOffer.value?.serviceType ?: OrderStepConstants.SERVICE_FOOD }
         riderRepository.missOffer(orderId, sType, prefsRepository)
     }
 
     // ADVANCE STEP
-    fun advanceCurrentOrderStep(finalReceiptTotal: Double? = null) {
-        val order = currentActiveOrder.value ?: return
+    fun advanceCurrentOrderStep(finalReceiptTotal: Double? = null, targetOrderId: String? = null) {
+        val targetId = targetOrderId ?: currentRouteStop.value?.orderId ?: currentActiveOrder.value?.id ?: return
+        val order = activeOrders.value.firstOrNull { it.id == targetId } ?: currentActiveOrder.value ?: return
         triggerVibration()
         val step = order.riderStep.lowercase()
         val isFinal = when (order.serviceType.lowercase()) {
@@ -780,19 +966,14 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
     fun getServiceAcceptanceBreakdown(period: String): List<ServiceRateItem> {
         val logs = getFilteredOfferLogs(period)
-        val services = listOf(
-            "food" to "Food",
-            "convenience" to "Convenience",
-            "parcel" to "Parcel",
-            "pabili" to "Pabili",
-            "request_rider" to "Request a Rider",
-            "taxi" to "Taxi"
-        )
+        val services = OrderStepConstants.SERVICE_DEFINITIONS.map {
+            it.key to it.displayName
+        }
         return services.map { (key, displayName) ->
             val svcLogs = logs.filter {
                 val st = it.serviceType.lowercase().trim()
                 when (key) {
-                    "convenience" -> st == "convenience" || st == "instant"
+                    "convenience" -> st == "convenience" || st == "mart" || st == "instant"
                     "request_rider" -> st == "request_rider" || st == "request"
                     else -> st == key
                 }
@@ -826,19 +1007,14 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
     fun getServiceCancellationBreakdown(period: String): List<ServiceRateItem> {
         val logs = getFilteredOfferLogs(period)
-        val services = listOf(
-            "food" to "Food",
-            "convenience" to "Convenience",
-            "parcel" to "Parcel",
-            "pabili" to "Pabili",
-            "request_rider" to "Request a Rider",
-            "taxi" to "Taxi"
-        )
+        val services = OrderStepConstants.SERVICE_DEFINITIONS.map {
+            it.key to it.displayName
+        }
         return services.map { (key, displayName) ->
             val svcLogs = logs.filter {
                 val st = it.serviceType.lowercase().trim()
                 when (key) {
-                    "convenience" -> st == "convenience" || st == "instant"
+                    "convenience" -> st == "convenience" || st == "mart" || st == "instant"
                     "request_rider" -> st == "request_rider" || st == "request"
                     else -> st == key
                 }
