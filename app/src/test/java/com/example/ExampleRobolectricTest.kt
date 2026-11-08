@@ -1688,7 +1688,251 @@ class ExampleRobolectricTest {
             OrderStepConstants.getServiceLockReason(isPlatformOn = true, isCityOn = true, isAllowed = true, cityName = "Puerto Princesa")
         )
     }
+
+    @Test
+    fun `verify scheduled order ignoring before release time and release after release time`() {
+        val now = 1700000000000L
+        val leadMinutes = 15.0 // release lead: 15 minutes = 900,000 ms
+        val scheduledTime = now + 1800000L // 30 minutes in the future
+        val releaseTime = scheduledTime - (leadMinutes * 60 * 1000).toLong() // 15 minutes in the future
+
+        // 1. Order scheduled 30m in future, lead 15m -> releaseTime is 15m in future.
+        // At 'now', now < releaseTime -> MUST be ignored
+        val futureOrder = Order(
+            id = "sched_1",
+            isScheduled = true,
+            scheduledFor = scheduledTime,
+            scheduledDateText = "3:30 PM",
+            status = OrderStepConstants.STATUS_PREPARING
+        )
+        assertEquals(scheduledTime, futureOrder.scheduledForMillis)
+        assertEquals(releaseTime, futureOrder.getReleaseTimeMillis(leadMinutes))
+        assertTrue(futureOrder.isFutureScheduled(leadMinutes, now))
+
+        // 2. At releaseTime - 1ms, still ignored
+        assertTrue(futureOrder.isFutureScheduled(leadMinutes, releaseTime - 1L))
+
+        // 3. At releaseTime, no longer ignored (released for dispatch & offers)
+        assertFalse(futureOrder.isFutureScheduled(leadMinutes, releaseTime))
+
+        // 4. Past release time (e.g. 20m from now), no longer ignored
+        assertFalse(futureOrder.isFutureScheduled(leadMinutes, releaseTime + 300000L))
+
+        // 5. Default lead minutes (0.0): release time equals scheduled time
+        val defaultLeadReleaseTime = futureOrder.getReleaseTimeMillis(0.0)
+        assertEquals(scheduledTime, defaultLeadReleaseTime)
+        assertTrue(futureOrder.isFutureScheduled(0.0, scheduledTime - 1L))
+        assertFalse(futureOrder.isFutureScheduled(0.0, scheduledTime))
+
+        // 6. Non-scheduled order is never future-ignored
+        val regularOrder = Order(
+            id = "reg_1",
+            isScheduled = false,
+            scheduledFor = scheduledTime
+        )
+        assertFalse(regularOrder.isFutureScheduled(leadMinutes, now))
+    }
+
+    @Test
+    fun `verify scheduled order hold timers start only at release time`() {
+        val dispatch = com.example.data.constants.DispatchSettings(holdMinutes = 5.0)
+        val now = 1700000000000L
+        val leadMinutes = 15.0
+        val scheduledTime = now + 1800000L // 30 mins in future
+        val releaseTime = scheduledTime - (leadMinutes * 60 * 1000).toLong() // 15 mins in future
+
+        val scheduledSaver = Order(
+            id = "sched_saver",
+            serviceType = "food",
+            isPoolable = true,
+            isScheduled = true,
+            scheduledFor = scheduledTime,
+            badge = "Saver",
+            status = OrderStepConstants.STATUS_READY,
+            holdMinutes = 5.0,
+            acceptedAtMillis = releaseTime,
+            holdUntilMillis = releaseTime + 300000L
+        )
+
+        // Before release time, hold timer has not started
+        assertFalse(com.example.data.constants.BatchConstants.isHolding(scheduledSaver, dispatch, now))
+
+        // Exactly at release time, hold timer starts and is holding
+        assertTrue(com.example.data.constants.BatchConstants.isHolding(scheduledSaver, dispatch, releaseTime))
+
+        // 2 minutes after release time, still holding
+        assertTrue(com.example.data.constants.BatchConstants.isHolding(scheduledSaver, dispatch, releaseTime + 120000L))
+
+        // After hold ends (5 minutes after release time), hold ends
+        assertFalse(com.example.data.constants.BatchConstants.isHolding(scheduledSaver, dispatch, releaseTime + 300000L))
+
+        // Priority scheduled order never holds
+        val scheduledPriority = scheduledSaver.copy(badge = "Priority", isPriority = true)
+        assertFalse(com.example.data.constants.BatchConstants.isHolding(scheduledPriority, dispatch, releaseTime))
+    }
+
+    @Test
+    fun `verify service types match firestore rules`() {
+        val allowedInFirestoreRules = setOf("food", "convenience", "parcel", "pabili", "taxi", "request_rider")
+
+        // 1. All service definition keys must be valid in firestore rules
+        OrderStepConstants.SERVICE_DEFINITIONS.forEach { def ->
+            assertTrue(
+                "Service key ${def.key} must be valid in Firestore rules",
+                allowedInFirestoreRules.contains(def.key)
+            )
+        }
+
+        // 2. Rider allowedServices default must be valid in firestore rules
+        val defaultRider = com.example.data.models.Rider()
+        defaultRider.allowedServices.forEach { svc ->
+            assertTrue(
+                "Rider allowed service $svc must be valid in Firestore rules",
+                allowedInFirestoreRules.contains(svc)
+            )
+        }
+    }
+
+    @Test
+    fun `verify driver shift duration and days`() {
+        val shift = com.example.data.models.DriverShift(
+            dayOfWeek = 1,
+            startTime = "08:00",
+            endTime = "17:00",
+            reminder15MinBefore = true,
+            isEnabled = true
+        )
+        assertEquals("Monday", shift.dayName)
+        assertEquals("Mon", shift.dayShortName)
+        assertEquals(9.0, shift.durationHours, 0.01)
+        assertTrue(shift.reminder15MinBefore)
+    }
+
+    @Test
+    fun `verify demand heat map 500m grid cell calculation for orders within 60 mins`() {
+        val now = 1700000000000L
+        val fortyMinsAgo = now - 40 * 60 * 1000L
+        val twoHoursAgo = now - 120 * 60 * 1000L
+
+        // Order 1 & Order 2 in Puerto Princesa town center (~9.7392, 118.7353)
+        val order1 = Order(
+            id = "ord1",
+            status = OrderStepConstants.STATUS_READY,
+            merchantLat = 9.7392,
+            merchantLng = 118.7353
+        )
+        val order2 = Order(
+            id = "ord2",
+            status = OrderStepConstants.STATUS_PREPARING,
+            merchantLat = 9.7393,
+            merchantLng = 118.7354
+        )
+        // Order 3 delivered 40 mins ago (within 60m window) at same grid area
+        val order3 = Order(
+            id = "ord3",
+            status = OrderStepConstants.STATUS_DELIVERED,
+            deliveredAt = com.google.firebase.Timestamp(java.util.Date(fortyMinsAgo)),
+            merchantLat = 9.7391,
+            merchantLng = 118.7352
+        )
+        // Order 4 delivered 2 hours ago (outside 60m window)
+        val order4 = Order(
+            id = "ord4",
+            status = OrderStepConstants.STATUS_DELIVERED,
+            deliveredAt = com.google.firebase.Timestamp(java.util.Date(twoHoursAgo)),
+            merchantLat = 9.7392,
+            merchantLng = 118.7353
+        )
+
+        val grid = com.example.data.models.BusyHeatMapCalculator.computeGridCells(
+            listOf(order1, order2, order3, order4),
+            nowMillis = now
+        )
+
+        assertEquals(1, grid.size)
+        assertEquals(3, grid[0].orderCount) // 3 orders within 60 mins, order 4 excluded
+        assertTrue(grid[0].centerLat in 9.73..9.75)
+        assertTrue(grid[0].centerLng in 118.73..118.75)
+    }
+
+    @Test
+    fun `verify document expiry reminders at 30, 14, 7 days and expired`() {
+        val now = 1700000000000L
+        val oneDayMs = 24 * 60 * 60 * 1000L
+
+        // 1. Expired (2 days ago)
+        val expiredDoc = com.example.data.models.RiderDocument(
+            type = "license",
+            expiresAt = now - 2 * oneDayMs
+        )
+        val expiredAlert = expiredDoc.getExpiryAlert(now)
+        assertTrue(expiredAlert != null)
+        assertEquals(com.example.data.models.DocumentAlertLevel.EXPIRED, expiredAlert!!.status)
+        assertTrue(expiredAlert.title.contains("Expired"))
+
+        // 2. 7 days before
+        val sevenDaysDoc = com.example.data.models.RiderDocument(
+            type = "registration",
+            expiresAt = now + 5 * oneDayMs
+        )
+        val sevenDaysAlert = sevenDaysDoc.getExpiryAlert(now)
+        assertTrue(sevenDaysAlert != null)
+        assertEquals(com.example.data.models.DocumentAlertLevel.WARNING_7_DAYS, sevenDaysAlert!!.status)
+        assertTrue(sevenDaysAlert.title.contains("Vehicle Registration"))
+
+        // 3. 14 days before
+        val fourteenDaysDoc = com.example.data.models.RiderDocument(
+            type = "insurance",
+            expiresAt = now + 12 * oneDayMs
+        )
+        val fourteenDaysAlert = fourteenDaysDoc.getExpiryAlert(now)
+        assertTrue(fourteenDaysAlert != null)
+        assertEquals(com.example.data.models.DocumentAlertLevel.NOTICE_14_DAYS, fourteenDaysAlert!!.status)
+        assertTrue(fourteenDaysAlert.title.contains("Vehicle Insurance"))
+
+        // 4. 30 days before
+        val thirtyDaysDoc = com.example.data.models.RiderDocument(
+            type = "license",
+            expiresAt = now + 25 * oneDayMs
+        )
+        val thirtyDaysAlert = thirtyDaysDoc.getExpiryAlert(now)
+        assertTrue(thirtyDaysAlert != null)
+        assertEquals(com.example.data.models.DocumentAlertLevel.REMINDER_30_DAYS, thirtyDaysAlert!!.status)
+
+        // 5. 60 days before (no alert)
+        val sixtyDaysDoc = com.example.data.models.RiderDocument(
+            type = "license",
+            expiresAt = now + 60 * oneDayMs
+        )
+        assertNull(sixtyDaysDoc.getExpiryAlert(now))
+    }
+
+    @Test
+    fun `verify inbox hides items whose sendAt is in the future`() {
+        val now = 1700000000000L
+        val pastMessage = com.example.data.models.MessageNotification(
+            id = "msg1",
+            title = "Welcome",
+            body = "Hello",
+            sendAt = now - 3600000L
+        )
+        val futureMessage = com.example.data.models.MessageNotification(
+            id = "msg2",
+            title = "Future Announcement",
+            body = "Coming soon",
+            sendAt = now + 7200000L // 2 hours in future
+        )
+
+        assertFalse(pastMessage.isFuture(now))
+        assertTrue(futureMessage.isFuture(now))
+
+        val list = listOf(pastMessage, futureMessage)
+        val visibleList = list.filter { !it.isFuture(now) }
+        assertEquals(1, visibleList.size)
+        assertEquals("msg1", visibleList[0].id)
+    }
 }
+
 
 
 

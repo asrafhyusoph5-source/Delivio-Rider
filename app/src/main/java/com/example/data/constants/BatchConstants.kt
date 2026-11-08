@@ -120,11 +120,27 @@ object BatchConstants {
         }
         if (effectiveHoldMinutes <= 0.0) return false
 
-        // holdUntil = acceptedAt + holdMinutes
+        // For scheduled orders, hold timer starts only at the release time
+        val baseStartTime = if (order.isScheduled) {
+            if (order.acceptedAtMillis > 0L) {
+                order.acceptedAtMillis
+            } else {
+                order.getReleaseTimeMillis()
+            }
+        } else {
+            order.acceptedAtMillis
+        }
+
+        // Before release time, hold timer has not started yet
+        if (order.isScheduled && baseStartTime > 0L && nowMillis < baseStartTime) {
+            return false
+        }
+
+        // holdUntil = baseStartTime + holdMinutes
         val effectiveHoldUntil = if (order.holdUntilMillis > 0L) {
             order.holdUntilMillis
-        } else if (order.acceptedAtMillis > 0L && effectiveHoldMinutes > 0.0) {
-            order.acceptedAtMillis + (effectiveHoldMinutes * 60 * 1000).toLong()
+        } else if (baseStartTime > 0L && effectiveHoldMinutes > 0.0) {
+            baseStartTime + (effectiveHoldMinutes * 60 * 1000).toLong()
         } else {
             0L
         }

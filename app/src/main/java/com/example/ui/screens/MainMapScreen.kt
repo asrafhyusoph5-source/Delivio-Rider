@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -83,6 +84,9 @@ fun MainMapScreen(
     val hasUnreadAdminMessage by viewModel.hasUnreadAdminMessage.collectAsState()
     val hasOrderAtMerchant by viewModel.hasOrderAtMerchant.collectAsState()
     val adminMessageBanner by viewModel.adminMessageBanner.collectAsState()
+    val isBusyAreasVisible by viewModel.isBusyAreasOverlayVisible.collectAsState()
+    val busyGridCells by viewModel.busyGridCells.collectAsState()
+    val documentExpiryAlerts by viewModel.documentExpiryAlerts.collectAsState()
     var showHeadsetMenuDialog by remember { mutableStateOf(false) }
 
     val riderLat = liveLoc?.first ?: 9.7392
@@ -180,6 +184,8 @@ fun MainMapScreen(
                 recenterTrigger = recenterTrigger,
                 sheetHeightFraction = sheetHeightFraction,
                 isSatelliteLayer = isSatelliteLayer,
+                showBusyAreas = isBusyAreasVisible,
+                busyGridCells = busyGridCells,
                 onRouteCalculated = { result ->
                     routeResult = result
                     routeDistanceKm = result.currentLegDistanceKm
@@ -432,13 +438,46 @@ fun MainMapScreen(
                 }
             }
 
-            // 3. Floating Map Layer Toggle (satellite/streets)
+            // 3. Floating Map Controls: Busy areas toggle & satellite/streets layer toggle
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(end = 16.dp, bottom = animatedSheetHeight + (if (currentStop != null) 68.dp else 16.dp)),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalAlignment = Alignment.End
             ) {
+                // Demand Heat Map Toggle ("Busy areas")
+                Card(
+                    shape = RoundedCornerShape(20.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (isBusyAreasVisible) DelivioYellow else MaterialTheme.colorScheme.surface
+                    ),
+                    border = BorderStroke(1.5.dp, if (isBusyAreasVisible) DelivioYellowDark else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
+                    modifier = Modifier
+                        .clickable { viewModel.toggleBusyAreasOverlay() }
+                        .testTag("busy_areas_toggle")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Whatshot,
+                            contentDescription = "Busy areas",
+                            tint = if (isBusyAreasVisible) Color(0xFFC62828) else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = if (isBusyAreasVisible) "Busy areas (${busyGridCells.size})" else "Busy areas",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp,
+                            color = if (isBusyAreasVisible) TextOnYellow else MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+
                 CircularFloatingButton(
                     icon = Icons.Default.Layers,
                     contentDescription = "Toggle Map Layers",
@@ -619,6 +658,18 @@ fun MainMapScreen(
                         .align(Alignment.TopCenter)
                         .windowInsetsPadding(WindowInsets.statusBars)
                         .padding(top = 70.dp, start = 16.dp, end = 16.dp)
+                )
+            }
+
+            // Document Expiry Reminder Banner (30, 14, 7 days before and Expired after)
+            documentExpiryAlerts.firstOrNull()?.let { alert ->
+                DocumentExpiryBanner(
+                    alert = alert,
+                    onDismiss = { viewModel.dismissDocumentAlert(alert.document.type) },
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .windowInsetsPadding(WindowInsets.statusBars)
+                        .padding(top = if (lateTipBanner != null) 140.dp else 70.dp, start = 16.dp, end = 16.dp)
                 )
             }
 
@@ -840,7 +891,7 @@ private fun getManeuverIcon(maneuver: OsrmManeuver?): ImageVector {
     val modifier = maneuver.modifier.lowercase()
     val type = maneuver.type.lowercase()
     return when {
-        modifier.contains("u-turn") || modifier.contains("uturn") -> Icons.Default.Undo
+        modifier.contains("u-turn") || modifier.contains("uturn") -> Icons.AutoMirrored.Filled.Undo
         modifier.contains("sharp right") || modifier.contains("right") -> Icons.Default.TurnRight
         modifier.contains("sharp left") || modifier.contains("left") -> Icons.Default.TurnLeft
         modifier.contains("slight right") -> Icons.Default.TurnSlightRight

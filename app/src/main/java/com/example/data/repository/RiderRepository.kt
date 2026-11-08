@@ -81,6 +81,9 @@ class RiderRepository {
     private val _platformServices = MutableStateFlow<Map<String, Boolean>>(emptyMap())
     val platformServices: StateFlow<Map<String, Boolean>> = _platformServices.asStateFlow()
 
+    private val _scheduledReleaseLeadMinutes = MutableStateFlow(0.0)
+    val scheduledReleaseLeadMinutes: StateFlow<Double> = _scheduledReleaseLeadMinutes.asStateFlow()
+
     private val _cityServices = MutableStateFlow<Map<String, Boolean>>(emptyMap())
     val cityServices: StateFlow<Map<String, Boolean>> = _cityServices.asStateFlow()
 
@@ -92,6 +95,9 @@ class RiderRepository {
 
     private val _releasedOrderIds = MutableStateFlow<Set<String>>(emptySet())
     val releasedOrderIds: StateFlow<Set<String>> = _releasedOrderIds.asStateFlow()
+
+    private val _candidateOrders = MutableStateFlow<List<Order>>(emptyList())
+    val candidateOrders: StateFlow<List<Order>> = _candidateOrders.asStateFlow()
 
     private val _customerReviews = MutableStateFlow<List<CustomerReview>>(emptyList())
     val customerReviews: StateFlow<List<CustomerReview>> = _customerReviews.asStateFlow()
@@ -406,6 +412,17 @@ class RiderRepository {
 
                 val linkedCustomerUid = snapshot.getString("linkedCustomerUid")?.trim()?.takeIf { it.isNotEmpty() }
 
+                val docsRaw = snapshot.get("documents")
+                val docsList = when (docsRaw) {
+                    is List<*> -> docsRaw.mapNotNull { item ->
+                        val m = item as? Map<*, *> ?: return@mapNotNull null
+                        val type = m["type"]?.toString()?.trim() ?: ""
+                        val exp = m["expiresAt"]
+                        if (type.isNotBlank()) RiderDocument(type = type, expiresAt = exp) else null
+                    }
+                    else -> emptyList()
+                }
+
                 val r = Rider(
                     uid = uid,
                     riderCode = snapshot.getString("riderCode") ?: snapshot.getString("code") ?: ("RD-" + uid.takeLast(4).uppercase()),
@@ -428,7 +445,8 @@ class RiderRepository {
                     totalTrips = snapshot.getLong("totalTrips")?.toInt() ?: 0,
                     emergencyContactName = snapshot.getString("emergencyContactName") ?: "",
                     emergencyContactPhone = snapshot.getString("emergencyContactPhone") ?: "",
-                    priorityRider = snapshot.getBoolean("priorityRider") ?: false
+                    priorityRider = snapshot.getBoolean("priorityRider") ?: false,
+                    documents = docsList
                 )
                 _rider.value = r
                 _coins.value = r.coins
@@ -481,18 +499,18 @@ class RiderRepository {
                 RiderLocationTracker.setActiveOrderIds(activeIds)
             }
 
-        // 3. Listen to incoming offers: riderId == null and status in ["Placed Order", "Preparing", "Ready", "preparing", "ready"]
+        // 3. Listen to incoming offers: riderId == null and status in ["Placed Order", "Preparing", "Ready"]
         offersListener = db.collection("orders")
             .whereEqualTo("riderId", null)
             .whereIn("status", listOf(
                 OrderStepConstants.STATUS_PLACED_ORDER,
                 OrderStepConstants.STATUS_PREPARING,
-                OrderStepConstants.STATUS_READY,
-                "preparing",
-                "ready"
+                OrderStepConstants.STATUS_READY
             ))
             .addSnapshotListener { snapshots, error ->
                 if (error != null || snapshots == null) return@addSnapshotListener
+                val rawCandidates = snapshots.documents.mapNotNull { parseOrder(it) }
+                _candidateOrders.value = rawCandidates
                 val currentRider = _rider.value
                 val activeList = _activeOrders.value
                 val riderLoc = RiderLocationTracker.currentLocation.value
@@ -587,6 +605,10 @@ class RiderRepository {
 
                     // Never offer orders where fulfillment == "pickup" (filter in code)
                     if (order.isPickup) return@filter false
+
+                    // Ignore any order whose scheduledFor is in the future (after release time: scheduledFor - settings/platform.scheduledReleaseLeadMinutes)
+                    val leadMinutes = _scheduledReleaseLeadMinutes.value
+                    if (order.isFutureScheduled(leadMinutes)) return@filter false
 
                     // Split child orders are strictly single bookings: cannot be added to an active batch
                     val isCandidateSplitChild = order.isSplitChild || order.badge.equals("split", ignoreCase = true)
@@ -864,6 +886,8 @@ class RiderRepository {
             .addSnapshotListener { doc, _ ->
                 if (doc != null && doc.exists()) {
                     _supportPhone.value = doc.getString("supportPhone")
+                    val leadMin = (doc.get("scheduledReleaseLeadMinutes") as? Number)?.toDouble() ?: 0.0
+                    _scheduledReleaseLeadMinutes.value = leadMin
                     val svcs = (doc.get("services") as? Map<*, *>)?.mapNotNull { (k, v) ->
                         val key = k?.toString() ?: return@mapNotNull null
                         val bool = when (v) {
@@ -1025,10 +1049,12 @@ class RiderRepository {
     }
 
     private fun mergeInbox() {
+        val now = System.currentTimeMillis()
         val all = (inboxDirectList + inboxAllList)
             .distinctBy { it.id }
+            .filter { !it.isFuture(now) }
             .map { it.copy(isRead = readMessageIds.contains(it.id)) }
-            .sortedByDescending { it.id } // Newest first
+            .sortedByDescending { it.sendAtMillis.takeIf { t -> t > 0L } ?: it.id.hashCode().toLong() }
         _inboxMessages.value = all
     }
 
@@ -2525,6 +2551,55 @@ class RiderRepository {
                 is Number -> acceptedAtRaw.toLong()
                 else -> System.currentTimeMillis()
             }
+
+            val leadMinutes = _scheduledReleaseLeadMinutes.value
+            val schedMillis = when (scheduledForRaw) {
+                is com.google.firebase.Timestamp -> scheduledForRaw.toDate().time
+                is Date -> scheduledForRaw.time
+                is Number -> {
+                    val num = scheduledForRaw.toLong()
+                    if (num < 1000000000000L) num * 1000L else num
+                }
+                is String -> {
+                    val trimmed = scheduledForRaw.trim()
+                    val num = trimmed.toLongOrNull()
+                    if (num != null) {
+                        if (num < 1000000000000L) num * 1000L else num
+                    } else {
+                        val patterns = listOf(
+                            "yyyy-MM-dd'T'HH:mm:ss",
+                            "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+                            "yyyy-MM-dd HH:mm:ss",
+                            "yyyy-MM-dd",
+                            "MMM d, yyyy h:mm a",
+                            "MMM d, h:mm a"
+                        )
+                        var parsed = 0L
+                        for (pat in patterns) {
+                            try {
+                                val sdf = SimpleDateFormat(pat, Locale.US)
+                                val d = sdf.parse(trimmed)
+                                if (d != null) {
+                                    parsed = d.time
+                                    break
+                                }
+                            } catch (_: Exception) {}
+                        }
+                        parsed
+                    }
+                }
+                else -> 0L
+            }
+            val releaseTimeMillis = if (isScheduled && schedMillis > 0L) {
+                (schedMillis - (leadMinutes * 60 * 1000).toLong()).coerceAtLeast(0L)
+            } else 0L
+
+            val baseHoldStartMillis = if (isScheduled && releaseTimeMillis > 0L) {
+                releaseTimeMillis
+            } else {
+                acceptedAtMillis
+            }
+
             val explicitHoldUntil = doc.get("holdUntil") ?: doc.get("holdUntilMillis")
             val explicitHoldUntilMillis = when (explicitHoldUntil) {
                 is com.google.firebase.Timestamp -> explicitHoldUntil.toDate().time
@@ -2533,8 +2608,8 @@ class RiderRepository {
                 else -> 0L
             }
             val holdUntilMillis = when {
-                explicitHoldUntilMillis > 0L -> explicitHoldUntilMillis
-                holdMinutesOrder > 0.0 && acceptedAtMillis > 0L -> acceptedAtMillis + (holdMinutesOrder * 60 * 1000).toLong()
+                explicitHoldUntilMillis > 0L && !isScheduled -> explicitHoldUntilMillis
+                holdMinutesOrder > 0.0 && baseHoldStartMillis > 0L -> baseHoldStartMillis + (holdMinutesOrder * 60 * 1000).toLong()
                 holdMinutesOrder > 0.0 -> System.currentTimeMillis() + (holdMinutesOrder * 60 * 1000).toLong()
                 else -> 0L
             }
@@ -2636,7 +2711,7 @@ class RiderRepository {
                 isPoolable = isPoolable,
                 maxBatch = maxBatch,
                 holdMinutes = holdMinutesOrder,
-                acceptedAtMillis = acceptedAtMillis,
+                acceptedAtMillis = baseHoldStartMillis,
                 holdUntilMillis = holdUntilMillis,
                 endsWhenReady = endsWhenReadyOrder,
                 specialRadiusExtra = specialExtra,
@@ -2657,17 +2732,36 @@ class RiderRepository {
             val title = doc.getString("title") ?: "Notification"
             val body = doc.getString("body") ?: doc.getString("message") ?: ""
             val category = doc.getString("category") ?: "system"
-            return MessageNotification(
+            val sendAt = doc.get("sendAt") ?: doc.get("createdAt")
+            val msg = MessageNotification(
                 id = doc.id,
                 title = title,
                 body = body,
                 category = category,
                 createdAt = doc.get("createdAt"),
-                timestampText = "Recent"
+                sendAt = sendAt,
+                timestampText = formatInboxTimestamp(sendAt ?: doc.get("createdAt"))
             )
+            // Hide any inbox item whose sendAt is in the future
+            if (msg.isFuture()) {
+                return null
+            }
+            return msg
         } catch (_: Exception) {
             return null
         }
+    }
+
+    private fun formatInboxTimestamp(raw: Any?): String {
+        val ms = when (raw) {
+            is com.google.firebase.Timestamp -> raw.toDate().time
+            is Date -> raw.time
+            is Number -> raw.toLong()
+            else -> 0L
+        }
+        if (ms <= 0L) return "Recent"
+        val sdf = SimpleDateFormat("MMM d, h:mm a", Locale.US)
+        return sdf.format(Date(ms))
     }
 
     private val merchantCache = mutableMapOf<String, Map<String, Any?>>()

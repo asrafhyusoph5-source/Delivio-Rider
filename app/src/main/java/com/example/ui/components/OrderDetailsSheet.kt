@@ -560,6 +560,32 @@ private fun CompactOrderSheetContent(
                                 )
                             }
                         }
+                        if (currentStop.order.isScheduled) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = Color(0xFF1565C0)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Schedule,
+                                        contentDescription = "Scheduled",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(10.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Text(
+                                        text = if (currentStop.order.scheduledDateText.isNotBlank()) "SCHEDULED • ${currentStop.order.scheduledDateText}" else "SCHEDULED",
+                                        color = Color.White,
+                                        fontWeight = FontWeight.Black,
+                                        fontSize = 9.sp
+                                    )
+                                }
+                            }
+                        }
                     }
                     Text(
                         text = currentStop.address,
@@ -792,6 +818,32 @@ private fun TimelineStopCard(
                             NoCashCollectedChip(isLarge = false)
                         }
                     }
+                    if (stop.order.isScheduled) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = Color(0xFF1565C0)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Schedule,
+                                    contentDescription = "Scheduled",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(10.dp)
+                                )
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Text(
+                                    text = if (stop.order.scheduledDateText.isNotBlank()) "SCHEDULED • ${stop.order.scheduledDateText}" else "SCHEDULED",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Black,
+                                    fontSize = 9.sp
+                                )
+                            }
+                        }
+                    }
                 }
 
                 // Status chip: Done, Current, Next
@@ -835,6 +887,11 @@ private fun TimelineStopCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
+            if (stop.order.isScheduled) {
+                Spacer(modifier = Modifier.height(4.dp))
+                ScheduledOrderChip(order = stop.order, isLarge = false)
+            }
+
             // Items & selections list
             if (stop.items.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(8.dp))
@@ -856,7 +913,7 @@ private fun TimelineStopCard(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
-                                Icons.Default.AltRoute,
+                                Icons.AutoMirrored.Filled.AltRoute,
                                 contentDescription = null,
                                 tint = Color(0xFF7B1FA2),
                                 modifier = Modifier.size(15.dp)
@@ -1201,7 +1258,7 @@ private fun ItemChecklistDialog(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
-                                Icons.Default.AltRoute,
+                                Icons.AutoMirrored.Filled.AltRoute,
                                 contentDescription = null,
                                 tint = Color(0xFF7B1FA2),
                                 modifier = Modifier.size(15.dp)

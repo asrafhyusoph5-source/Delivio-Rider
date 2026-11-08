@@ -25,14 +25,69 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
     val prefsRepository = UserPreferencesRepository(application.applicationContext)
     val riderRepository = RiderRepository()
-    private val auth: FirebaseAuth by lazy { FirebaseAuth.getInstance() }
-    private val db: FirebaseFirestore by lazy { FirebaseFirestore.getInstance() }
+    private val auth: FirebaseAuth by lazy {
+        try {
+            FirebaseAuth.getInstance()
+        } catch (_: Throwable) {
+            com.example.DelivioApplication.ensureFirebase(application)
+            FirebaseAuth.getInstance()
+        }
+    }
+    private val db: FirebaseFirestore by lazy {
+        try {
+            FirebaseFirestore.getInstance()
+        } catch (_: Throwable) {
+            com.example.DelivioApplication.ensureFirebase(application)
+            FirebaseFirestore.getInstance()
+        }
+    }
 
     // Theme & preferences
     val isDarkMode = prefsRepository.isDarkMode
     val soundEnabled = prefsRepository.soundEnabled
     val vibrationEnabled = prefsRepository.vibrationEnabled
     val currencySymbol = prefsRepository.currencySymbol
+
+    // Shift Schedule (Personal Planner)
+    val shifts = prefsRepository.shifts
+
+    fun addShift(shift: DriverShift) = prefsRepository.addShift(shift)
+    fun updateShift(shift: DriverShift) = prefsRepository.updateShift(shift)
+    fun deleteShift(shiftId: String) = prefsRepository.deleteShift(shiftId)
+    fun toggleShift(shiftId: String, enabled: Boolean) = prefsRepository.toggleShift(shiftId, enabled)
+    fun toggleShiftReminder(shiftId: String, reminderEnabled: Boolean) = prefsRepository.toggleShiftReminder(shiftId, reminderEnabled)
+    fun applyShiftPreset(presetType: String) = prefsRepository.applyPreset(presetType)
+
+    // Demand Heat Map ("Busy areas")
+    private val _isBusyAreasOverlayVisible = MutableStateFlow(false)
+    val isBusyAreasOverlayVisible: StateFlow<Boolean> = _isBusyAreasOverlayVisible.asStateFlow()
+
+    fun toggleBusyAreasOverlay() {
+        _isBusyAreasOverlayVisible.value = !_isBusyAreasOverlayVisible.value
+    }
+
+    val busyGridCells: StateFlow<List<BusyGridCell>> = combine(
+        riderRepository.candidateOrders,
+        riderRepository.activeOrders,
+        riderRepository.deliveredOrders
+    ) { candidates, active, delivered ->
+        val allReadable = (candidates + active + delivered).distinctBy { it.id }
+        BusyHeatMapCalculator.computeGridCells(allReadable)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Document-expiry reminders (license, registration, insurance)
+    private val _dismissedDocumentAlertTypes = MutableStateFlow<Set<String>>(emptySet())
+
+    val documentExpiryAlerts: StateFlow<List<DocumentExpiryAlert>> = combine(
+        riderRepository.rider,
+        _dismissedDocumentAlertTypes
+    ) { currentRider, dismissed ->
+        currentRider?.documentExpiryAlerts?.filter { it.document.type.lowercase().trim() !in dismissed } ?: emptyList()
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    fun dismissDocumentAlert(type: String) {
+        _dismissedDocumentAlertTypes.value = _dismissedDocumentAlertTypes.value + type.lowercase().trim()
+    }
 
     // Live state from repository
     val rider = riderRepository.rider
@@ -94,7 +149,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     // Auth & Application State
-    private val _isLoggedIn = MutableStateFlow(auth.currentUser != null)
+    private val _isLoggedIn = MutableStateFlow(try { auth.currentUser != null } catch (_: Throwable) { false })
     val isLoggedIn: StateFlow<Boolean> = _isLoggedIn.asStateFlow()
 
     private val _applicationState = MutableStateFlow<RiderApplication?>(null)
@@ -422,16 +477,22 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     val activeCall: StateFlow<ActiveCallInfo?> = _activeCall.asStateFlow()
 
     init {
-        auth.currentUser?.let { user ->
-            checkUserRoleAndListen(user.uid)
+        try {
+            auth.currentUser?.let { user ->
+                checkUserRoleAndListen(user.uid)
+            }
+        } catch (_: Throwable) {
+            _isLoggedIn.value = false
         }
         viewModelScope.launch {
-            riderRepository.listenerError.collect { err ->
-                err?.let {
-                    showSnackbar(it)
-                    riderRepository.clearListenerError()
+            try {
+                riderRepository.listenerError.collect { err ->
+                    err?.let {
+                        showSnackbar(it)
+                        riderRepository.clearListenerError()
+                    }
                 }
-            }
+            } catch (_: Throwable) {}
         }
     }
 

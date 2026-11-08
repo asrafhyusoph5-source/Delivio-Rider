@@ -6,6 +6,7 @@ import java.util.Locale
 import java.util.Date
 import java.text.SimpleDateFormat
 import java.util.Calendar
+import java.util.UUID
 
 data class User(
     val id: String = "",
@@ -46,10 +47,248 @@ data class Rider(
     val totalTrips: Int = 0,
     val emergencyContactName: String = "",
     val emergencyContactPhone: String = "",
-    val priorityRider: Boolean = false
+    val priorityRider: Boolean = false,
+    val documents: List<RiderDocument> = emptyList()
 ) {
     val user: User
         get() = User(id = uid, name = name, email = email, phone = phone, role = "rider", avatarUrl = photoUrl)
+
+    val documentExpiryAlerts: List<DocumentExpiryAlert>
+        get() = documents.mapNotNull { it.getExpiryAlert() }.sortedBy { it.daysDiff }
+}
+
+enum class DocumentAlertLevel {
+    EXPIRED,
+    WARNING_7_DAYS,
+    NOTICE_14_DAYS,
+    REMINDER_30_DAYS
+}
+
+data class DocumentExpiryAlert(
+    val document: RiderDocument,
+    val status: DocumentAlertLevel,
+    val title: String,
+    val message: String,
+    val daysDiff: Int
+)
+
+data class RiderDocument(
+    val type: String = "", // "license", "registration", "insurance"
+    val expiresAt: Any? = null
+) {
+    val expiresAtMillis: Long
+        get() = when (expiresAt) {
+            is com.google.firebase.Timestamp -> expiresAt.toDate().time
+            is Date -> expiresAt.time
+            is Number -> {
+                val num = expiresAt.toLong()
+                if (num < 1000000000000L) num * 1000L else num
+            }
+            is String -> {
+                val trimmed = expiresAt.trim()
+                val num = trimmed.toLongOrNull()
+                if (num != null) {
+                    if (num < 1000000000000L) num * 1000L else num
+                } else {
+                    val patterns = listOf(
+                        "yyyy-MM-dd'T'HH:mm:ss",
+                        "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+                        "yyyy-MM-dd HH:mm:ss",
+                        "yyyy-MM-dd",
+                        "MM/dd/yyyy",
+                        "MMM d, yyyy"
+                    )
+                    var parsed = 0L
+                    for (pat in patterns) {
+                        try {
+                            val sdf = SimpleDateFormat(pat, Locale.US)
+                            val d = sdf.parse(trimmed)
+                            if (d != null) {
+                                parsed = d.time
+                                break
+                            }
+                        } catch (_: Exception) {}
+                    }
+                    parsed
+                }
+            }
+            else -> 0L
+        }
+
+    val typeDisplayName: String
+        get() = when (type.lowercase().trim()) {
+            "license" -> "Driver's License"
+            "registration" -> "Vehicle Registration"
+            "insurance" -> "Vehicle Insurance"
+            else -> type.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.US) else it.toString() }
+        }
+
+    val formattedExpiryDate: String
+        get() {
+            val ms = expiresAtMillis
+            if (ms <= 0L) return "Not set"
+            val sdf = SimpleDateFormat("MMM d, yyyy", Locale.US)
+            return sdf.format(Date(ms))
+        }
+
+    fun getExpiryAlert(nowMillis: Long = System.currentTimeMillis()): DocumentExpiryAlert? {
+        val ms = expiresAtMillis
+        if (ms <= 0L) return null
+        val diffMs = ms - nowMillis
+        val days = Math.ceil(diffMs.toDouble() / (1000.0 * 60 * 60 * 24)).toInt()
+        return when {
+            days < 0 || diffMs <= 0 -> DocumentExpiryAlert(
+                document = this,
+                status = DocumentAlertLevel.EXPIRED,
+                title = "Expired: $typeDisplayName",
+                message = "Your $typeDisplayName has expired. Please update it immediately.",
+                daysDiff = days
+            )
+            days <= 7 -> DocumentExpiryAlert(
+                document = this,
+                status = DocumentAlertLevel.WARNING_7_DAYS,
+                title = "Expires in $days day${if (days == 1) "" else "s"}: $typeDisplayName",
+                message = "Your $typeDisplayName expires on $formattedExpiryDate. Please renew soon.",
+                daysDiff = days
+            )
+            days <= 14 -> DocumentExpiryAlert(
+                document = this,
+                status = DocumentAlertLevel.NOTICE_14_DAYS,
+                title = "Expires in $days days: $typeDisplayName",
+                message = "Your $typeDisplayName expires on $formattedExpiryDate.",
+                daysDiff = days
+            )
+            days <= 30 -> DocumentExpiryAlert(
+                document = this,
+                status = DocumentAlertLevel.REMINDER_30_DAYS,
+                title = "Renewal reminder: $typeDisplayName",
+                message = "Your $typeDisplayName expires in $days days on $formattedExpiryDate.",
+                daysDiff = days
+            )
+            else -> null
+        }
+    }
+}
+
+data class DriverShift(
+    val id: String = UUID.randomUUID().toString(),
+    val dayOfWeek: Int = 1, // 1 = Mon, 2 = Tue, 3 = Wed, 4 = Thu, 5 = Fri, 6 = Sat, 7 = Sun
+    val startTime: String = "08:00", // "HH:mm"
+    val endTime: String = "17:00",   // "HH:mm"
+    val reminder15MinBefore: Boolean = true,
+    val isEnabled: Boolean = true
+) {
+    val dayName: String
+        get() = when (dayOfWeek) {
+            1 -> "Monday"
+            2 -> "Tuesday"
+            3 -> "Wednesday"
+            4 -> "Thursday"
+            5 -> "Friday"
+            6 -> "Saturday"
+            7 -> "Sunday"
+            else -> "Day $dayOfWeek"
+        }
+
+    val dayShortName: String
+        get() = when (dayOfWeek) {
+            1 -> "Mon"
+            2 -> "Tue"
+            3 -> "Wed"
+            4 -> "Thu"
+            5 -> "Fri"
+            6 -> "Sat"
+            7 -> "Sun"
+            else -> "D$dayOfWeek"
+        }
+
+    val durationHours: Double
+        get() {
+            try {
+                val startParts = startTime.split(":").map { it.toInt() }
+                val endParts = endTime.split(":").map { it.toInt() }
+                val startMins = startParts[0] * 60 + startParts.getOrElse(1) { 0 }
+                val endMins = endParts[0] * 60 + endParts.getOrElse(1) { 0 }
+                val diff = if (endMins >= startMins) endMins - startMins else (24 * 60 - startMins + endMins)
+                return diff / 60.0
+            } catch (_: Exception) {
+                return 0.0
+            }
+        }
+}
+
+data class BusyGridCell(
+    val id: String,
+    val centerLat: Double,
+    val centerLng: Double,
+    val orderCount: Int,
+    val minLat: Double,
+    val maxLat: Double,
+    val minLng: Double,
+    val maxLng: Double
+)
+
+object BusyHeatMapCalculator {
+    // 500 meters in latitude ≈ 0.0045 degrees
+    const val LAT_GRID_STEP = 0.0045
+
+    fun computeGridCells(orders: List<Order>, nowMillis: Long = System.currentTimeMillis()): List<BusyGridCell> {
+        val windowMs = 60 * 60 * 1000L
+        val minTime = nowMillis - windowMs
+
+        // Filter recent orders from last 60 minutes
+        val recentOrders = orders.filter { order ->
+            val s = order.status.trim().lowercase()
+            val isCurrentActive = s != "cancelled" && s != "canceled" && s != "rejected" && s != "delivered"
+            if (isCurrentActive) {
+                true
+            } else {
+                // For delivered / completed orders, check if delivered within last 60 minutes
+                val dTime = when (val del = order.deliveredAt) {
+                    is com.google.firebase.Timestamp -> del.toDate().time
+                    is Date -> del.time
+                    is Number -> del.toLong()
+                    else -> 0L
+                }
+                dTime >= minTime
+            }
+        }
+
+        // Group orders by ~500m grid cell
+        val cellOrderMap = mutableMapOf<String, MutableList<Order>>()
+        for (order in recentOrders) {
+            val lat = if (order.merchantLat != 0.0) order.merchantLat else order.customerLat
+            val lng = if (order.merchantLng != 0.0) order.merchantLng else order.customerLng
+            if (lat == 0.0 || lng == 0.0) continue
+
+            val lngGridStep = LAT_GRID_STEP / Math.cos(Math.toRadians(lat)).coerceAtLeast(0.1)
+            val gridLat = Math.round(lat / LAT_GRID_STEP) * LAT_GRID_STEP
+            val gridLng = Math.round(lng / lngGridStep) * lngGridStep
+
+            val cellKey = "${String.format(Locale.US, "%.4f", gridLat)}_${String.format(Locale.US, "%.4f", gridLng)}"
+            cellOrderMap.getOrPut(cellKey) { mutableListOf() }.add(order)
+        }
+
+        return cellOrderMap.map { (key, cellOrders) ->
+            val firstOrder = cellOrders.first()
+            val lat = if (firstOrder.merchantLat != 0.0) firstOrder.merchantLat else firstOrder.customerLat
+            val lngGridStep = LAT_GRID_STEP / Math.cos(Math.toRadians(lat)).coerceAtLeast(0.1)
+            val parts = key.split("_")
+            val cLat = parts.getOrNull(0)?.toDoubleOrNull() ?: 0.0
+            val cLng = parts.getOrNull(1)?.toDoubleOrNull() ?: 0.0
+
+            BusyGridCell(
+                id = key,
+                centerLat = cLat,
+                centerLng = cLng,
+                orderCount = cellOrders.size,
+                minLat = cLat - LAT_GRID_STEP / 2.0,
+                maxLat = cLat + LAT_GRID_STEP / 2.0,
+                minLng = cLng - lngGridStep / 2.0,
+                maxLng = cLng + lngGridStep / 2.0
+            )
+        }.sortedByDescending { it.orderCount }
+    }
 }
 
 data class RiderApplication(
@@ -254,6 +493,60 @@ data class Order(
                 else -> 0L
             }
         }
+
+    val scheduledForMillis: Long
+        get() {
+            return when (val raw = scheduledFor) {
+                is com.google.firebase.Timestamp -> raw.toDate().time
+                is java.util.Date -> raw.time
+                is Number -> {
+                    val num = raw.toLong()
+                    if (num < 1000000000000L) num * 1000L else num
+                }
+                is String -> {
+                    val trimmed = raw.trim()
+                    val num = trimmed.toLongOrNull()
+                    if (num != null) {
+                        if (num < 1000000000000L) num * 1000L else num
+                    } else {
+                        val patterns = listOf(
+                            "yyyy-MM-dd'T'HH:mm:ss",
+                            "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+                            "yyyy-MM-dd HH:mm:ss",
+                            "yyyy-MM-dd",
+                            "MMM d, yyyy h:mm a",
+                            "MMM d, h:mm a"
+                        )
+                        var parsed = 0L
+                        for (pat in patterns) {
+                            try {
+                                val sdf = java.text.SimpleDateFormat(pat, java.util.Locale.US)
+                                val d = sdf.parse(trimmed)
+                                if (d != null) {
+                                    parsed = d.time
+                                    break
+                                }
+                            } catch (_: Exception) {}
+                        }
+                        parsed
+                    }
+                }
+                else -> 0L
+            }
+        }
+
+    fun getReleaseTimeMillis(leadMinutes: Double = 0.0): Long {
+        val sched = scheduledForMillis
+        if (sched <= 0L) return 0L
+        val leadMillis = (leadMinutes * 60 * 1000).toLong()
+        return (sched - leadMillis).coerceAtLeast(0L)
+    }
+
+    fun isFutureScheduled(leadMinutes: Double = 0.0, nowMillis: Long = System.currentTimeMillis()): Boolean {
+        if (!isScheduled) return false
+        val releaseTime = getReleaseTimeMillis(leadMinutes)
+        return releaseTime > 0L && nowMillis < releaseTime
+    }
 
     val resolvedEndsWhenReady: Boolean
         get() = endsWhenReady ?: when {
@@ -460,9 +753,55 @@ data class MessageNotification(
     val body: String = "",
     val category: String = "system", // admin, order, promo, safety, system
     val createdAt: Any? = null,
+    val sendAt: Any? = null,
     val timestampText: String = "",
     val isRead: Boolean = false
-)
+) {
+    val sendAtMillis: Long
+        get() {
+            val raw = sendAt ?: createdAt
+            return when (raw) {
+                is com.google.firebase.Timestamp -> raw.toDate().time
+                is Date -> raw.time
+                is Number -> {
+                    val num = raw.toLong()
+                    if (num < 1000000000000L) num * 1000L else num
+                }
+                is String -> {
+                    val trimmed = raw.trim()
+                    val num = trimmed.toLongOrNull()
+                    if (num != null) {
+                        if (num < 1000000000000L) num * 1000L else num
+                    } else {
+                        val patterns = listOf(
+                            "yyyy-MM-dd'T'HH:mm:ss",
+                            "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+                            "yyyy-MM-dd HH:mm:ss",
+                            "yyyy-MM-dd"
+                        )
+                        var parsed = 0L
+                        for (pat in patterns) {
+                            try {
+                                val sdf = SimpleDateFormat(pat, Locale.US)
+                                val d = sdf.parse(trimmed)
+                                if (d != null) {
+                                    parsed = d.time
+                                    break
+                                }
+                            } catch (_: Exception) {}
+                        }
+                        parsed
+                    }
+                }
+                else -> 0L
+            }
+        }
+
+    fun isFuture(nowMillis: Long = System.currentTimeMillis()): Boolean {
+        val s = sendAtMillis
+        return s > 0L && s > nowMillis
+    }
+}
 
 data class DocumentItem(
     val id: String = "",

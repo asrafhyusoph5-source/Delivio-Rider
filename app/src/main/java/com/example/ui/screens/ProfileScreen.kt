@@ -235,6 +235,96 @@ fun ProfileScreen(
                 }
             }
 
+            // Driver Documents & Expiry Card
+            item {
+                Card(
+                    shape = RoundedCornerShape(18.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    modifier = Modifier.fillMaxWidth().testTag("profile_documents_card")
+                ) {
+                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Badge, contentDescription = "Documents", tint = DelivioYellowDark)
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text("Documents & Expiry", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                        }
+
+                        val docs = rider.documents.ifEmpty {
+                            listOf(
+                                com.example.data.models.RiderDocument(type = "license"),
+                                com.example.data.models.RiderDocument(type = "registration"),
+                                com.example.data.models.RiderDocument(type = "insurance")
+                            )
+                        }
+
+                        docs.forEach { doc ->
+                            val alert = doc.getExpiryAlert()
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = doc.typeDisplayName,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 13.sp
+                                    )
+                                    Text(
+                                        text = "Expires: ${doc.formattedExpiryDate}",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+
+                                if (alert != null) {
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = when (alert.status) {
+                                            com.example.data.models.DocumentAlertLevel.EXPIRED -> Color(0xFFFFCDD2)
+                                            com.example.data.models.DocumentAlertLevel.WARNING_7_DAYS -> Color(0xFFFFE0B2)
+                                            com.example.data.models.DocumentAlertLevel.NOTICE_14_DAYS -> Color(0xFFFFF9C4)
+                                            com.example.data.models.DocumentAlertLevel.REMINDER_30_DAYS -> Color(0xFFB3E5FC)
+                                        }
+                                    ) {
+                                        Text(
+                                            text = when (alert.status) {
+                                                com.example.data.models.DocumentAlertLevel.EXPIRED -> "Expired"
+                                                com.example.data.models.DocumentAlertLevel.WARNING_7_DAYS -> "${alert.daysDiff}d left"
+                                                com.example.data.models.DocumentAlertLevel.NOTICE_14_DAYS -> "${alert.daysDiff}d left"
+                                                com.example.data.models.DocumentAlertLevel.REMINDER_30_DAYS -> "${alert.daysDiff}d left"
+                                            },
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = when (alert.status) {
+                                                com.example.data.models.DocumentAlertLevel.EXPIRED -> Color(0xFFB71C1C)
+                                                com.example.data.models.DocumentAlertLevel.WARNING_7_DAYS -> Color(0xFFBF360C)
+                                                com.example.data.models.DocumentAlertLevel.NOTICE_14_DAYS -> Color(0xFFE65100)
+                                                com.example.data.models.DocumentAlertLevel.REMINDER_30_DAYS -> Color(0xFF01579B)
+                                            },
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                        )
+                                    }
+                                } else {
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = Color(0xFFE8F5E9)
+                                    ) {
+                                        Text(
+                                            text = if (doc.expiresAtMillis > 0L) "Valid" else "On File",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFF2E7D32),
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Active Services Summary
             item {
                 Card(

@@ -187,6 +187,33 @@ fun IncomingOrderDialog(
                             NoCashCollectedChip(isLarge = false)
                         }
 
+                        val schedOrder = bundle.orders.firstOrNull { it.isScheduled }
+                        if (schedOrder != null) {
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = Color(0xFF1565C0)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Schedule,
+                                        contentDescription = "Scheduled",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = if (schedOrder.scheduledDateText.isNotBlank()) "SCHEDULED • ${schedOrder.scheduledDateText}" else "SCHEDULED",
+                                        color = Color.White,
+                                        fontWeight = FontWeight.Black,
+                                        fontSize = 11.sp
+                                    )
+                                }
+                            }
+                        }
+
                         if (firstOrder.isTaxi) {
                             Surface(
                                 shape = RoundedCornerShape(8.dp),
@@ -422,6 +449,32 @@ fun IncomingOrderDialog(
                                                     fontSize = 10.sp,
                                                     modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                                 )
+                                            }
+                                        }
+                                        if (ord.isScheduled) {
+                                            Surface(
+                                                shape = RoundedCornerShape(6.dp),
+                                                color = Color(0xFFE3F2FD),
+                                                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF2196F3))
+                                            ) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Schedule,
+                                                        contentDescription = "Scheduled",
+                                                        tint = Color(0xFF1565C0),
+                                                        modifier = Modifier.size(10.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(3.dp))
+                                                    Text(
+                                                        text = if (ord.scheduledDateText.isNotBlank()) "SCHEDULED • ${ord.scheduledDateText}" else "SCHEDULED",
+                                                        color = Color(0xFF1565C0),
+                                                        fontWeight = FontWeight.Bold,
+                                                        fontSize = 10.sp
+                                                    )
+                                                }
                                             }
                                         }
                                     }

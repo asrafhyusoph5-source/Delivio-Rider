@@ -31,6 +31,7 @@ import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polyline
+import org.osmdroid.views.overlay.Polygon
 
 @Composable
 fun OsmMapView(
@@ -42,6 +43,8 @@ fun OsmMapView(
     recenterTrigger: Int = 0,
     sheetHeightFraction: Float = 0.28f,
     isSatelliteLayer: Boolean = false,
+    showBusyAreas: Boolean = false,
+    busyGridCells: List<com.example.data.models.BusyGridCell> = emptyList(),
     onRouteCalculated: (OsrmRouteResult) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -213,6 +216,57 @@ fun OsmMapView(
                 }
 
                 map.overlays.clear()
+
+                // 0. Demand Heat Map: Shaded ~500m grid areas by recent order count (Busy areas)
+                if (showBusyAreas && busyGridCells.isNotEmpty()) {
+                    busyGridCells.forEach { cell ->
+                        val poly = Polygon(map).apply {
+                            val pts = listOf(
+                                GeoPoint(cell.minLat, cell.minLng),
+                                GeoPoint(cell.maxLat, cell.minLng),
+                                GeoPoint(cell.maxLat, cell.maxLng),
+                                GeoPoint(cell.minLat, cell.maxLng)
+                            )
+                            points = pts
+                            val (fillColor, strokeColor) = when {
+                                cell.orderCount >= 4 -> Pair(
+                                    Color.argb(130, 220, 20, 60),
+                                    Color.argb(220, 220, 20, 60)
+                                )
+                                cell.orderCount >= 2 -> Pair(
+                                    Color.argb(105, 255, 87, 34),
+                                    Color.argb(200, 255, 87, 34)
+                                )
+                                else -> Pair(
+                                    Color.argb(80, 255, 152, 0),
+                                    Color.argb(180, 255, 152, 0)
+                                )
+                            }
+                            fillPaint.color = fillColor
+                            outlinePaint.color = strokeColor
+                            outlinePaint.strokeWidth = 3f
+                            title = "Busy area: ${cell.orderCount} orders in last 60m"
+                            setOnClickListener { _, _, _ ->
+                                tappedPinLabel = "🔥 Busy area: ${cell.orderCount} orders in last 60m"
+                                true
+                            }
+                        }
+                        map.overlays.add(poly)
+
+                        val badgeMarker = Marker(map).apply {
+                            position = GeoPoint(cell.centerLat, cell.centerLng)
+                            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+                            icon = createBusyAreaBadgeDrawable(context, cell.orderCount)
+                            title = "🔥 ${cell.orderCount} orders"
+                            infoWindow = null
+                            setOnMarkerClickListener { _, _ ->
+                                tappedPinLabel = "🔥 Busy area: ${cell.orderCount} orders in last 60m"
+                                true
+                            }
+                        }
+                        map.overlays.add(badgeMarker)
+                    }
+                }
 
                 val result = routeResult
 
@@ -518,6 +572,48 @@ private fun createRouteBubbleDrawable(context: Context, text: String): BitmapDra
 
     val textY = (height / 2f) - ((textPaint.descent() + textPaint.ascent()) / 2f)
     canvas.drawText(text, width / 2f, textY, textPaint)
+
+    return BitmapDrawable(context.resources, bitmap)
+}
+
+/**
+ * Creates a badge icon showing the order count for busy areas.
+ */
+private fun createBusyAreaBadgeDrawable(context: Context, count: Int): BitmapDrawable {
+    val text = "🔥 $count"
+    val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textSize = 30f
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.DEFAULT_BOLD
+    }
+    val bounds = Rect()
+    textPaint.getTextBounds(text, 0, text.length, bounds)
+    val width = bounds.width() + 32
+    val height = bounds.height() + 22
+    val bitmap = Bitmap.createBitmap(width.coerceAtLeast(48), height.coerceAtLeast(34), Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+
+    val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = when {
+            count >= 4 -> Color.parseColor("#D32F2F")
+            count >= 2 -> Color.parseColor("#FF5722")
+            else -> Color.parseColor("#FF9800")
+        }
+        style = Paint.Style.FILL
+    }
+    val rect = RectF(2f, 2f, bitmap.width - 2f, bitmap.height - 2f)
+    canvas.drawRoundRect(rect, 14f, 14f, bgPaint)
+
+    val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
+    }
+    canvas.drawRoundRect(rect, 14f, 14f, borderPaint)
+
+    val textY = (bitmap.height / 2f) - ((textPaint.descent() + textPaint.ascent()) / 2f)
+    canvas.drawText(text, bitmap.width / 2f, textY, textPaint)
 
     return BitmapDrawable(context.resources, bitmap)
 }

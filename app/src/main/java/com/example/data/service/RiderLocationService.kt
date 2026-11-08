@@ -142,7 +142,7 @@ class RiderLocationService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Delivio Rider is Online")
             .setContentText("Actively receiving and tracking live dispatch orders")
-            .setSmallIcon(R.drawable.delivio_rider_icon_1791915489146)
+            .setSmallIcon(R.drawable.ic_stat_delivio_notification)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setContentIntent(pendingIntent)
@@ -177,21 +177,29 @@ class RiderLocationService : Service() {
         const val ACTION_STOP_SERVICE = "ACTION_STOP_LOCATION_SERVICE"
 
         fun start(context: Context) {
-            val intent = Intent(context, RiderLocationService::class.java).apply {
-                action = ACTION_START_SERVICE
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            try {
+                val intent = Intent(context, RiderLocationService::class.java).apply {
+                    action = ACTION_START_SERVICE
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (_: Throwable) {
+                // Ignore background start restrictions gracefully
             }
         }
 
         fun stop(context: Context) {
-            val intent = Intent(context, RiderLocationService::class.java).apply {
-                action = ACTION_STOP_SERVICE
+            try {
+                val intent = Intent(context, RiderLocationService::class.java).apply {
+                    action = ACTION_STOP_SERVICE
+                }
+                context.startService(intent)
+            } catch (_: Throwable) {
+                // Ignore service stop exceptions gracefully
             }
-            context.startService(intent)
         }
     }
 }
