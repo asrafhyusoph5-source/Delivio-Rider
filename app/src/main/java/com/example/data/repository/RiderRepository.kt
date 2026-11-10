@@ -10,6 +10,8 @@ import com.example.data.constants.RiderPaySettings
 import com.example.data.models.*
 import com.example.data.service.RiderLocationService
 import com.example.data.service.RiderLocationTracker
+import com.google.android.gms.tasks.Tasks
+import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.*
 import kotlinx.coroutines.CoroutineScope
@@ -101,6 +103,12 @@ class RiderRepository {
 
     private val _customerReviews = MutableStateFlow<List<CustomerReview>>(emptyList())
     val customerReviews: StateFlow<List<CustomerReview>> = _customerReviews.asStateFlow()
+
+    private val _chatThreads = MutableStateFlow<Map<String, OrderChatThread>>(emptyMap())
+    val chatThreads: StateFlow<Map<String, OrderChatThread>> = _chatThreads.asStateFlow()
+
+    private val _activeChatMessages = MutableStateFlow<List<OrderChatMessage>>(emptyList())
+    val activeChatMessages: StateFlow<List<OrderChatMessage>> = _activeChatMessages.asStateFlow()
 
     private val _lateTipBanner = MutableStateFlow<LateTipBannerInfo?>(null)
     val lateTipBanner: StateFlow<LateTipBannerInfo?> = _lateTipBanner.asStateFlow()
@@ -206,6 +214,10 @@ class RiderRepository {
     private var activeTicketMessagesListener: ListenerRegistration? = null
     private var questsListener: ListenerRegistration? = null
     private var questClaimsListener: ListenerRegistration? = null
+    private var chatThreadsListener: ListenerRegistration? = null
+    private var activeOrderChatMessagesListener: ListenerRegistration? = null
+    private var currentChatId: String? = null
+    private var lastChatCleanupTimeMillis = 0L
 
     private fun syncDeliveryRates(cityId: String) {
         if (cityId.isBlank() || cityId == currentRatesCityId) return
@@ -1045,6 +1057,18 @@ class RiderRepository {
                 if (error != null || snapshots == null) return@addSnapshotListener
                 val claims = snapshots.documents.mapNotNull { parseQuestClaim(it) }
                 _questClaims.value = claims.associateBy { it.questId }
+            }
+
+        // 17. Customer Chat Threads (where riderId == uid and channel == "rider")
+        chatThreadsListener?.remove()
+        chatThreadsListener = db.collection("orderChats")
+            .whereEqualTo("riderId", uid)
+            .whereEqualTo("channel", "rider")
+            .addSnapshotListener { snapshots, error ->
+                if (error != null || snapshots == null) return@addSnapshotListener
+                val threads = snapshots.documents.mapNotNull { parseChatThread(it) }
+                _chatThreads.value = threads.associateBy { it.orderId }
+                cleanupExpiredChats()
             }
     }
 
@@ -1929,6 +1953,11 @@ class RiderRepository {
         questsListener = null
         questClaimsListener?.remove()
         questClaimsListener = null
+        chatThreadsListener?.remove()
+        chatThreadsListener = null
+        activeOrderChatMessagesListener?.remove()
+        activeOrderChatMessagesListener = null
+        currentChatId = null
     }
 
     // SUBMIT SHOP REVIEW
@@ -2133,6 +2162,250 @@ class RiderRepository {
         batch.commit()
             .addOnSuccessListener { onSuccess() }
             .addOnFailureListener { onError(it.localizedMessage ?: "Failed to send message") }
+    }
+
+    // ==========================================
+    // ORDER CUSTOMER CHAT (CHAT DATA CONTRACT)
+    // ==========================================
+
+    private fun parseChatThread(doc: DocumentSnapshot): OrderChatThread? {
+        return try {
+            OrderChatThread(
+                id = doc.id,
+                orderId = doc.getString("orderId") ?: "",
+                orderNumber = doc.getString("orderNumber") ?: "",
+                channel = doc.getString("channel") ?: "rider",
+                customerId = doc.getString("customerId") ?: "",
+                customerName = doc.getString("customerName") ?: "",
+                merchantId = doc.getString("merchantId") ?: "",
+                merchantName = doc.getString("merchantName") ?: "",
+                riderId = doc.getString("riderId") ?: "",
+                riderName = doc.getString("riderName") ?: "",
+                createdAt = doc.get("createdAt"),
+                lastMessageAt = doc.get("lastMessageAt"),
+                lastMessageText = doc.getString("lastMessageText") ?: "",
+                lastSenderRole = doc.getString("lastSenderRole") ?: "",
+                customerReadAt = doc.get("customerReadAt"),
+                partnerReadAt = doc.get("partnerReadAt"),
+                expireAt = doc.get("expireAt")
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun parseChatMessage(doc: DocumentSnapshot): OrderChatMessage? {
+        return try {
+            OrderChatMessage(
+                id = doc.id,
+                senderId = doc.getString("senderId") ?: "",
+                senderRole = doc.getString("senderRole") ?: "customer",
+                type = doc.getString("type") ?: "text",
+                text = doc.getString("text") ?: "",
+                image = doc.getString("image") ?: "",
+                source = doc.getString("source") ?: "",
+                createdAt = doc.get("createdAt"),
+                expireAt = doc.get("expireAt")
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Automatic cleanup of expired chats (no server needed).
+     * Whenever the app loads its list of chat threads (and when the chat screen opens),
+     * delete expired data that belongs to the signed-in user:
+     * For each thread I can read, query its chatMessages where expireAt < now (limit 100)
+     * and delete them in a batch, then delete the thread itself if its own expireAt < now.
+     * Runs at most once every 30 minutes, in the background, and ignores any errors silently.
+     */
+    fun cleanupExpiredChats(force: Boolean = false) {
+        val currentRider = _rider.value
+        val uid = currentRider?.uid ?: auth.currentUser?.uid ?: return
+
+        val now = System.currentTimeMillis()
+        synchronized(this) {
+            if (!force && (now - lastChatCleanupTimeMillis < OrderChatConstants.CLEANUP_INTERVAL_MILLIS)) {
+                return
+            }
+            lastChatCleanupTimeMillis = now
+        }
+
+        scope.launch(Dispatchers.IO) {
+            try {
+                val nowTimestamp = Timestamp.now()
+                val nowMillis = nowTimestamp.toDate().time
+
+                // Query threads I can read: orderChats where riderId == uid and channel == rider
+                val threadsSnap = Tasks.await(
+                    db.collection("orderChats")
+                        .whereEqualTo("riderId", uid)
+                        .whereEqualTo("channel", "rider")
+                        .get()
+                )
+
+                for (doc in threadsSnap.documents) {
+                    val threadRiderId = doc.getString("riderId") ?: ""
+                    // Security requirement: Never delete threads of other users
+                    if (threadRiderId != uid) continue
+
+                    val threadRef = doc.reference
+
+                    // 1. Query chatMessages where expireAt < now (limit 100) and delete in a batch
+                    try {
+                        val expiredMsgsSnap = Tasks.await(
+                            threadRef.collection("chatMessages")
+                                .whereLessThan("expireAt", nowTimestamp)
+                                .limit(OrderChatConstants.CLEANUP_MESSAGES_LIMIT)
+                                .get()
+                        )
+
+                        if (!expiredMsgsSnap.isEmpty) {
+                            val batch = db.batch()
+                            var deleteCount = 0
+                            for (msgDoc in expiredMsgsSnap.documents) {
+                                val msgExpire = parseChatTimestamp(msgDoc.get("expireAt"))
+                                // Do not delete anything that is not expired
+                                if (msgExpire in 1..nowMillis) {
+                                    batch.delete(msgDoc.reference)
+                                    deleteCount++
+                                }
+                            }
+                            if (deleteCount > 0) {
+                                Tasks.await(batch.commit())
+                            }
+                        }
+                    } catch (_: Exception) {
+                        // ignore any errors silently
+                    }
+
+                    // 2. Then delete the thread itself if its own expireAt < now
+                    try {
+                        val threadExpireMillis = parseChatTimestamp(doc.get("expireAt"))
+                        // Do not delete anything that is not expired
+                        if (threadExpireMillis in 1..nowMillis) {
+                            Tasks.await(threadRef.delete())
+                        }
+                    } catch (_: Exception) {
+                        // ignore any errors silently
+                    }
+                }
+            } catch (_: Exception) {
+                // ignore any errors silently
+            }
+        }
+    }
+
+    fun openOrderChat(chatId: String) {
+        currentChatId = chatId
+        activeOrderChatMessagesListener?.remove()
+
+        // Clean up expired chats whenever chat opens (at most once every 30 minutes, in background)
+        cleanupExpiredChats()
+
+        // Set my ReadAt when I open the chat (marking as read updates only partnerReadAt)
+        markChatRead(chatId)
+
+        // Query messages: orderChats/{chatId}/chatMessages (no orderBy, sort on device)
+        activeOrderChatMessagesListener = db.collection("orderChats")
+            .document(chatId)
+            .collection("chatMessages")
+            .addSnapshotListener { snapshots, error ->
+                if (error != null || snapshots == null) return@addSnapshotListener
+                val msgs = snapshots.documents.mapNotNull { parseChatMessage(it) }
+                    .sortedBy { it.timeMillis }
+                _activeChatMessages.value = msgs
+            }
+    }
+
+    fun closeOrderChat() {
+        activeOrderChatMessagesListener?.remove()
+        activeOrderChatMessagesListener = null
+        currentChatId = null
+        _activeChatMessages.value = emptyList()
+    }
+
+    fun markChatRead(chatId: String) {
+        if (chatId.isBlank()) return
+        db.collection("orderChats").document(chatId)
+            .update("partnerReadAt", FieldValue.serverTimestamp())
+            .addOnFailureListener { /* silently ignore if doc not yet created */ }
+    }
+
+    fun sendOrderChatMessage(
+        order: Order,
+        text: String,
+        imageDataUri: String? = null,
+        onSuccess: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        val currentRider = _rider.value ?: run {
+            onError("Rider profile not loaded")
+            return
+        }
+        val riderUid = currentRider.uid
+        val chatId = "${order.id}_rider_${riderUid}"
+        val threadRef = db.collection("orderChats").document(chatId)
+        val messageRef = threadRef.collection("chatMessages").document()
+
+        val isImage = !imageDataUri.isNullOrBlank()
+        val messageType = if (isImage) "image" else "text"
+        val lastPreview = if (isImage) "Photo" else text.trim().take(80)
+        val expireDate = Date(System.currentTimeMillis() + 10L * 24 * 60 * 60 * 1000L)
+        val expireTimestamp = com.google.firebase.Timestamp(expireDate)
+
+        threadRef.get().addOnSuccessListener { snapshot ->
+            val batch = db.batch()
+            if (!snapshot.exists()) {
+                val threadData = hashMapOf<String, Any?>(
+                    "orderId" to order.id,
+                    "orderNumber" to order.displayOrderNumber,
+                    "channel" to "rider",
+                    "customerId" to order.customerId,
+                    "customerName" to formatCustomerFirstName(order.customerName),
+                    "merchantId" to order.merchantId,
+                    "merchantName" to order.merchantName,
+                    "riderId" to riderUid,
+                    "riderName" to currentRider.name,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "lastMessageAt" to FieldValue.serverTimestamp(),
+                    "lastMessageText" to lastPreview,
+                    "lastSenderRole" to "rider",
+                    "customerReadAt" to null,
+                    "partnerReadAt" to FieldValue.serverTimestamp(),
+                    "expireAt" to expireTimestamp
+                )
+                batch.set(threadRef, threadData)
+            } else {
+                val updates = hashMapOf<String, Any?>(
+                    "lastMessageAt" to FieldValue.serverTimestamp(),
+                    "lastMessageText" to lastPreview,
+                    "lastSenderRole" to "rider",
+                    "partnerReadAt" to FieldValue.serverTimestamp(),
+                    "expireAt" to expireTimestamp
+                )
+                batch.update(threadRef, updates)
+            }
+
+            val messageData = hashMapOf<String, Any?>(
+                "senderId" to riderUid,
+                "senderRole" to "rider",
+                "type" to messageType,
+                "text" to (if (isImage) text.trim() else text.trim()),
+                "image" to (imageDataUri ?: ""),
+                "source" to (if (isImage) "camera" else ""),
+                "createdAt" to FieldValue.serverTimestamp(),
+                "expireAt" to expireTimestamp
+            )
+            batch.set(messageRef, messageData)
+
+            batch.commit()
+                .addOnSuccessListener { onSuccess() }
+                .addOnFailureListener { e -> onError(e.localizedMessage ?: "Failed to send message") }
+        }.addOnFailureListener { e ->
+            onError(e.localizedMessage ?: "Failed to access chat thread")
+        }
     }
 
     private fun parseSupportTicket(doc: DocumentSnapshot): SupportTicket? {
@@ -2345,6 +2618,9 @@ class RiderRepository {
             val customerLng = (dropoffMap?.get("lng") as? Number)?.toDouble()
                 ?: (dropoffMap?.get("longitude") as? Number)?.toDouble()
                 ?: doc.getDouble("customerLng") ?: 0.0
+            val customerId = dropoffMap?.get("customerId")?.toString()
+                ?: dropoffMap?.get("uid")?.toString()
+                ?: doc.getString("customerId") ?: ""
             val customerName = dropoffMap?.get("name")?.toString()
                 ?: doc.getString("customerName") ?: doc.getString("recipientName") ?: "Customer"
             val customerAddress = dropoffMap?.get("address")?.toString()
@@ -2660,6 +2936,7 @@ class RiderRepository {
                 merchantPhone = merchantPhone,
                 merchantLat = merchantLat,
                 merchantLng = merchantLng,
+                customerId = customerId,
                 customerName = customerName,
                 customerPhone = customerPhone,
                 customerAddress = customerAddress,
@@ -2699,6 +2976,8 @@ class RiderRepository {
                 arrivedMerchantAt = doc.get("arrivedMerchantAt"),
                 arrivedCustomerAt = doc.get("arrivedCustomerAt"),
                 deliveredAt = doc.get("deliveredAt"),
+                updatedAt = doc.get("updatedAt") ?: doc.get("statusUpdatedAt"),
+                statusHistory = (doc.get("statusHistory") as? List<*>)?.mapNotNull { it as? Map<String, Any?> } ?: emptyList(),
                 releaseReason = doc.getString("releaseReason"),
                 lateTipAmount = lateTipAmount,
                 lateTipAt = lateTipAt,

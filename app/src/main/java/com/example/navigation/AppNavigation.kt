@@ -118,7 +118,8 @@ fun AppNavigation(
             composable(NavRoutes.PROFILE) {
                 ProfileScreen(
                     viewModel = viewModel,
-                    onBack = { navController.popBackStack() }
+                    onBack = { navController.popBackStack() },
+                    onNavigateToReviews = { navController.navigate(NavRoutes.RESOURCES_REVIEWS) }
                 )
             }
 

@@ -28,9 +28,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.theme.*
 import com.example.data.constants.OrderStepConstants
-import com.example.data.models.PaymentType
-import com.example.data.models.parsePaymentType
-import com.example.data.models.formatPaymentProvider
+import com.example.data.models.*
+import com.example.ui.components.CustomerOrderChatDialog
 import com.example.ui.components.PaymentBadgeContent
 import com.example.viewmodel.RiderViewModel
 import java.util.Locale
@@ -61,7 +60,10 @@ data class EarningsJobRecord(
     val paymentProvider: String = "",
     val cashToCollect: Double = 0.0,
     val codCollected: Double = 0.0,
-    val riderEarning: com.example.data.models.RiderEarning? = null
+    val riderEarning: com.example.data.models.RiderEarning? = null,
+    val customerName: String = "",
+    val customerId: String = "",
+    val closedAtMillis: Long? = null
 ) {
     val paymentType: PaymentType
         get() = parsePaymentType(paymentMethod)
@@ -323,6 +325,8 @@ fun EarningsScreen(
 ) {
     val currencySymbol by viewModel.currencySymbol.collectAsState()
     val deliveredOrders by viewModel.deliveredOrders.collectAsState()
+    val activeChatOrder by viewModel.activeChatOrder.collectAsState()
+    val activeChatMessages by viewModel.activeChatMessages.collectAsState()
     val context = LocalContext.current
 
     var selectedPeriod by remember { mutableStateOf("Daily") } // "Daily", "Weekly", "Monthly"
@@ -366,7 +370,10 @@ fun EarningsScreen(
                 paymentProvider = order.paymentProvider,
                 cashToCollect = order.cashAmountToCollect,
                 codCollected = order.codCollected,
-                riderEarning = order.riderEarning
+                riderEarning = order.riderEarning,
+                customerName = order.customerName,
+                customerId = order.customerId,
+                closedAtMillis = OrderChatConstants.getOrderClosedTimeMillis(order) ?: cal.timeInMillis
             )
         }
         (liveRecords + SAMPLE_EARNINGS_JOBS).distinctBy { it.id }
@@ -859,6 +866,33 @@ fun EarningsScreen(
                         )
                     }
 
+                    // View chat for 24 hours after order closed (disappears after 24h, never for Delivio Instant)
+                    val canViewChat = OrderChatConstants.canViewTripChat(job.serviceType, job.closedAtMillis)
+                    if (canViewChat) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        OutlinedButton(
+                            onClick = {
+                                viewModel.openTripChat(
+                                    orderId = job.id,
+                                    orderNumber = job.displayOrderNumber,
+                                    serviceType = job.serviceType,
+                                    customerName = job.customerName.ifBlank { "Customer" },
+                                    customerId = job.customerId,
+                                    merchantName = job.merchantName,
+                                    closedTimeMillis = job.closedAtMillis
+                                )
+                                selectedJobForDetail = null
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("trip_history_view_chat_button")
+                        ) {
+                            Icon(Icons.Default.ChatBubble, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("View chat", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        }
+                    }
+
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -982,6 +1016,17 @@ fun EarningsScreen(
                     Text("Close")
                 }
             }
+        )
+    }
+
+    activeChatOrder?.let { chatOrder ->
+        CustomerOrderChatDialog(
+            order = chatOrder,
+            messages = activeChatMessages,
+            onSendMessage = { text, imageDataUri ->
+                viewModel.sendChatMessage(chatOrder, text, imageDataUri)
+            },
+            onDismiss = { viewModel.closeChat() }
         )
     }
 }

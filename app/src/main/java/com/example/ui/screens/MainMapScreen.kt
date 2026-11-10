@@ -87,6 +87,8 @@ fun MainMapScreen(
     val isBusyAreasVisible by viewModel.isBusyAreasOverlayVisible.collectAsState()
     val busyGridCells by viewModel.busyGridCells.collectAsState()
     val documentExpiryAlerts by viewModel.documentExpiryAlerts.collectAsState()
+    val activeChatOrder by viewModel.activeChatOrder.collectAsState()
+    val activeChatMessages by viewModel.activeChatMessages.collectAsState()
     var showHeadsetMenuDialog by remember { mutableStateOf(false) }
 
     val riderLat = liveLoc?.first ?: 9.7392
@@ -592,6 +594,8 @@ fun MainMapScreen(
                         currentStop?.orderId?.let { viewModel.reportProblem(it, reason) }
                     },
                     onCallClick = { name, phone -> viewModel.startCall(name, phone) },
+                    onChatClick = { order -> viewModel.openChatForOrder(order) },
+                    hasUnreadChat = { orderId -> viewModel.hasUnreadChat(orderId) },
                     onFocusStop = { viewModel.focusStopOnMap(it) },
                     onOpenEarnings = onOpenEarnings,
                     modifier = Modifier.fillMaxWidth()
@@ -645,6 +649,18 @@ fun MainMapScreen(
                         viewModel.submitShopReview(order, rating, comment)
                     },
                     onDismiss = { viewModel.dismissRateShop() }
+                )
+            }
+
+            // Customer Order Chat Dialog
+            activeChatOrder?.let { chatOrder ->
+                CustomerOrderChatDialog(
+                    order = chatOrder,
+                    messages = activeChatMessages,
+                    onSendMessage = { text, imageDataUri ->
+                        viewModel.sendChatMessage(chatOrder, text, imageDataUri)
+                    },
+                    onDismiss = { viewModel.closeChat() }
                 )
             }
 

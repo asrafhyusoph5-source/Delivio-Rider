@@ -333,14 +333,6 @@ fun DrawerMenuPanel(
                                     onClose()
                                     onNavigate("resources/insights")
                                 }
-                                val avgRatingStr = String.format(Locale.US, "%.1f", averageRating)
-                                DrawerSubMenuItem(
-                                    title = "★ $avgRatingStr ($reviewCount)",
-                                    trailingIcon = Icons.Default.Star
-                                ) {
-                                    onClose()
-                                    onNavigate("resources/reviews")
-                                }
                                 DrawerSubMenuItem("Driver safety") {
                                     onClose()
                                     onNavigate("resources/safety")

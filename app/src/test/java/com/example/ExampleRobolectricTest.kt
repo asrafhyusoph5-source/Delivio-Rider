@@ -1931,7 +1931,235 @@ class ExampleRobolectricTest {
         assertEquals(1, visibleList.size)
         assertEquals("msg1", visibleList[0].id)
     }
+
+    @Test
+    fun `verify resources routes and ratings reviews route constants`() {
+        // Resources list contains: Quests, Tiers, Activity insights, Driver safety, Tutorials
+        val resourcesRoutes = listOf(
+            com.example.navigation.NavRoutes.RESOURCES_QUESTS,
+            com.example.navigation.NavRoutes.TIERS,
+            com.example.navigation.NavRoutes.RESOURCES_INSIGHTS,
+            com.example.navigation.NavRoutes.RESOURCES_SAFETY,
+            com.example.navigation.NavRoutes.RESOURCES_TUTORIALS
+        )
+        assertEquals(5, resourcesRoutes.size)
+        assertEquals("resources/quests", resourcesRoutes[0])
+        assertEquals("resources/tiers", resourcesRoutes[1])
+        assertEquals("resources/insights", resourcesRoutes[2])
+        assertEquals("resources/safety", resourcesRoutes[3])
+        assertEquals("resources/tutorials", resourcesRoutes[4])
+
+        // Ratings & reviews route is preserved and opens from header chip and profile
+        assertEquals("resources/reviews", com.example.navigation.NavRoutes.RESOURCES_REVIEWS)
+    }
+
+    @Test
+    fun `verify chat thread id format and customer first name only`() {
+        val chatId = com.example.data.models.OrderChatConstants.buildChatId(
+            orderId = "ord_7894",
+            riderUid = "rider_auth_123"
+        )
+        assertEquals("ord_7894_rider_rider_auth_123", chatId)
+
+        assertEquals("Maria", com.example.data.models.OrderChatConstants.formatCustomerFirstName("Maria Santos"))
+        assertEquals("Juan", com.example.data.models.OrderChatConstants.formatCustomerFirstName("Juan"))
+        assertEquals("Alexander", com.example.data.models.OrderChatConstants.formatCustomerFirstName("Alexander Dela Cruz Jr."))
+        assertEquals("Customer", com.example.data.models.OrderChatConstants.formatCustomerFirstName(""))
+        assertEquals("Customer", com.example.data.models.OrderChatConstants.formatCustomerFirstName(null))
+    }
+
+    @Test
+    fun `verify delivio instant exclusion from chat`() {
+        assertTrue(com.example.data.models.OrderChatConstants.isInstantOrder("request_rider"))
+        assertTrue(com.example.data.models.OrderChatConstants.isInstantOrder("INSTANT"))
+        assertTrue(com.example.data.models.OrderChatConstants.isInstantOrder("delivio instant"))
+
+        // Other 5 services support chat
+        assertFalse(com.example.data.models.OrderChatConstants.isInstantOrder("food"))
+        assertFalse(com.example.data.models.OrderChatConstants.isInstantOrder("FOOD"))
+        assertFalse(com.example.data.models.OrderChatConstants.isInstantOrder("convenience"))
+        assertFalse(com.example.data.models.OrderChatConstants.isInstantOrder("MART"))
+        assertFalse(com.example.data.models.OrderChatConstants.isInstantOrder("parcel"))
+        assertFalse(com.example.data.models.OrderChatConstants.isInstantOrder("pabili"))
+        assertFalse(com.example.data.models.OrderChatConstants.isInstantOrder("taxi"))
+    }
+
+    @Test
+    fun `verify chat is open during active steps and closed when completed`() {
+        // Open statuses
+        assertTrue(com.example.data.models.OrderChatConstants.isChatOpen("Placed Order"))
+        assertTrue(com.example.data.models.OrderChatConstants.isChatOpen("Preparing"))
+        assertTrue(com.example.data.models.OrderChatConstants.isChatOpen("Ready"))
+        assertTrue(com.example.data.models.OrderChatConstants.isChatOpen("Picked Up"))
+        assertTrue(com.example.data.models.OrderChatConstants.isChatOpen("In Transit"))
+
+        // Closed statuses (case-insensitive)
+        assertFalse(com.example.data.models.OrderChatConstants.isChatOpen("Delivered"))
+        assertFalse(com.example.data.models.OrderChatConstants.isChatOpen("delivered"))
+        assertFalse(com.example.data.models.OrderChatConstants.isChatOpen("Completed"))
+        assertFalse(com.example.data.models.OrderChatConstants.isChatOpen("completed"))
+        assertFalse(com.example.data.models.OrderChatConstants.isChatOpen("Cancelled"))
+        assertFalse(com.example.data.models.OrderChatConstants.isChatOpen("cancelled"))
+        assertFalse(com.example.data.models.OrderChatConstants.isChatOpen("Rejected"))
+        assertFalse(com.example.data.models.OrderChatConstants.isChatOpen("rejected"))
+    }
+
+    @Test
+    fun `verify unread chat calculation for driver red dot`() {
+        val now = 1700000000000L
+
+        // 1. Unread message from customer (driver hasn't read yet)
+        val unreadThread = com.example.data.models.OrderChatThread(
+            orderId = "ord_1",
+            lastSenderRole = "customer",
+            lastMessageAt = com.google.firebase.Timestamp(java.util.Date(now)),
+            partnerReadAt = null
+        )
+        assertTrue(unreadThread.hasUnreadForDriver())
+
+        // 2. Unread message from customer with older partnerReadAt
+        val unreadWithOlderRead = com.example.data.models.OrderChatThread(
+            orderId = "ord_2",
+            lastSenderRole = "customer",
+            lastMessageAt = com.google.firebase.Timestamp(java.util.Date(now)),
+            partnerReadAt = com.google.firebase.Timestamp(java.util.Date(now - 5000L))
+        )
+        assertTrue(unreadWithOlderRead.hasUnreadForDriver())
+
+        // 3. Driver already read the customer's message
+        val readThread = com.example.data.models.OrderChatThread(
+            orderId = "ord_3",
+            lastSenderRole = "customer",
+            lastMessageAt = com.google.firebase.Timestamp(java.util.Date(now)),
+            partnerReadAt = com.google.firebase.Timestamp(java.util.Date(now + 1000L))
+        )
+        assertFalse(readThread.hasUnreadForDriver())
+
+        // 4. Last message was sent by the driver (never unread for driver)
+        val driverSentThread = com.example.data.models.OrderChatThread(
+            orderId = "ord_4",
+            lastSenderRole = "rider",
+            lastMessageAt = com.google.firebase.Timestamp(java.util.Date(now)),
+            partnerReadAt = null
+        )
+        assertFalse(driverSentThread.hasUnreadForDriver())
+    }
+
+    @Test
+    fun `verify chat history 24-hour expiration after order close`() {
+        val now = 1700000000000L
+        val twelveHoursMs = 12 * 60 * 60 * 1000L
+        val twentyFiveHoursMs = 25 * 60 * 60 * 1000L
+
+        // Order closed 12 hours ago -> Chat can be viewed in Trip history
+        assertTrue(
+            com.example.data.models.OrderChatConstants.canViewTripChat(
+                serviceType = "food",
+                closedTimeMillis = now - twelveHoursMs,
+                now = now
+            )
+        )
+
+        // Order closed 25 hours ago -> Chat disappears after 24 hours
+        assertFalse(
+            com.example.data.models.OrderChatConstants.canViewTripChat(
+                serviceType = "food",
+                closedTimeMillis = now - twentyFiveHoursMs,
+                now = now
+            )
+        )
+
+        // Instant order never shows chat, even within 24 hours
+        assertFalse(
+            com.example.data.models.OrderChatConstants.canViewTripChat(
+                serviceType = "request_rider",
+                closedTimeMillis = now - twelveHoursMs,
+                now = now
+            )
+        )
+    }
+
+    @Test
+    fun `verify quick-reply chips and image compression bounds`() {
+        // Quick replies contract check
+        val expectedReplies = listOf("I'm on my way", "I've arrived", "I'm outside", "Please come out")
+        assertEquals(expectedReplies, com.example.data.models.OrderChatConstants.QUICK_REPLIES)
+
+        // Photo contract constraints check
+        assertEquals(1024, com.example.util.ImageCompressor.MAX_LONGEST_SIDE)
+        assertEquals(60, com.example.util.ImageCompressor.INITIAL_JPEG_QUALITY)
+        assertEquals(250 * 1024, com.example.util.ImageCompressor.TARGET_BYTES)
+        assertEquals(350 * 1024, com.example.util.ImageCompressor.MAX_ALLOWED_BYTES)
+        assertEquals(400000, com.example.util.ImageCompressor.MAX_IMAGE_CHARS)
+    }
+
+    @Test
+    fun `verify automatic cleanup of expired chats logic and limits`() {
+        val now = 1700000000000L
+
+        // 30 minute interval constraint and 100 batch limit
+        assertEquals(30L * 60L * 1000L, com.example.data.models.OrderChatConstants.CLEANUP_INTERVAL_MILLIS)
+        assertEquals(100L, com.example.data.models.OrderChatConstants.CLEANUP_MESSAGES_LIMIT)
+
+        // 1. Message expiration
+        val expiredMsg = com.example.data.models.OrderChatMessage(
+            id = "msg_expired",
+            text = "Old message",
+            expireAt = com.google.firebase.Timestamp(java.util.Date(now - 30000L))
+        )
+        val activeMsg = com.example.data.models.OrderChatMessage(
+            id = "msg_active",
+            text = "Current message",
+            expireAt = com.google.firebase.Timestamp(java.util.Date(now + 30000L))
+        )
+        val noExpiryMsg = com.example.data.models.OrderChatMessage(
+            id = "msg_no_expiry",
+            text = "No expiry message",
+            expireAt = null
+        )
+
+        assertTrue(expiredMsg.isExpired(now))
+        assertFalse(activeMsg.isExpired(now))
+        assertFalse(noExpiryMsg.isExpired(now))
+
+        // Self-check: expired test message disappears, non-expired messages stay
+        val messageList = listOf(expiredMsg, activeMsg, noExpiryMsg)
+        val filteredList = messageList.filter { !it.isExpired(now) }
+        assertEquals(2, filteredList.size)
+        assertTrue(filteredList.contains(activeMsg))
+        assertTrue(filteredList.contains(noExpiryMsg))
+        assertFalse(filteredList.contains(expiredMsg))
+
+        // 2. Thread expiration
+        val expiredThread = com.example.data.models.OrderChatThread(
+            id = "thread_expired",
+            orderId = "ord_exp",
+            riderId = "rider_me",
+            expireAt = com.google.firebase.Timestamp(java.util.Date(now - 10000L))
+        )
+        val activeThread = com.example.data.models.OrderChatThread(
+            id = "thread_active",
+            orderId = "ord_act",
+            riderId = "rider_me",
+            expireAt = com.google.firebase.Timestamp(java.util.Date(now + 100000L))
+        )
+
+        assertTrue(expiredThread.isExpired(now))
+        assertFalse(activeThread.isExpired(now))
+
+        // 3. Never delete threads of other users
+        val otherUserThread = com.example.data.models.OrderChatThread(
+            id = "thread_other_user",
+            orderId = "ord_other",
+            riderId = "rider_other_999",
+            expireAt = com.google.firebase.Timestamp(java.util.Date(now - 10000L))
+        )
+        val myUid = "rider_me"
+        val isTargetForMyCleanup = otherUserThread.riderId == myUid && otherUserThread.isExpired(now)
+        assertFalse("Threads belonging to other users must never be targeted for deletion", isTargetForMyCleanup)
+    }
 }
+
 
 
 

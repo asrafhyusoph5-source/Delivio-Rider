@@ -383,6 +383,7 @@ data class Order(
     val merchantLng: Double = 0.0,
 
     // Customer / Drop-off
+    val customerId: String = "",
     val customerName: String = "",
     val customerPhone: String = "",
     val customerAddress: String = "",
@@ -443,6 +444,8 @@ data class Order(
     val arrivedMerchantAt: Any? = null,
     val arrivedCustomerAt: Any? = null,
     val deliveredAt: Any? = null,
+    val updatedAt: Any? = null,
+    val statusHistory: List<Map<String, Any?>> = emptyList(),
     val releaseReason: String? = null,
 
     // Batching & Dispatch

@@ -36,14 +36,10 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
 import com.example.data.constants.OrderStepConstants
-import com.example.data.models.Order
-import com.example.data.models.OrderItem
-import com.example.data.models.RouteStop
-import com.example.data.models.StopStatus
-import com.example.data.models.StopType
+import com.example.data.models.*
 import com.example.ui.theme.*
+import androidx.compose.ui.window.Dialog
 
 enum class OrderSheetState {
     HIDDEN,
@@ -71,6 +67,8 @@ fun OrderDetailsSheet(
     onReleaseOrder: (String) -> Unit,
     onReportProblem: (String) -> Unit,
     onCallClick: (String, String) -> Unit,
+    onChatClick: (Order) -> Unit = {},
+    hasUnreadChat: (String) -> Boolean = { false },
     onFocusStop: (RouteStop) -> Unit = {},
     onOpenEarnings: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -309,6 +307,8 @@ fun OrderDetailsSheet(
                                     onCallClick(currentStop.name, currentStop.phone)
                                 }
                             },
+                            onChatClick = onChatClick,
+                            hasUnreadChat = hasUnreadChat,
                             onExpandClick = { onSheetStateChange(OrderSheetState.EXPANDED) },
                             onSlideConfirmed = {
                                 handleSlideAction(
@@ -515,6 +515,8 @@ private fun CompactOrderSheetContent(
     routeDistanceKm: Double,
     routeEtaMinutes: Int,
     onCallClick: () -> Unit,
+    onChatClick: (Order) -> Unit = {},
+    hasUnreadChat: (String) -> Boolean = { false },
     onExpandClick: () -> Unit,
     onSlideConfirmed: () -> Unit
 ) {
@@ -598,6 +600,38 @@ private fun CompactOrderSheetContent(
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
+                // Customer chat icon (beside customer's call icon)
+                if (currentStop.isCustomer && !OrderChatConstants.isInstantOrder(currentStop.order.serviceType)) {
+                    Box(modifier = Modifier.size(38.dp)) {
+                        IconButton(
+                            onClick = { onChatClick(currentStop.order) },
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .testTag("customer_chat_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ChatBubble,
+                                contentDescription = "Chat with customer",
+                                tint = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        if (hasUnreadChat(currentStop.order.id)) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(DelivioRed)
+                                    .align(Alignment.TopEnd)
+                                    .testTag("chat_unread_dot")
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+
                 // Call icon
                 if (currentStop.phone.isNotBlank()) {
                     IconButton(

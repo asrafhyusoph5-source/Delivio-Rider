@@ -591,6 +591,52 @@ service cloud.firestore {
       }
     }
 
+    match /orderChats/{chatId} {
+      allow read: if signedIn() && (isAdmin()
+        || resource.data.get('customerId', null) == request.auth.uid
+        || resource.data.get('riderId', null) == request.auth.uid
+        || (resource.data.get('merchantId', null) != null && canManage(resource.data.merchantId)));
+      allow create: if signedIn()
+        && request.resource.data.orderId is string
+        && (request.resource.data.channel in ['rider', 'merchant'])
+        && (isAdmin()
+            || (request.resource.data.channel == 'rider' && request.resource.data.riderId == request.auth.uid)
+            || (request.resource.data.channel == 'merchant' && canManage(request.resource.data.merchantId))
+            || request.resource.data.customerId == request.auth.uid);
+      allow update: if signedIn() && (isAdmin()
+        || resource.data.get('customerId', null) == request.auth.uid
+        || resource.data.get('riderId', null) == request.auth.uid
+        || (resource.data.get('merchantId', null) != null && canManage(resource.data.merchantId)));
+      allow delete: if isAdmin()
+        || (signedIn()
+            && (resource.data.get('riderId', null) == request.auth.uid
+                || resource.data.get('customerId', null) == request.auth.uid
+                || (resource.data.get('merchantId', null) != null && canManage(resource.data.merchantId)))
+            && resource.data.get('expireAt', request.time) <= request.time);
+
+      match /chatMessages/{msgId} {
+        allow read: if signedIn() && (isAdmin()
+          || get(/databases/$(db)/documents/orderChats/$(chatId)).data.get('customerId', null) == request.auth.uid
+          || get(/databases/$(db)/documents/orderChats/$(chatId)).data.get('riderId', null) == request.auth.uid
+          || (get(/databases/$(db)/documents/orderChats/$(chatId)).data.get('merchantId', null) != null
+              && canManage(get(/databases/$(db)/documents/orderChats/$(chatId)).data.merchantId)));
+        allow create: if signedIn()
+          && request.resource.data.senderId == request.auth.uid
+          && request.resource.data.senderRole in ['customer', 'merchant', 'rider']
+          && request.resource.data.type in ['text', 'image']
+          && request.resource.data.get('text', '').size() <= 1000
+          && request.resource.data.get('image', '').size() <= 400000;
+        allow update: if isAdmin();
+        allow delete: if isAdmin()
+          || (signedIn()
+              && (get(/databases/$(db)/documents/orderChats/$(chatId)).data.get('riderId', null) == request.auth.uid
+                  || get(/databases/$(db)/documents/orderChats/$(chatId)).data.get('customerId', null) == request.auth.uid
+                  || (get(/databases/$(db)/documents/orderChats/$(chatId)).data.get('merchantId', null) != null
+                      && canManage(get(/databases/$(db)/documents/orderChats/$(chatId)).data.merchantId)))
+              && resource.data.get('expireAt', request.time) <= request.time);
+      }
+    }
+
     match /riderReviews/{oid} {
       allow read: if signedIn() && (isAdmin()
         || resource.data.get('riderId', null) == request.auth.uid

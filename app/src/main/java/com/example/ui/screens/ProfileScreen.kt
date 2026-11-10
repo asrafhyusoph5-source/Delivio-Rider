@@ -32,7 +32,8 @@ import com.example.viewmodel.RiderViewModel
 @Composable
 fun ProfileScreen(
     viewModel: RiderViewModel,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onNavigateToReviews: () -> Unit = {}
 ) {
     val riderState by viewModel.rider.collectAsState()
     val rider = riderState
@@ -191,8 +192,11 @@ fun ProfileScreen(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceAround
                         ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text("★ ${String.format("%.1f", rider.rating)}", fontWeight = FontWeight.Black, fontSize = 16.sp, color = DelivioYellowDark)
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier.clickable { onNavigateToReviews() }
+                            ) {
+                                Text("★ ${String.format(java.util.Locale.US, "%.1f", rider.rating)}", fontWeight = FontWeight.Black, fontSize = 16.sp, color = DelivioYellowDark)
                                 Text("Rating", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -204,6 +208,67 @@ fun ProfileScreen(
                                 Text("Assigned City", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
+                    }
+                }
+            }
+
+            // Ratings and reviews Row
+            item {
+                Card(
+                    shape = RoundedCornerShape(18.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onNavigateToReviews() }
+                        .testTag("profile_ratings_reviews_row")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Surface(
+                                shape = CircleShape,
+                                color = DelivioYellowLight,
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Default.Star,
+                                        contentDescription = "Ratings and reviews",
+                                        tint = DelivioYellowDark,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    text = "Ratings and reviews",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 15.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                val reviewCount by viewModel.customerReviewCount.collectAsState()
+                                Text(
+                                    text = "★ ${String.format(java.util.Locale.US, "%.1f", rider.rating)} ($reviewCount reviews)",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        Icon(
+                            imageVector = Icons.Default.ChevronRight,
+                            contentDescription = "Open Ratings and reviews",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(22.dp)
+                        )
                     }
                 }
             }

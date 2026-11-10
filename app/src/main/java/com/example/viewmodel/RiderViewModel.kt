@@ -106,6 +106,74 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     val heading: StateFlow<Float> = RiderLocationTracker.heading
     val speedKmh: StateFlow<Int> = RiderLocationTracker.speedKmh
 
+    // Customer Order Chat
+    val chatThreads = riderRepository.chatThreads
+    val activeChatMessages = riderRepository.activeChatMessages
+
+    private val _activeChatOrder = MutableStateFlow<Order?>(null)
+    val activeChatOrder: StateFlow<Order?> = _activeChatOrder.asStateFlow()
+
+    fun openChatForOrder(order: Order) {
+        val currentUid = rider.value?.uid ?: auth.currentUser?.uid ?: ""
+        val chatId = "${order.id}_rider_${currentUid}"
+        riderRepository.openOrderChat(chatId)
+        _activeChatOrder.value = order
+    }
+
+    fun closeChat() {
+        riderRepository.closeOrderChat()
+        _activeChatOrder.value = null
+    }
+
+    fun hasUnreadChat(orderId: String): Boolean {
+        return chatThreads.value[orderId]?.hasUnreadForDriver() == true
+    }
+
+    fun cleanupExpiredChats(force: Boolean = false) {
+        riderRepository.cleanupExpiredChats(force)
+    }
+
+    fun sendChatMessage(
+        order: Order,
+        text: String,
+        imageDataUri: String? = null,
+        onSuccess: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        riderRepository.sendOrderChatMessage(
+            order = order,
+            text = text,
+            imageDataUri = imageDataUri,
+            onSuccess = onSuccess,
+            onError = { err ->
+                showToast(err)
+                onError(err)
+            }
+        )
+    }
+
+    fun openTripChat(
+        orderId: String,
+        orderNumber: String,
+        serviceType: String,
+        customerName: String,
+        customerId: String = "",
+        merchantName: String = "",
+        closedTimeMillis: Long? = null
+    ) {
+        val tripOrder = Order(
+            id = orderId,
+            orderNumber = orderNumber,
+            serviceType = serviceType,
+            status = "Delivered",
+            customerName = customerName,
+            customerId = customerId,
+            merchantName = merchantName,
+            deliveredAt = closedTimeMillis?.let { com.google.firebase.Timestamp(java.util.Date(it)) }
+        )
+        openChatForOrder(tripOrder)
+    }
+
     // Order Switcher (index 0 or 1)
     private val _selectedOrderIndex = MutableStateFlow(0)
     val selectedOrderIndex: StateFlow<Int> = _selectedOrderIndex.asStateFlow()
