@@ -266,7 +266,7 @@ fun HelpCenterFlowScreen(
                                             )
                                             Spacer(modifier = Modifier.height(3.dp))
                                             Text(
-                                                text = "Merchant: ${ord.merchantName}",
+                                                text = "Merchant: ${ord.displayMerchantName.ifBlank { "Merchant" }}",
                                                 fontSize = 13.sp,
                                                 color = MaterialTheme.colorScheme.onSurface
                                             )
@@ -309,7 +309,7 @@ fun HelpCenterFlowScreen(
                                     Icon(Icons.Default.ReceiptLong, contentDescription = null, tint = DelivioGreen)
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text(
-                                        text = "Selected Order ${ord.displayOrderNumber} (${ord.merchantName})",
+                                        text = "Selected Order ${ord.displayOrderNumber} (${ord.displayMerchantName.ifBlank { "Merchant" }})",
                                         fontWeight = FontWeight.SemiBold,
                                         fontSize = 12.sp
                                     )

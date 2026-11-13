@@ -2179,6 +2179,8 @@ class RiderRepository {
                 customerName = doc.getString("customerName") ?: "",
                 merchantId = doc.getString("merchantId") ?: "",
                 merchantName = doc.getString("merchantName") ?: "",
+                branchName = doc.getString("branchName") ?: "",
+                branchCode = doc.getString("branchCode") ?: "",
                 riderId = doc.getString("riderId") ?: "",
                 riderName = doc.getString("riderName") ?: "",
                 createdAt = doc.get("createdAt"),
@@ -2365,7 +2367,7 @@ class RiderRepository {
                     "customerId" to order.customerId,
                     "customerName" to formatCustomerFirstName(order.customerName),
                     "merchantId" to order.merchantId,
-                    "merchantName" to order.merchantName,
+                    "merchantName" to order.displayMerchantName.ifBlank { order.merchantName },
                     "riderId" to riderUid,
                     "riderName" to currentRider.name,
                     "createdAt" to FieldValue.serverTimestamp(),
@@ -2590,22 +2592,66 @@ class RiderRepository {
 
             // 1. Pickup location: orders.pickup.lat/lng or merchant.latitude/longitude
             val pickupMap = (doc.get("pickup") as? Map<*, *>) ?: (doc.get("merchant") as? Map<*, *>)
-            val merchantLat = (pickupMap?.get("lat") as? Number)?.toDouble()
+            val rawMerchantLat = (pickupMap?.get("lat") as? Number)?.toDouble()
                 ?: (pickupMap?.get("latitude") as? Number)?.toDouble()
                 ?: doc.getDouble("merchantLat") ?: 0.0
-            val merchantLng = (pickupMap?.get("lng") as? Number)?.toDouble()
+            val rawMerchantLng = (pickupMap?.get("lng") as? Number)?.toDouble()
                 ?: (pickupMap?.get("longitude") as? Number)?.toDouble()
                 ?: doc.getDouble("merchantLng") ?: 0.0
-            val merchantName = pickupMap?.get("name")?.toString()
-                ?: doc.getString("merchantName") ?: doc.getString("senderName") ?: "Merchant"
-            val merchantAddress = pickupMap?.get("address")?.toString()
+            val rawMerchantName = pickupMap?.get("name")?.toString()?.trim()?.takeIf { it.isNotBlank() }
+                ?: doc.getString("merchantName")?.trim()?.takeIf { it.isNotBlank() }
+                ?: doc.getString("senderName")?.trim()?.takeIf { it.isNotBlank() }
+                ?: ""
+            val rawBranchName = doc.getString("branchName")?.trim()?.takeIf { it.isNotBlank() }
+                ?: pickupMap?.get("branchName")?.toString()?.trim()?.takeIf { it.isNotBlank() }
+                ?: ""
+            val rawBranchCode = doc.getString("branchCode")?.trim()?.takeIf { it.isNotBlank() }
+                ?: pickupMap?.get("branchCode")?.toString()?.trim()?.takeIf { it.isNotBlank() }
+                ?: ""
+            val rawChainId = doc.getString("chainId")?.trim()?.takeIf { it.isNotBlank() }
+                ?: pickupMap?.get("chainId")?.toString()?.trim()?.takeIf { it.isNotBlank() }
+                ?: ""
+            val rawMerchantAddress = pickupMap?.get("address")?.toString()
                 ?: doc.getString("merchantAddress") ?: doc.getString("senderAddress") ?: ""
-            val merchantPhone = pickupMap?.get("phone")?.toString()
+            val rawMerchantPhone = pickupMap?.get("phone")?.toString()
                 ?: doc.getString("merchantPhone") ?: doc.getString("senderPhone") ?: ""
 
-            // Asynchronously resolve merchant if lat/lng is missing
-            if (merchantLat == 0.0 && merchantId.isNotBlank()) {
-                fetchMerchantLocation(merchantId, id)
+            val isTaxiOrder = serviceType.equals(OrderStepConstants.SERVICE_TAXI, ignoreCase = true)
+            val cachedMerchant = if (merchantId.isNotBlank() && !isTaxiOrder) merchantCache[merchantId] else null
+
+            val merchantLat = if (rawMerchantLat != 0.0) rawMerchantLat else (cachedMerchant?.get("lat") as? Double ?: 0.0)
+            val merchantLng = if (rawMerchantLng != 0.0) rawMerchantLng else (cachedMerchant?.get("lng") as? Double ?: 0.0)
+            val merchantName = when {
+                rawMerchantName.isNotBlank() && !rawMerchantName.equals("Merchant", ignoreCase = true) -> rawMerchantName
+                else -> (cachedMerchant?.get("name") as? String)?.takeIf { it.isNotBlank() } ?: rawMerchantName.ifBlank { "Merchant" }
+            }
+            val branchName = if (rawBranchName.isNotBlank() || rawBranchCode.isNotBlank()) {
+                rawBranchName
+            } else {
+                cachedMerchant?.get("branchName") as? String ?: ""
+            }
+            val branchCode = if (rawBranchName.isNotBlank() || rawBranchCode.isNotBlank()) {
+                rawBranchCode
+            } else {
+                cachedMerchant?.get("branchCode") as? String ?: ""
+            }
+            val chainId = if (rawChainId.isNotBlank()) {
+                rawChainId
+            } else {
+                cachedMerchant?.get("chainId") as? String ?: ""
+            }
+            val merchantAddress = rawMerchantAddress.ifBlank { cachedMerchant?.get("address") as? String ?: "" }
+            val merchantPhone = rawMerchantPhone.ifBlank { cachedMerchant?.get("phone") as? String ?: "" }
+
+            // Asynchronously fall back to merchants/{shopId} when lat/lng or outlet branch snapshots are missing
+            val needsMerchantFallback = !isTaxiOrder && merchantId.isNotBlank() && (
+                merchantLat == 0.0 ||
+                (rawBranchName.isBlank() && rawBranchCode.isBlank()) ||
+                rawMerchantName.isBlank() ||
+                rawMerchantName.equals("Merchant", ignoreCase = true)
+            )
+            if (needsMerchantFallback && cachedMerchant == null) {
+                fetchMerchantInfo(merchantId)
             }
 
             // 2. Dropoff location: orders.dropoff.lat/lng or customer.latitude/longitude
@@ -2932,6 +2978,9 @@ class RiderRepository {
                 prepMinutes = prepMinutes,
                 editedAt = editedAt,
                 merchantName = merchantName,
+                branchName = branchName,
+                branchCode = branchCode,
+                chainId = chainId,
                 merchantAddress = merchantAddress,
                 merchantPhone = merchantPhone,
                 merchantLat = merchantLat,
@@ -3043,55 +3092,98 @@ class RiderRepository {
         return sdf.format(Date(ms))
     }
 
-    private val merchantCache = mutableMapOf<String, Map<String, Any?>>()
+    private val merchantCache = java.util.concurrent.ConcurrentHashMap<String, Map<String, Any?>>()
+    private val inFlightMerchantFetches = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
-    private fun fetchMerchantLocation(merchantId: String, orderId: String) {
+    private fun fetchMerchantInfo(merchantId: String) {
         val cached = merchantCache[merchantId]
         if (cached != null) {
-            applyMerchantInfo(cached, orderId)
+            applyMerchantInfo(merchantId, cached)
             return
         }
+        if (!inFlightMerchantFetches.add(merchantId)) return
+
         db.collection("merchants").document(merchantId).get()
             .addOnSuccessListener { doc ->
+                inFlightMerchantFetches.remove(merchantId)
                 if (doc.exists()) {
                     val mLat = (doc.get("lat") as? Number)?.toDouble()
                         ?: (doc.get("latitude") as? Number)?.toDouble() ?: 0.0
                     val mLng = (doc.get("lng") as? Number)?.toDouble()
                         ?: (doc.get("longitude") as? Number)?.toDouble() ?: 0.0
-                    val mName = doc.getString("name") ?: "Merchant"
+                    val mName = doc.getString("name")?.trim() ?: ""
+                    val mBranchName = doc.getString("branchName")?.trim() ?: ""
+                    val mBranchCode = doc.getString("branchCode")?.trim() ?: ""
+                    val mChainId = doc.getString("chainId")?.trim() ?: ""
                     val mAddr = doc.getString("address") ?: ""
                     val mPhone = doc.getString("phone") ?: ""
                     val data = mapOf<String, Any?>(
                         "lat" to mLat,
                         "lng" to mLng,
                         "name" to mName,
+                        "branchName" to mBranchName,
+                        "branchCode" to mBranchCode,
+                        "chainId" to mChainId,
                         "address" to mAddr,
                         "phone" to mPhone
                     )
                     merchantCache[merchantId] = data
-                    applyMerchantInfo(data, orderId)
+                    applyMerchantInfo(merchantId, data)
+                } else {
+                    merchantCache[merchantId] = emptyMap()
                 }
+            }
+            .addOnFailureListener {
+                inFlightMerchantFetches.remove(merchantId)
             }
     }
 
-    private fun applyMerchantInfo(data: Map<String, Any?>, orderId: String) {
+    private fun applyMerchantInfo(merchantId: String, data: Map<String, Any?>) {
+        if (data.isEmpty()) return
         val mLat = data["lat"] as? Double ?: 0.0
         val mLng = data["lng"] as? Double ?: 0.0
-        val mName = data["name"] as? String ?: "Merchant"
-        val mAddr = data["address"] as? String ?: ""
-        val mPhone = data["phone"] as? String ?: ""
+        val mName = (data["name"] as? String).orEmpty()
+        val mBranchName = (data["branchName"] as? String).orEmpty()
+        val mBranchCode = (data["branchCode"] as? String).orEmpty()
+        val mChainId = (data["chainId"] as? String).orEmpty()
+        val mAddr = (data["address"] as? String).orEmpty()
+        val mPhone = (data["phone"] as? String).orEmpty()
 
-        if (mLat != 0.0 && mLng != 0.0) {
-            _activeOrders.value = _activeOrders.value.map { o ->
-                if (o.id == orderId && o.merchantLat == 0.0) {
-                    o.copy(
-                        merchantLat = mLat,
-                        merchantLng = mLng,
-                        merchantName = if (o.merchantName.isBlank() || o.merchantName == "Merchant") mName else o.merchantName,
-                        merchantAddress = if (o.merchantAddress.isBlank()) mAddr else o.merchantAddress,
-                        merchantPhone = if (o.merchantPhone.isBlank()) mPhone else o.merchantPhone
-                    )
-                } else o
+        fun mergeOrder(o: Order): Order {
+            if (o.merchantId != merchantId || o.isTaxi) return o
+            val useFallbackBranch = o.branchName.isBlank() && o.branchCode.isBlank()
+            return o.copy(
+                merchantLat = if (o.merchantLat == 0.0 && mLat != 0.0) mLat else o.merchantLat,
+                merchantLng = if (o.merchantLng == 0.0 && mLng != 0.0) mLng else o.merchantLng,
+                merchantName = if ((o.merchantName.isBlank() || o.merchantName.equals("Merchant", ignoreCase = true)) && mName.isNotBlank()) mName else o.merchantName,
+                branchName = if (useFallbackBranch) mBranchName else o.branchName,
+                branchCode = if (useFallbackBranch) mBranchCode else o.branchCode,
+                chainId = if (o.chainId.isBlank() && mChainId.isNotBlank()) mChainId else o.chainId,
+                merchantAddress = if (o.merchantAddress.isBlank() && mAddr.isNotBlank()) mAddr else o.merchantAddress,
+                merchantPhone = if (o.merchantPhone.isBlank() && mPhone.isNotBlank()) mPhone else o.merchantPhone
+            )
+        }
+
+        val currentActive = _activeOrders.value
+        if (currentActive.any { it.merchantId == merchantId && !it.isTaxi }) {
+            _activeOrders.value = currentActive.map { mergeOrder(it) }
+        }
+
+        val currentDelivered = _deliveredOrders.value
+        if (currentDelivered.any { it.merchantId == merchantId && !it.isTaxi }) {
+            _deliveredOrders.value = currentDelivered.map { mergeOrder(it) }
+        }
+
+        _incomingOfferBundle.value?.let { bundle ->
+            if (bundle.orders.any { it.merchantId == merchantId && !it.isTaxi }) {
+                val updatedOrders = bundle.orders.map { mergeOrder(it) }
+                _incomingOfferBundle.value = bundle.copy(orders = updatedOrders)
+                _incomingOffer.value = updatedOrders.firstOrNull()
+            }
+        }
+        _incomingOffer.value?.let { offer ->
+            if (offer.merchantId == merchantId && !offer.isTaxi && _incomingOfferBundle.value == null) {
+                _incomingOffer.value = mergeOrder(offer)
             }
         }
     }

@@ -12,6 +12,8 @@ data class OrderChatThread(
     val customerName: String = "",
     val merchantId: String = "",
     val merchantName: String = "",
+    val branchName: String = "",
+    val branchCode: String = "",
     val riderId: String = "",
     val riderName: String = "",
     val createdAt: Any? = null,
@@ -22,6 +24,9 @@ data class OrderChatThread(
     val partnerReadAt: Any? = null,
     val expireAt: Any? = null
 ) {
+    val displayMerchantName: String
+        get() = formatMerchantDisplayName(merchantName, branchName, branchCode)
+
     val lastMessageTimeMillis: Long
         get() = parseChatTimestamp(lastMessageAt)
 

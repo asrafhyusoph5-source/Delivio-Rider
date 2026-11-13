@@ -377,6 +377,9 @@ data class Order(
 
     // Merchant / Pickup
     val merchantName: String = "",
+    val branchName: String = "",
+    val branchCode: String = "",
+    val chainId: String = "",
     val merchantAddress: String = "",
     val merchantPhone: String = "",
     val merchantLat: Double = 0.0,
@@ -485,6 +488,9 @@ data class Order(
             }
             return "#$num"
         }
+
+    val displayMerchantName: String
+        get() = formatMerchantDisplayName(merchantName, branchName, branchCode)
 
     val deliveredAtMillis: Long
         get() {
@@ -1331,6 +1337,31 @@ fun formatGoalDescription(goal: QuestGoal, quest: Quest, currencySymbol: String 
 
     return parts.joinToString(" ")
 }
+
+fun formatMerchantDisplayName(
+    merchantName: String,
+    branchName: String = "",
+    branchCode: String = ""
+): String {
+    val base = merchantName.trim()
+    val branch = branchName.trim()
+    val code = branchCode.trim()
+    if (base.isBlank()) return ""
+    val withBranch = if (branch.isNotBlank() &&
+        !base.endsWith(" - $branch", ignoreCase = true) &&
+        !base.contains(" - $branch (", ignoreCase = true)
+    ) {
+        "$base - $branch"
+    } else {
+        base
+    }
+    return if (code.isNotBlank() && !withBranch.endsWith("($code)", ignoreCase = true)) {
+        "$withBranch ($code)"
+    } else {
+        withBranch
+    }
+}
+
 
 
 

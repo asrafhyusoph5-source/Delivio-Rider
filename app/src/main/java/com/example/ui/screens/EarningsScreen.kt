@@ -63,8 +63,13 @@ data class EarningsJobRecord(
     val riderEarning: com.example.data.models.RiderEarning? = null,
     val customerName: String = "",
     val customerId: String = "",
-    val closedAtMillis: Long? = null
+    val closedAtMillis: Long? = null,
+    val branchName: String = "",
+    val branchCode: String = ""
 ) {
+    val displayMerchantName: String
+        get() = formatMerchantDisplayName(merchantName, branchName, branchCode).ifBlank { merchantName }
+
     val paymentType: PaymentType
         get() = parsePaymentType(paymentMethod)
 
@@ -373,7 +378,9 @@ fun EarningsScreen(
                 riderEarning = order.riderEarning,
                 customerName = order.customerName,
                 customerId = order.customerId,
-                closedAtMillis = OrderChatConstants.getOrderClosedTimeMillis(order) ?: cal.timeInMillis
+                closedAtMillis = OrderChatConstants.getOrderClosedTimeMillis(order) ?: cal.timeInMillis,
+                branchName = if (order.isTaxi) "" else order.branchName,
+                branchCode = if (order.isTaxi) "" else order.branchCode
             )
         }
         (liveRecords + SAMPLE_EARNINGS_JOBS).distinctBy { it.id }
@@ -795,7 +802,7 @@ fun EarningsScreen(
             },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("${job.merchantName} • ${job.area}", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Text("${job.displayMerchantName} • ${job.area}", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                     Text("Completed at ${job.timeText}, Oct ${job.dayNumber}, 2026", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     HorizontalDivider()
 
@@ -879,6 +886,8 @@ fun EarningsScreen(
                                     customerName = job.customerName.ifBlank { "Customer" },
                                     customerId = job.customerId,
                                     merchantName = job.merchantName,
+                                    branchName = job.branchName,
+                                    branchCode = job.branchCode,
                                     closedTimeMillis = job.closedAtMillis
                                 )
                                 selectedJobForDetail = null
@@ -911,7 +920,7 @@ fun EarningsScreen(
                             onClick = {
                                 val sendIntent = Intent().apply {
                                     action = Intent.ACTION_SEND
-                                    putExtra(Intent.EXTRA_TEXT, "Delivio Driver Receipt\nJob: ${job.displayOrderNumber}\nService: ${job.serviceType}\nMerchant: ${job.merchantName}\nNet Earning: ₱${job.netEarning}\nDelivered on Oct ${job.dayNumber}, 2026")
+                                    putExtra(Intent.EXTRA_TEXT, "Delivio Driver Receipt\nJob: ${job.displayOrderNumber}\nService: ${job.serviceType}\nMerchant: ${job.displayMerchantName}\nNet Earning: ₱${job.netEarning}\nDelivered on Oct ${job.dayNumber}, 2026")
                                     type = "text/plain"
                                 }
                                 context.startActivity(Intent.createChooser(sendIntent, "Download/Share Receipt"))
@@ -1052,7 +1061,7 @@ private fun JobRowCard(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "${job.displayOrderNumber} • ${job.timeText} • ${job.merchantName}",
+                        text = "${job.displayOrderNumber} • ${job.timeText} • ${job.displayMerchantName}",
                         fontWeight = FontWeight.Bold,
                         fontSize = 14.sp,
                         color = MaterialTheme.colorScheme.onSurface

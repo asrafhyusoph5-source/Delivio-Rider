@@ -159,6 +159,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         customerName: String,
         customerId: String = "",
         merchantName: String = "",
+        branchName: String = "",
+        branchCode: String = "",
         closedTimeMillis: Long? = null
     ) {
         val tripOrder = Order(
@@ -169,6 +171,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             customerName = customerName,
             customerId = customerId,
             merchantName = merchantName,
+            branchName = branchName,
+            branchCode = branchCode,
             deliveredAt = closedTimeMillis?.let { com.google.firebase.Timestamp(java.util.Date(it)) }
         )
         openChatForOrder(tripOrder)

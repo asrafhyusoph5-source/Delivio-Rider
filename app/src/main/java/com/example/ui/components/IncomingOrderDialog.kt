@@ -534,12 +534,27 @@ fun IncomingOrderDialog(
                                         modifier = Modifier.size(16.dp)
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = if (ord.merchantAddress.isNotBlank()) ord.merchantAddress else ord.merchantName,
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        maxLines = 1
-                                    )
+                                    val pickupTitle = if (ord.isTaxi) {
+                                        ord.merchantAddress.ifBlank { ord.stops.firstOrNull()?.address ?: ord.displayMerchantName.ifBlank { "Pickup Point" } }
+                                    } else {
+                                        ord.displayMerchantName.ifBlank { ord.merchantAddress.ifBlank { "Merchant" } }
+                                    }
+                                    Column {
+                                        Text(
+                                            text = pickupTitle,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1
+                                        )
+                                        if (!ord.isTaxi && ord.merchantAddress.isNotBlank() && ord.merchantAddress != pickupTitle) {
+                                            Text(
+                                                text = ord.merchantAddress,
+                                                fontSize = 11.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                maxLines = 1
+                                            )
+                                        }
+                                    }
                                 }
 
                                 // Drop-off location

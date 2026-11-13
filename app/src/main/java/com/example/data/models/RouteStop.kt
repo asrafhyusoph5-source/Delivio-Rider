@@ -148,7 +148,15 @@ object RouteStopCalculator {
             if (merchantFinished) {
                 val existing = finishedStopsMap[mKey]
                 if (existing != null) {
-                    resultFinishedStops.add(existing.copy(status = StopStatus.DONE, isFinished = true, order = order))
+                    resultFinishedStops.add(
+                        createStop(
+                            number = existing.stopNumber,
+                            type = StopType.MERCHANT,
+                            order = order,
+                            status = StopStatus.DONE,
+                            isFinished = true
+                        )
+                    )
                 } else {
                     resultFinishedStops.add(
                         createStop(
@@ -313,14 +321,14 @@ object RouteStopCalculator {
             if (order.isTaxi) {
                 order.stops.firstOrNull()?.address ?: "Passenger Pickup"
             } else {
-                order.merchantName.ifBlank { "Merchant" }
+                order.displayMerchantName.ifBlank { "Merchant" }
             }
         } else {
             order.customerName.ifBlank { "Customer" }
         }
 
         val fullAddress = if (isMerchant) {
-            order.merchantAddress.ifBlank { order.merchantName }
+            order.merchantAddress.ifBlank { order.displayMerchantName }
         } else {
             order.customerAddress.ifBlank { order.customerArea }
         }

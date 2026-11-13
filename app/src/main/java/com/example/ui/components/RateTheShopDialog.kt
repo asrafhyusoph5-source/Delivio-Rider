@@ -33,7 +33,7 @@ fun RateTheShopDialog(
     var selectedRating by remember { mutableStateOf(5) }
     var commentText by remember { mutableStateOf("") }
 
-    val shopName = order.merchantName.ifBlank { "Partner Merchant" }
+    val shopName = order.displayMerchantName.ifBlank { "Partner Merchant" }
 
     Dialog(
         onDismissRequest = onDismiss,

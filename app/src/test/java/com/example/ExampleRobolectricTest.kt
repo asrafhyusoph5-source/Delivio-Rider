@@ -2158,10 +2158,89 @@ class ExampleRobolectricTest {
         val isTargetForMyCleanup = otherUserThread.riderId == myUid && otherUserThread.isExpired(now)
         assertFalse("Threads belonging to other users must never be targeted for deletion", isTargetForMyCleanup)
     }
+
+    @Test
+    fun `verify outlets merchant display name formatting and stop integration`() {
+        // 1. Brand + branchName + branchCode -> "<name> - <branchName> (<branchCode>)"
+        assertEquals(
+            "Jollibee - Palawan Rizal (RZL)",
+            com.example.data.models.formatMerchantDisplayName(
+                merchantName = "Jollibee",
+                branchName = "Palawan Rizal",
+                branchCode = "RZL"
+            )
+        )
+
+        // 2. Brand + branchName only -> "<name> - <branchName>"
+        assertEquals(
+            "Jollibee - Palawan Rizal",
+            com.example.data.models.formatMerchantDisplayName(
+                merchantName = "Jollibee",
+                branchName = "Palawan Rizal",
+                branchCode = ""
+            )
+        )
+
+        // 3. Brand + branchCode only -> "<name> (<branchCode>)"
+        assertEquals(
+            "Jollibee (RZL)",
+            com.example.data.models.formatMerchantDisplayName(
+                merchantName = "Jollibee",
+                branchName = "",
+                branchCode = "RZL"
+            )
+        )
+
+        // 4. Single shop without branch fields -> just brand name
+        assertEquals(
+            "Kalui Restaurant",
+            com.example.data.models.formatMerchantDisplayName(
+                merchantName = "Kalui Restaurant",
+                branchName = "",
+                branchCode = ""
+            )
+        )
+
+        // 5. Idempotency if already formatted
+        assertEquals(
+            "Jollibee - Palawan Rizal (RZL)",
+            com.example.data.models.formatMerchantDisplayName(
+                merchantName = "Jollibee - Palawan Rizal (RZL)",
+                branchName = "Palawan Rizal",
+                branchCode = "RZL"
+            )
+        )
+
+        // 6. Order.displayMerchantName and RouteStop pickup stop name
+        val outletOrder = Order(
+            id = "ord_outlet_1",
+            merchantName = "Jollibee",
+            branchName = "Palawan Rizal",
+            branchCode = "RZL",
+            chainId = "chain_jollibee",
+            merchantLat = 9.7400,
+            merchantLng = 118.7350,
+            customerName = "Maria",
+            customerLat = 9.7500,
+            customerLng = 118.7350,
+            riderStep = OrderStepConstants.STEP_TO_MERCHANT
+        )
+        assertEquals("Jollibee - Palawan Rizal (RZL)", outletOrder.displayMerchantName)
+
+        val stops = com.example.data.models.RouteStopCalculator.computeBatchStops(
+            activeOrders = listOf(outletOrder),
+            driverLat = 9.7390,
+            driverLng = 118.7350
+        )
+        assertEquals("Jollibee - Palawan Rizal (RZL)", stops.first().name)
+
+        // 7. OrderChatThread.displayMerchantName
+        val chatThread = com.example.data.models.OrderChatThread(
+            orderId = "ord_outlet_1",
+            merchantName = "Jollibee",
+            branchName = "Palawan Rizal",
+            branchCode = "RZL"
+        )
+        assertEquals("Jollibee - Palawan Rizal (RZL)", chatThread.displayMerchantName)
+    }
 }
-
-
-
-
-
-
