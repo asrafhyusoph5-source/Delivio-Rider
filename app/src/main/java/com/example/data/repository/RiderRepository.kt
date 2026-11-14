@@ -2706,12 +2706,21 @@ class RiderRepository {
                     }
                 }
 
+                val unitPrice = (m["unitPrice"] as? Number)?.toDouble()
+                val regularUnitPrice = (m["regularUnitPrice"] as? Number)?.toDouble()
+                val parsedPrice = unitPrice ?: (m["price"] as? Number)?.toDouble() ?: 0.0
+
                 OrderItem(
                     name = m["name"]?.toString() ?: m["title"]?.toString() ?: "",
                     quantity = (m["quantity"] as? Number)?.toInt() ?: 1,
-                    price = (m["price"] as? Number)?.toDouble() ?: 0.0,
+                    price = parsedPrice,
                     specialInstructions = m["specialInstructions"]?.toString() ?: "",
-                    selections = selectionsList
+                    selections = selectionsList,
+                    variantKey = m["variantKey"]?.toString()?.trim() ?: "",
+                    variantLabel = m["variantLabel"]?.toString()?.trim() ?: "",
+                    variantImageUrl = m["variantImageUrl"]?.toString()?.trim() ?: "",
+                    unitPrice = unitPrice,
+                    regularUnitPrice = regularUnitPrice
                 )
             } ?: emptyList()
 

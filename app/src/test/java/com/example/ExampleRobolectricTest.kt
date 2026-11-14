@@ -2389,4 +2389,36 @@ class ExampleRobolectricTest {
             )
         )
     }
+
+    @Test
+    fun `verify order item displays variantLabel after product name`() {
+        val variantItem = com.example.data.models.OrderItem(
+            name = "Pack of tissue",
+            quantity = 2,
+            price = 89.0,
+            variantKey = "pink__3_rolls",
+            variantLabel = "Pink / 3 rolls",
+            variantImageUrl = "https://cdn.example.com/tissue-pink.jpg",
+            unitPrice = 89.0,
+            regularUnitPrice = 110.0
+        )
+        assertEquals("Pack of tissue (Pink / 3 rolls)", variantItem.displayName)
+        assertEquals("Pack of tissue (Pink / 3 rolls) x2", variantItem.displayNameWithQty)
+
+        val plainItem = com.example.data.models.OrderItem(
+            name = "Bottled Water",
+            quantity = 3,
+            price = 25.0
+        )
+        assertEquals("Bottled Water", plainItem.displayName)
+        assertEquals("Bottled Water x3", plainItem.displayNameWithQty)
+
+        val alreadyFormattedItem = com.example.data.models.OrderItem(
+            name = "Running Shoes (Black / 42)",
+            quantity = 1,
+            variantLabel = "Black / 42"
+        )
+        assertEquals("Running Shoes (Black / 42)", alreadyFormattedItem.displayName)
+        assertEquals("Running Shoes (Black / 42) x1", alreadyFormattedItem.displayNameWithQty)
+    }
 }

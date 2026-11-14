@@ -456,7 +456,7 @@ fun HelpCenterFlowScreen(
                                         Spacer(modifier = Modifier.width(8.dp))
                                         Column {
                                             Text(
-                                                text = "${item.name} x${item.quantity}",
+                                                text = item.displayNameWithQty,
                                                 fontWeight = FontWeight.SemiBold,
                                                 fontSize = 14.sp
                                             )

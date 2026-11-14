@@ -972,7 +972,9 @@ private fun TimelineStopCard(
 
                 stop.items.forEach { item ->
                     val isTakenByOther = stop.order.splitOut.any { splitName ->
-                        splitName.trim().equals(item.name.trim(), ignoreCase = true)
+                        val sn = splitName.trim()
+                        sn.equals(item.name.trim(), ignoreCase = true) ||
+                            sn.equals(item.displayName.trim(), ignoreCase = true)
                     }
                     Column(modifier = Modifier.padding(vertical = 2.dp)) {
                         Row(
@@ -985,7 +987,7 @@ private fun TimelineStopCard(
                                 modifier = Modifier.weight(1f, fill = false)
                             ) {
                                 Text(
-                                    text = "• ${item.name}",
+                                    text = "• ${item.displayName}",
                                     fontWeight = FontWeight.SemiBold,
                                     fontSize = 12.sp,
                                     color = if (isTakenByOther) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f) else MaterialTheme.colorScheme.onSurface
@@ -1318,7 +1320,9 @@ private fun ItemChecklistDialog(
                 ) {
                     currentStop.items.forEachIndexed { idx, item ->
                         val isTakenByOther = currentStop.order.splitOut.any { splitName ->
-                            splitName.trim().equals(item.name.trim(), ignoreCase = true)
+                            val sn = splitName.trim()
+                            sn.equals(item.name.trim(), ignoreCase = true) ||
+                                sn.equals(item.displayName.trim(), ignoreCase = true)
                         }
                         Row(
                             modifier = Modifier
@@ -1345,7 +1349,7 @@ private fun ItemChecklistDialog(
                             Column {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(
-                                        text = "${item.name} x${item.quantity}",
+                                        text = item.displayNameWithQty,
                                         fontWeight = FontWeight.SemiBold,
                                         fontSize = 13.sp,
                                         color = if (isTakenByOther) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f) else MaterialTheme.colorScheme.onSurface
@@ -1393,7 +1397,11 @@ private fun ItemChecklistDialog(
 
                 val allRequiredChecked = currentStop.items.indices.all { idx ->
                     val itm = currentStop.items[idx]
-                    val isTaken = currentStop.order.splitOut.any { it.trim().equals(itm.name.trim(), ignoreCase = true) }
+                    val isTaken = currentStop.order.splitOut.any {
+                        val sn = it.trim()
+                        sn.equals(itm.name.trim(), ignoreCase = true) ||
+                            sn.equals(itm.displayName.trim(), ignoreCase = true)
+                    }
                     isTaken || (checkedItems[idx] == true)
                 }
 

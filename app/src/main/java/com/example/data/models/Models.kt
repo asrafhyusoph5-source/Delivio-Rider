@@ -316,8 +316,27 @@ data class OrderItem(
     val price: Double = 0.0,
     val specialInstructions: String = "",
     val selections: List<String> = emptyList(),
-    var isChecked: Boolean = false
-)
+    var isChecked: Boolean = false,
+    val variantKey: String = "",
+    val variantLabel: String = "",
+    val variantImageUrl: String = "",
+    val unitPrice: Double? = null,
+    val regularUnitPrice: Double? = null
+) {
+    val displayName: String
+        get() {
+            val base = name.trim()
+            val label = variantLabel.trim()
+            return if (label.isNotBlank() && !base.endsWith("($label)", ignoreCase = true)) {
+                if (base.isNotBlank()) "$base ($label)" else label
+            } else {
+                base
+            }
+        }
+
+    val displayNameWithQty: String
+        get() = "$displayName x$quantity"
+}
 
 data class PabiliItem(
     val product: String = "",
