@@ -566,6 +566,9 @@ data class Order(
     val isTaxi: Boolean
         get() = serviceType.lowercase() == OrderStepConstants.SERVICE_TAXI
 
+    val isMart: Boolean
+        get() = serviceType.trim().lowercase().let { it == OrderStepConstants.SERVICE_MART || it == "mart" }
+
     val allTaxiStops: List<TaxiStop>
         get() {
             if (!isTaxi) return emptyList()

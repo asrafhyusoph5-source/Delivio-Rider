@@ -32,7 +32,8 @@ data class DispatchSettings(
     val waveSeconds: Int = 5,
     val specialRadiusRiderExtra: Double = 0.0,
     val priorityMaxBatch: Int = 4,
-    val priorityHeadStartSeconds: Int = 15
+    val priorityHeadStartSeconds: Int = 15,
+    val martBatching: Boolean = false
 )
 
 object BatchConstants {
@@ -74,9 +75,14 @@ object BatchConstants {
         }
     }
 
+    fun isMartService(serviceType: String?): Boolean {
+        val s = serviceType?.trim()?.lowercase() ?: ""
+        return s == OrderStepConstants.SERVICE_MART || s == "mart"
+    }
+
     /**
-     * poolable(order) = order.dispatch.poolable == true, serviceType is food or convenience,
-     * fulfillment is not pickup. Priority orders are never pooled.
+     * poolable(order) = order.dispatch.poolable == true, serviceType is food (or convenience when martBatching is true),
+     * fulfillment is not pickup. Priority orders and Mart orders (when martBatching is false) are never pooled.
      */
     fun isPoolable(order: Order, dispatch: DispatchSettings): Boolean {
         if (order.isPriority || order.isSplitChild) return false
@@ -84,9 +90,58 @@ object BatchConstants {
         if (badge == "priority" || badge == "split") return false
         if (!order.isPoolable) return false
         val s = order.serviceType.trim().lowercase()
-        if (s != "food" && s != "convenience" && s != "instant" && s != OrderStepConstants.SERVICE_FOOD) return false
+        if (isMartService(s) && !dispatch.martBatching) return false
+        if (s != "food" && s != "convenience" && s != "mart" && s != "instant" && s != OrderStepConstants.SERVICE_FOOD) return false
         if (order.isPickup) return false
         return true
+    }
+
+    /**
+     * Returns false if the rider's active orders prevent any additional offers (e.g. Taxi, Parcel, Pabili, Request,
+     * Priority, Split child, closed pickup phase, or Mart when martBatching is false).
+     */
+    fun canReceiveMoreOffers(activeList: List<Order>, dispatch: DispatchSettings, isPriorityRider: Boolean): Boolean {
+        if (activeList.any { it.isTaxi }) return false
+        val hasSingleOnlyActive = activeList.any { ord ->
+            val s = ord.serviceType.lowercase().trim()
+            if (!dispatch.martBatching && isMartService(s)) {
+                true
+            } else {
+                s !in listOf("food", "convenience", "mart", "instant", OrderStepConstants.SERVICE_FOOD)
+            }
+        }
+        if (hasSingleOnlyActive) return false
+        if (activeList.any { it.isPriority || it.badge.equals("priority", ignoreCase = true) }) return false
+        if (activeList.isNotEmpty() && !isPickupPhaseOpen(activeList)) return false
+        if (activeList.any { it.isSplitChild || it.badge.equals("split", ignoreCase = true) }) return false
+
+        val onlyFoodBatchEligible = dispatch.martBatching || activeList.none { isMartService(it.serviceType) }
+        val currentBatchLimit = if (isPriorityRider && onlyFoodBatchEligible) {
+            val anyPriority = activeList.any { it.isPriority || it.badge.equals("priority", ignoreCase = true) }
+            if (anyPriority) 1 else dispatch.priorityMaxBatch.coerceAtLeast(1)
+        } else {
+            activeList.map { it.maxBatch.coerceAtLeast(2) }.minOrNull() ?: dispatch.maxBatch
+        }
+        if (activeList.size >= currentBatchLimit) return false
+        return true
+    }
+
+    /**
+     * Returns true if a candidate order is compatible with the rider's active orders under current martBatching rules.
+     */
+    fun isCandidateCompatibleWithActive(activeList: List<Order>, candidate: Order, dispatch: DispatchSettings): Boolean {
+        if (activeList.isEmpty()) return true
+        val isCandidateSplitChild = candidate.isSplitChild || candidate.badge.equals("split", ignoreCase = true)
+        if (isCandidateSplitChild) return false
+        if (!dispatch.martBatching && isMartService(candidate.serviceType)) return false
+
+        val s = candidate.serviceType.lowercase().trim()
+        val isBatchableCandidate = if (dispatch.martBatching) {
+            s in listOf("food", "convenience", "mart", "instant", OrderStepConstants.SERVICE_FOOD)
+        } else {
+            !isMartService(s) && s in listOf("food", "instant", OrderStepConstants.SERVICE_FOOD)
+        }
+        return isBatchableCandidate
     }
 
     /**
@@ -95,7 +150,8 @@ object BatchConstants {
      * - If dispatch.endsWhenReady is true (Standard) the order stops holding when its status becomes "Ready"
      *   or now >= holdUntil, whichever comes first.
      * - If it is false (Saver) it holds until now >= holdUntil exactly, even when Ready.
-     * - Priority never holds.
+     * - Priority and Split never hold.
+     * - Delivio Mart (convenience) orders never hold when settings/dispatch.martBatching is false.
      * - A missing endsWhenReady means true for standard and false for saver.
      */
     fun isHolding(order: Order, dispatch: DispatchSettings, nowMillis: Long = System.currentTimeMillis()): Boolean {
@@ -105,6 +161,10 @@ object BatchConstants {
         }
         // Split orders never hold
         if (order.isSplitChild || order.badge.equals("split", ignoreCase = true)) {
+            return false
+        }
+        // When martBatching is false, Standard and Saver hold timers are skipped for Mart orders
+        if (isMartService(order.serviceType) && !dispatch.martBatching) {
             return false
         }
         // Must be poolable
@@ -229,9 +289,10 @@ object BatchConstants {
         if (merchantAlreadyPickedUpInBatch) return false
 
         // Batch capacity:
-        // For priority rider: limit is settings/dispatch.priorityMaxBatch (default 4) for Standard and Saver orders (minimum 1)
+        // For priority rider: limit is settings/dispatch.priorityMaxBatch (default 4) for Food batches (and Mart if martBatching == true)
         // For regular rider: smallest maxBatch among all orders in it (minimum 2)
-        val capacity = if (isPriorityRider) {
+        val allowsPriorityMax = dispatch.martBatching || (batch.none { isMartService(it.serviceType) } && !isMartService(order.serviceType))
+        val capacity = if (isPriorityRider && allowsPriorityMax) {
             dispatch.priorityMaxBatch.coerceAtLeast(1)
         } else {
             (batch.map { it.maxBatch.coerceAtLeast(2) } + order.maxBatch.coerceAtLeast(2)).minOrNull() ?: dispatch.maxBatch

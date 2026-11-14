@@ -218,6 +218,7 @@ class RiderRepository {
     private var activeOrderChatMessagesListener: ListenerRegistration? = null
     private var currentChatId: String? = null
     private var lastChatCleanupTimeMillis = 0L
+    private var activeUserPrefs: UserPreferencesRepository? = null
 
     private fun syncDeliveryRates(cityId: String) {
         if (cityId.isBlank() || cityId == currentRatesCityId) return
@@ -325,7 +326,15 @@ class RiderRepository {
         } else {
             dispatchSettings.priorityHeadStartSeconds + (km * dispatchSettings.waveSeconds)
         }
-        val eligibleSince = orders.minOfOrNull { it.holdUntilMillis - (dispatchSettings.holdMinutes * 60 * 1000).toLong() } ?: System.currentTimeMillis()
+        val eligibleSince = orders.minOfOrNull { ord ->
+            if (ord.acceptedAtMillis > 0L) {
+                ord.acceptedAtMillis
+            } else if (ord.holdUntilMillis > 0L) {
+                ord.holdUntilMillis - (dispatchSettings.holdMinutes * 60 * 1000).toLong()
+            } else {
+                System.currentTimeMillis()
+            }
+        } ?: System.currentTimeMillis()
 
         val combinedBadge = when {
             orders.any { it.isPriority } -> "Priority"
@@ -400,6 +409,7 @@ class RiderRepository {
 
     fun startListeningForRider(uid: String, userPrefs: UserPreferencesRepository) {
         stopListening()
+        activeUserPrefs = userPrefs
 
         // 1. Listen to riders/{uid}
         riderListener = db.collection("riders").document(uid)
@@ -509,6 +519,7 @@ class RiderRepository {
                 _activeOrders.value = activeList
                 val activeIds = activeList.map { it.id }.toSet()
                 RiderLocationTracker.setActiveOrderIds(activeIds)
+                evaluateOffers(activeUserPrefs)
             }
 
         // 3. Listen to incoming offers: riderId == null and status in ["Placed Order", "Preparing", "Ready"]
@@ -523,290 +534,7 @@ class RiderRepository {
                 if (error != null || snapshots == null) return@addSnapshotListener
                 val rawCandidates = snapshots.documents.mapNotNull { parseOrder(it) }
                 _candidateOrders.value = rawCandidates
-                val currentRider = _rider.value
-                val activeList = _activeOrders.value
-                val riderLoc = RiderLocationTracker.currentLocation.value
-                val dispatch = _dispatchSettings.value
-                val rates = _riderPaySettings.value
-
-                if (currentRider == null || !currentRider.isOnline) {
-                    _incomingOfferBundle.value = null
-                    _incomingOffer.value = null
-                    return@addSnapshotListener
-                }
-
-                // If driver currently has an active Taxi order, no other orders can be combined
-                if (activeList.any { it.isTaxi }) {
-                    _incomingOfferBundle.value = null
-                    _incomingOffer.value = null
-                    return@addSnapshotListener
-                }
-
-                // Priority orders are never pooled. Driver holding a Priority order receives no other offers
-                // 1. Booking Exclusivity:
-                // Only Food and Convenience orders can be combined in a batch (double booking).
-                // Parcel, Pabili, Taxi, and Request a Rider are always single bookings:
-                // such an order is offered only when I have no active orders, and while holding one, no other offers are generated.
-                val hasNonFoodActive = activeList.any {
-                    val s = it.serviceType.lowercase().trim()
-                    s !in listOf("food", "convenience", "instant", OrderStepConstants.SERVICE_FOOD)
-                }
-                if (hasNonFoodActive) {
-                    _incomingOfferBundle.value = null
-                    _incomingOffer.value = null
-                    return@addSnapshotListener
-                }
-
-                // If any order in the batch is Priority, it can never be pooled
-                if (activeList.any { it.isPriority || it.badge.equals("priority", ignoreCase = true) }) {
-                    _incomingOfferBundle.value = null
-                    _incomingOffer.value = null
-                    return@addSnapshotListener
-                }
-
-                // When every pickup is done the batch is closed until ALL its orders are delivered
-                if (activeList.isNotEmpty() && !BatchConstants.isPickupPhaseOpen(activeList)) {
-                    _incomingOfferBundle.value = null
-                    _incomingOffer.value = null
-                    return@addSnapshotListener
-                }
-
-                // Batch limit:
-                // Priority rider: settings/dispatch.priorityMaxBatch (default 4, minimum 1) for Standard and Saver orders. Priority-option orders and all other services stay single (limit 1).
-                // Normal rider: smallest maxBatch among all active orders (Standard and Saver allow 2 or more).
-                val currentBatchLimit = if (currentRider.priorityRider) {
-                    val anyPriority = activeList.any { it.isPriority || it.badge.equals("priority", ignoreCase = true) }
-                    if (anyPriority) 1 else dispatch.priorityMaxBatch.coerceAtLeast(1)
-                } else {
-                    activeList.map { it.maxBatch.coerceAtLeast(2) }.minOrNull() ?: dispatch.maxBatch
-                }
-                if (activeList.size >= currentBatchLimit) {
-                    _incomingOfferBundle.value = null
-                    _incomingOffer.value = null
-                    return@addSnapshotListener
-                }
-
-                // If driver holds a split child order, it is a single booking: no other offers
-                if (activeList.any { it.isSplitChild || it.badge.equals("split", ignoreCase = true) }) {
-                    _incomingOfferBundle.value = null
-                    _incomingOffer.value = null
-                    return@addSnapshotListener
-                }
-
-                // Family IDs of active orders to prevent sibling split delivery assignment
-                val activeSplitFamilyIds = activeList.mapNotNull { active ->
-                    val parentId = active.splitParentOrderId?.trim()
-                    if (!parentId.isNullOrEmpty()) {
-                        parentId
-                    } else if (active.hasSplitOut) {
-                        active.id
-                    } else null
-                }.toSet()
-
-                val declinedIds = userPrefs.declinedOrderIds.value
-                val releasedIds = _releasedOrderIds.value
-                val uid = currentRider.uid
-
-                // Filter unassigned candidate orders
-                val candidateOrders = snapshots.documents.mapNotNull { parseOrder(it) }.filter { order ->
-                    // Never offer again an order I released or declined
-                    if (declinedIds.contains(order.id) || releasedIds.contains(order.id)) return@filter false
-
-                    // Skip any whose excludeRiderIds contains my uid
-                    if (order.excludeRiderIds.contains(uid)) return@filter false
-
-                    // Never offer orders where fulfillment == "pickup" (filter in code)
-                    if (order.isPickup) return@filter false
-
-                    // Ignore any order whose scheduledFor is in the future (after release time: scheduledFor - settings/platform.scheduledReleaseLeadMinutes)
-                    val leadMinutes = _scheduledReleaseLeadMinutes.value
-                    if (order.isFutureScheduled(leadMinutes)) return@filter false
-
-                    // Split child orders are strictly single bookings: cannot be added to an active batch
-                    val isCandidateSplitChild = order.isSplitChild || order.badge.equals("split", ignoreCase = true)
-                    if (isCandidateSplitChild && activeList.isNotEmpty()) return@filter false
-
-                    // Sibling check: a rider who holds one split order cannot receive another sibling
-                    val candidateFamilyId = if (!order.splitParentOrderId.isNullOrBlank()) {
-                        order.splitParentOrderId!!.trim()
-                    } else if (order.hasSplitOut) {
-                        order.id
-                    } else null
-
-                    if (candidateFamilyId != null && activeSplitFamilyIds.contains(candidateFamilyId)) {
-                        return@filter false
-                    }
-
-                    // While holding a Food or Convenience batch, I get no Parcel, Pabili, Taxi, or Request offers
-                    val isFoodOrConv = order.serviceType.lowercase().trim() in listOf(
-                        "food", "convenience", "instant", OrderStepConstants.SERVICE_FOOD
-                    )
-                    if (activeList.isNotEmpty() && !isFoodOrConv) return@filter false
-
-                    // Check if service is switched off in city or platform (missing means on)
-                    val checkCity = if (order.cityId.isNotBlank()) order.cityId else currentRider.cityId
-                    if (!isServiceOn(order.serviceType, checkCity)) return@filter false
-
-                    if (!currentRider.activeServices.contains(order.serviceType)) return@filter false
-                    if (!currentRider.allowedServices.contains(order.serviceType)) return@filter false
-                    if (order.cityId.isNotEmpty() && currentRider.cityId.isNotEmpty() && order.cityId != currentRider.cityId) {
-                        return@filter false
-                    }
-
-                    val riderVehicleType = OrderStepConstants.normalizeVehicleType(currentRider.vehicle.type)
-                    val orderVehicleType = OrderStepConstants.normalizeVehicleType(order.vehicleType)
-
-                    // TAXI SPECIFIC CRITERIA:
-                    // 1. driver has no other active order (a taxi trip cannot be combined with other orders)
-                    // 2. orders.vehicleType == riders.vehicleType
-                    // 3. pickup within 5 km
-                    if (order.isTaxi) {
-                        if (activeList.isNotEmpty()) return@filter false
-                        if (orderVehicleType != riderVehicleType) return@filter false
-
-                        val distKm = if (riderLoc != null && order.merchantLat != 0.0 && order.merchantLng != 0.0) {
-                            BatchConstants.distanceKm(riderLoc.first, riderLoc.second, order.merchantLat, order.merchantLng)
-                        } else order.pickupDistanceKm
-                        if (distKm > 5.0) return@filter false
-
-                        return@filter order.status in listOf(
-                            OrderStepConstants.STATUS_PLACED_ORDER,
-                            OrderStepConstants.STATUS_PREPARING,
-                            OrderStepConstants.STATUS_READY
-                        )
-                    }
-
-                    // Non-taxi orders: check vehicle suitability
-                    val allowedForVehicle = OrderStepConstants.getServicesForVehicle(riderVehicleType)
-                    if (!allowedForVehicle.contains(order.serviceType)) return@filter false
-
-                    // Skip any beyond dispatch.searchRadiusKm from the pickup, UNLESS priority rider for Food/Convenience
-                    val skipRadius = currentRider.priorityRider && isFoodOrConv
-                    if (!skipRadius) {
-                        val distKm = if (riderLoc != null && order.merchantLat != 0.0 && order.merchantLng != 0.0) {
-                            BatchConstants.distanceKm(riderLoc.first, riderLoc.second, order.merchantLat, order.merchantLng)
-                        } else order.pickupDistanceKm
-                        if (distKm > dispatch.searchRadiusKm) return@filter false
-                    }
-
-                    // Readiness check:
-                    if (order.isScheduled) {
-                        order.merchantAccepted ||
-                            order.status == OrderStepConstants.STATUS_PREPARING ||
-                            order.status == OrderStepConstants.STATUS_READY ||
-                            order.status.lowercase() in listOf("preparing", "ready") ||
-                            order.status != OrderStepConstants.STATUS_PLACED_ORDER
-                    } else {
-                        when (order.serviceType.lowercase()) {
-                            OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_INSTANT, "convenience", "instant" -> {
-                                val s = order.status.trim().lowercase()
-                                s in listOf("preparing", "ready") ||
-                                    order.status == OrderStepConstants.STATUS_PREPARING ||
-                                    order.status == OrderStepConstants.STATUS_READY ||
-                                    (order.merchantAccepted && s != "placed order" && s != "placed_order")
-                            }
-                            OrderStepConstants.SERVICE_REQUEST -> {
-                                order.riderRequestStatus == OrderStepConstants.REQ_SEARCHING
-                            }
-                            OrderStepConstants.SERVICE_PARCEL, OrderStepConstants.SERVICE_PABILI -> {
-                                order.status == OrderStepConstants.STATUS_PLACED_ORDER
-                            }
-                            else -> false
-                        }
-                    }
-                }
-
-                var selectedBundle: OfferBundle? = null
-                val now = System.currentTimeMillis()
-
-                if (activeList.isEmpty()) {
-                    // DRIVER IS IDLE:
-                    // 1. Priority orders are offered as a single booking
-                    val priorityCandidate = candidateOrders.firstOrNull { it.isPriority || it.badge.equals("priority", ignoreCase = true) }
-                    if (priorityCandidate != null) {
-                        selectedBundle = buildOfferBundle(OfferType.SINGLE, listOf(priorityCandidate), riderLoc, rates, dispatch, isPriorityRider = currentRider.priorityRider)
-                    }
-
-                    // 2. Poolable orders that are NOT holding (hold ended or Ready) are offered as a single booking
-                    if (selectedBundle == null) {
-                        val nonHoldingPoolable = candidateOrders.firstOrNull { order ->
-                            BatchConstants.isPoolable(order, dispatch) && !BatchConstants.isHolding(order, dispatch, now)
-                        }
-                        if (nonHoldingPoolable != null) {
-                            selectedBundle = buildOfferBundle(OfferType.SINGLE, listOf(nonHoldingPoolable), riderLoc, rates, dispatch, isPriorityRider = currentRider.priorityRider)
-                        }
-                    }
-
-                    // 3. Holding poolable orders are offered ONLY as a "Double booking" bundle with a pairable partner
-                    // (if three or more are pairable, bundle can grow up to the smallest maxBatch or priorityMaxBatch)
-                    if (selectedBundle == null) {
-                        val holdingOrders = candidateOrders.filter { order ->
-                            BatchConstants.isPoolable(order, dispatch) && BatchConstants.isHolding(order, dispatch, now)
-                        }
-                        for (hOrder in holdingOrders) {
-                            val pairablePartners = holdingOrders.filter { other ->
-                                other.id != hOrder.id && BatchConstants.isPairable(hOrder, other, dispatch)
-                            }
-                            if (pairablePartners.isNotEmpty()) {
-                                val partner = pairablePartners.first()
-                                val bundleList = mutableListOf(hOrder, partner)
-                                val maxLimit = if (currentRider.priorityRider) {
-                                    dispatch.priorityMaxBatch.coerceAtLeast(1)
-                                } else {
-                                    min(hOrder.maxBatch.coerceAtLeast(2), partner.maxBatch.coerceAtLeast(2))
-                                }
-                                for (third in pairablePartners.drop(1)) {
-                                    if (bundleList.size < maxLimit && bundleList.all { BatchConstants.isPairable(it, third, dispatch) }) {
-                                        bundleList.add(third)
-                                    }
-                                }
-                                selectedBundle = buildOfferBundle(OfferType.DOUBLE_BOOKING, bundleList, riderLoc, rates, dispatch, isPriorityRider = currentRider.priorityRider)
-                                break
-                            }
-                        }
-                    }
-
-                    // 4. Non-poolable orders (Taxi, Parcel, Pabili, Request) offered as single booking
-                    if (selectedBundle == null) {
-                        val nonPoolable = candidateOrders.firstOrNull { !BatchConstants.isPoolable(it, dispatch) && !it.isPriority }
-                        if (nonPoolable != null) {
-                            selectedBundle = buildOfferBundle(OfferType.SINGLE, listOf(nonPoolable), riderLoc, rates, dispatch, isPriorityRider = currentRider.priorityRider)
-                        }
-                    }
-                } else {
-                    // DRIVER HAS ACTIVE BATCH AND PICKUP PHASE IS OPEN:
-                    // Offer every order where canJoin(batch, order) is true as "Add to your booking"
-                    val joinableCandidate = candidateOrders.firstOrNull { candidate ->
-                        BatchConstants.canJoin(activeList, candidate, dispatch, isPriorityRider = currentRider.priorityRider)
-                    }
-                    if (joinableCandidate != null) {
-                        selectedBundle = buildOfferBundle(
-                            OfferType.ADD_TO_BOOKING,
-                            listOf(joinableCandidate),
-                            riderLoc,
-                            rates,
-                            dispatch,
-                            startingRank = activeList.size + 1,
-                            isPriorityRider = currentRider.priorityRider
-                        )
-                    }
-                }
-
-                // Wave delay: floor(km from my position to the first pickup) * waveSeconds counted from when order/bundle became eligible
-                if (selectedBundle != null) {
-                    val waveDelaySec = selectedBundle.waveDelaySeconds
-                    val elapsedSec = ((now - selectedBundle.eligibleSince) / 1000).coerceAtLeast(0)
-                    if (elapsedSec >= waveDelaySec || waveDelaySec <= 0) {
-                        _incomingOfferBundle.value = selectedBundle
-                        _incomingOffer.value = selectedBundle.firstOrder
-                    } else {
-                        _incomingOfferBundle.value = null
-                        _incomingOffer.value = null
-                    }
-                } else {
-                    _incomingOfferBundle.value = null
-                    _incomingOffer.value = null
-                }
+                evaluateOffers(userPrefs)
             }
 
         // 4. Delivered orders for earnings & wallet
@@ -927,6 +655,7 @@ class RiderRepository {
                     val riderExtra = (specialMap?.get("riderExtra") as? Number)?.toDouble() ?: 0.0
                     val pMaxBatch = (doc.get("priorityMaxBatch") as? Number)?.toInt() ?: 4
                     val pHeadStart = (doc.get("priorityHeadStartSeconds") as? Number)?.toInt() ?: 15
+                    val martBatching = doc.getBoolean("martBatching") ?: false
                     _dispatchSettings.value = DispatchSettings(
                         holdMinutes = holdMin,
                         maxBatch = maxB,
@@ -936,8 +665,13 @@ class RiderRepository {
                         waveSeconds = waveSec,
                         specialRadiusRiderExtra = riderExtra,
                         priorityMaxBatch = pMaxBatch,
-                        priorityHeadStartSeconds = pHeadStart
+                        priorityHeadStartSeconds = pHeadStart,
+                        martBatching = martBatching
                     )
+                    evaluateOffers(activeUserPrefs)
+                } else if (doc != null && !doc.exists()) {
+                    _dispatchSettings.value = DispatchSettings()
+                    evaluateOffers(activeUserPrefs)
                 }
             }
 
@@ -1070,6 +804,241 @@ class RiderRepository {
                 _chatThreads.value = threads.associateBy { it.orderId }
                 cleanupExpiredChats()
             }
+    }
+
+    private fun evaluateOffers(userPrefs: UserPreferencesRepository?) {
+        val rawCandidates = _candidateOrders.value
+        val currentRider = _rider.value
+        val activeList = _activeOrders.value
+        val riderLoc = RiderLocationTracker.currentLocation.value
+        val dispatch = _dispatchSettings.value
+        val rates = _riderPaySettings.value
+
+        if (currentRider == null || !currentRider.isOnline) {
+            _incomingOfferBundle.value = null
+            _incomingOffer.value = null
+            return
+        }
+
+        // Check active order exclusivity, pickup phase, and batch capacity
+        // (When martBatching is false, Mart active order allows no further offers,
+        //  and priorityMaxBatch applies to Food batches only.)
+        if (!BatchConstants.canReceiveMoreOffers(activeList, dispatch, currentRider.priorityRider)) {
+            _incomingOfferBundle.value = null
+            _incomingOffer.value = null
+            return
+        }
+
+        // Family IDs of active orders to prevent sibling split delivery assignment
+        val activeSplitFamilyIds = activeList.mapNotNull { active ->
+            val parentId = active.splitParentOrderId?.trim()
+            if (!parentId.isNullOrEmpty()) {
+                parentId
+            } else if (active.hasSplitOut) {
+                active.id
+            } else null
+        }.toSet()
+
+        val declinedIds = userPrefs?.declinedOrderIds?.value ?: emptySet()
+        val releasedIds = _releasedOrderIds.value
+        val uid = currentRider.uid
+        val leadMinutes = _scheduledReleaseLeadMinutes.value
+
+        // Filter unassigned candidate orders
+        val candidateOrders = rawCandidates.filter { order ->
+            // Never offer again an order I released or declined
+            if (declinedIds.contains(order.id) || releasedIds.contains(order.id)) return@filter false
+
+            // Skip any whose excludeRiderIds contains my uid
+            if (order.excludeRiderIds.contains(uid)) return@filter false
+
+            // Never offer orders where fulfillment == "pickup" (filter in code)
+            if (order.isPickup) return@filter false
+
+            // Ignore any order whose scheduledFor is in the future (after release time: scheduledFor - settings/platform.scheduledReleaseLeadMinutes)
+            if (order.isFutureScheduled(leadMinutes)) return@filter false
+
+            // Sibling check: a rider who holds one split order cannot receive another sibling
+            val candidateFamilyId = if (!order.splitParentOrderId.isNullOrBlank()) {
+                order.splitParentOrderId!!.trim()
+            } else if (order.hasSplitOut) {
+                order.id
+            } else null
+
+            if (candidateFamilyId != null && activeSplitFamilyIds.contains(candidateFamilyId)) {
+                return@filter false
+            }
+
+            // Enforce active batch compatibility (when martBatching is false, rider with any active order gets no Mart offers)
+            if (!BatchConstants.isCandidateCompatibleWithActive(activeList, order, dispatch)) {
+                return@filter false
+            }
+
+            // Check if service is switched off in city or platform (missing means on)
+            val checkCity = if (order.cityId.isNotBlank()) order.cityId else currentRider.cityId
+            if (!isServiceOn(order.serviceType, checkCity)) return@filter false
+
+            if (!currentRider.activeServices.contains(order.serviceType)) return@filter false
+            if (!currentRider.allowedServices.contains(order.serviceType)) return@filter false
+            if (order.cityId.isNotEmpty() && currentRider.cityId.isNotEmpty() && order.cityId != currentRider.cityId) {
+                return@filter false
+            }
+
+            val riderVehicleType = OrderStepConstants.normalizeVehicleType(currentRider.vehicle.type)
+            val orderVehicleType = OrderStepConstants.normalizeVehicleType(order.vehicleType)
+
+            // TAXI SPECIFIC CRITERIA:
+            if (order.isTaxi) {
+                if (activeList.isNotEmpty()) return@filter false
+                if (orderVehicleType != riderVehicleType) return@filter false
+
+                val distKm = if (riderLoc != null && order.merchantLat != 0.0 && order.merchantLng != 0.0) {
+                    BatchConstants.distanceKm(riderLoc.first, riderLoc.second, order.merchantLat, order.merchantLng)
+                } else order.pickupDistanceKm
+                if (distKm > 5.0) return@filter false
+
+                return@filter order.status in listOf(
+                    OrderStepConstants.STATUS_PLACED_ORDER,
+                    OrderStepConstants.STATUS_PREPARING,
+                    OrderStepConstants.STATUS_READY
+                )
+            }
+
+            // Non-taxi orders: check vehicle suitability
+            val allowedForVehicle = OrderStepConstants.getServicesForVehicle(riderVehicleType)
+            if (!allowedForVehicle.contains(order.serviceType)) return@filter false
+
+            // Skip any beyond dispatch.searchRadiusKm from the pickup, UNLESS priority rider for Food/Convenience
+            val isFoodOrConv = order.serviceType.lowercase().trim() in listOf(
+                "food", "convenience", "mart", "instant", OrderStepConstants.SERVICE_FOOD
+            )
+            val skipRadius = currentRider.priorityRider && isFoodOrConv
+            if (!skipRadius) {
+                val distKm = if (riderLoc != null && order.merchantLat != 0.0 && order.merchantLng != 0.0) {
+                    BatchConstants.distanceKm(riderLoc.first, riderLoc.second, order.merchantLat, order.merchantLng)
+                } else order.pickupDistanceKm
+                if (distKm > dispatch.searchRadiusKm) return@filter false
+            }
+
+            // Readiness check:
+            if (order.isScheduled) {
+                order.merchantAccepted ||
+                    order.status == OrderStepConstants.STATUS_PREPARING ||
+                    order.status == OrderStepConstants.STATUS_READY ||
+                    order.status.lowercase() in listOf("preparing", "ready") ||
+                    order.status != OrderStepConstants.STATUS_PLACED_ORDER
+            } else {
+                when (order.serviceType.lowercase().trim()) {
+                    OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_INSTANT, "convenience", "mart", "instant" -> {
+                        val s = order.status.trim().lowercase()
+                        s in listOf("preparing", "ready") ||
+                            order.status == OrderStepConstants.STATUS_PREPARING ||
+                            order.status == OrderStepConstants.STATUS_READY ||
+                            (order.merchantAccepted && s != "placed order" && s != "placed_order")
+                    }
+                    OrderStepConstants.SERVICE_REQUEST -> {
+                        order.riderRequestStatus == OrderStepConstants.REQ_SEARCHING
+                    }
+                    OrderStepConstants.SERVICE_PARCEL, OrderStepConstants.SERVICE_PABILI -> {
+                        order.status == OrderStepConstants.STATUS_PLACED_ORDER
+                    }
+                    else -> false
+                }
+            }
+        }
+
+        var selectedBundle: OfferBundle? = null
+        val now = System.currentTimeMillis()
+
+        if (activeList.isEmpty()) {
+            // DRIVER IS IDLE:
+            // 1. Priority orders are offered as a single booking
+            val priorityCandidate = candidateOrders.firstOrNull { it.isPriority || it.badge.equals("priority", ignoreCase = true) }
+            if (priorityCandidate != null) {
+                selectedBundle = buildOfferBundle(OfferType.SINGLE, listOf(priorityCandidate), riderLoc, rates, dispatch, isPriorityRider = currentRider.priorityRider)
+            }
+
+            // 2. Poolable orders that are NOT holding (hold ended or Ready) are offered as a single booking
+            if (selectedBundle == null) {
+                val nonHoldingPoolable = candidateOrders.firstOrNull { order ->
+                    BatchConstants.isPoolable(order, dispatch) && !BatchConstants.isHolding(order, dispatch, now)
+                }
+                if (nonHoldingPoolable != null) {
+                    selectedBundle = buildOfferBundle(OfferType.SINGLE, listOf(nonHoldingPoolable), riderLoc, rates, dispatch, isPriorityRider = currentRider.priorityRider)
+                }
+            }
+
+            // 3. Holding poolable orders are offered ONLY as a "Double booking" bundle with a pairable partner
+            // (When martBatching is false, Mart orders are excluded from isPoolable & isHolding)
+            if (selectedBundle == null) {
+                val holdingOrders = candidateOrders.filter { order ->
+                    BatchConstants.isPoolable(order, dispatch) && BatchConstants.isHolding(order, dispatch, now)
+                }
+                for (hOrder in holdingOrders) {
+                    val pairablePartners = holdingOrders.filter { other ->
+                        other.id != hOrder.id && BatchConstants.isPairable(hOrder, other, dispatch)
+                    }
+                    if (pairablePartners.isNotEmpty()) {
+                        val partner = pairablePartners.first()
+                        val bundleList = mutableListOf(hOrder, partner)
+                        val allowsPriorityMax = dispatch.martBatching || !hOrder.isMart
+                        val maxLimit = if (currentRider.priorityRider && allowsPriorityMax) {
+                            dispatch.priorityMaxBatch.coerceAtLeast(1)
+                        } else {
+                            min(hOrder.maxBatch.coerceAtLeast(2), partner.maxBatch.coerceAtLeast(2))
+                        }
+                        for (third in pairablePartners.drop(1)) {
+                            if (bundleList.size < maxLimit && bundleList.all { BatchConstants.isPairable(it, third, dispatch) }) {
+                                bundleList.add(third)
+                            }
+                        }
+                        selectedBundle = buildOfferBundle(OfferType.DOUBLE_BOOKING, bundleList, riderLoc, rates, dispatch, isPriorityRider = currentRider.priorityRider)
+                        break
+                    }
+                }
+            }
+
+            // 4. Non-poolable orders (Taxi, Parcel, Pabili, Request, and Mart when martBatching is false) offered at once as single booking
+            if (selectedBundle == null) {
+                val nonPoolable = candidateOrders.firstOrNull { !BatchConstants.isPoolable(it, dispatch) && !it.isPriority }
+                if (nonPoolable != null) {
+                    selectedBundle = buildOfferBundle(OfferType.SINGLE, listOf(nonPoolable), riderLoc, rates, dispatch, isPriorityRider = currentRider.priorityRider)
+                }
+            }
+        } else {
+            // DRIVER HAS ACTIVE BATCH AND PICKUP PHASE IS OPEN:
+            // Offer every order where canJoin(batch, order) is true as "Add to your booking"
+            val joinableCandidate = candidateOrders.firstOrNull { candidate ->
+                BatchConstants.canJoin(activeList, candidate, dispatch, isPriorityRider = currentRider.priorityRider)
+            }
+            if (joinableCandidate != null) {
+                selectedBundle = buildOfferBundle(
+                    OfferType.ADD_TO_BOOKING,
+                    listOf(joinableCandidate),
+                    riderLoc,
+                    rates,
+                    dispatch,
+                    startingRank = activeList.size + 1,
+                    isPriorityRider = currentRider.priorityRider
+                )
+            }
+        }
+
+        // Wave delay: floor(km from my position to the first pickup) * waveSeconds counted from when order/bundle became eligible
+        if (selectedBundle != null) {
+            val waveDelaySec = selectedBundle.waveDelaySeconds
+            val elapsedSec = ((now - selectedBundle.eligibleSince) / 1000).coerceAtLeast(0)
+            if (elapsedSec >= waveDelaySec || waveDelaySec <= 0) {
+                _incomingOfferBundle.value = selectedBundle
+                _incomingOffer.value = selectedBundle.firstOrder
+            } else {
+                _incomingOfferBundle.value = null
+                _incomingOffer.value = null
+            }
+        } else {
+            _incomingOfferBundle.value = null
+            _incomingOffer.value = null
+        }
     }
 
     private fun mergeInbox() {
@@ -1957,7 +1926,10 @@ class RiderRepository {
         chatThreadsListener = null
         activeOrderChatMessagesListener?.remove()
         activeOrderChatMessagesListener = null
+        dispatchSettingsListener?.remove()
+        dispatchSettingsListener = null
         currentChatId = null
+        activeUserPrefs = null
     }
 
     // SUBMIT SHOP REVIEW

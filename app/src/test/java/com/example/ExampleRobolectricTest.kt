@@ -711,7 +711,8 @@ class ExampleRobolectricTest {
         assertTrue(com.example.data.constants.BatchConstants.isPoolable(foodOrder, dispatch))
 
         val convenienceOrder = Order(id = "o2", serviceType = "convenience", fulfillment = "delivery", isPoolable = true)
-        assertTrue(com.example.data.constants.BatchConstants.isPoolable(convenienceOrder, dispatch))
+        assertFalse(com.example.data.constants.BatchConstants.isPoolable(convenienceOrder, dispatch))
+        assertTrue(com.example.data.constants.BatchConstants.isPoolable(convenienceOrder, dispatch.copy(martBatching = true)))
 
         val pickupOrder = Order(id = "o3", serviceType = "food", fulfillment = "pickup", isPoolable = true)
         assertFalse(com.example.data.constants.BatchConstants.isPoolable(pickupOrder, dispatch))
@@ -819,7 +820,7 @@ class ExampleRobolectricTest {
         )
         val activeBatch = listOf(batchOrder)
 
-        // Close order that can join
+        // Close convenience order: blocked when martBatching = false (default), allowed when martBatching = true
         val candidateOrder = Order(
             id = "c1",
             merchantId = "m2",
@@ -832,17 +833,23 @@ class ExampleRobolectricTest {
             customerLng = 118.7365,
             isPoolable = true
         )
-        assertTrue(com.example.data.constants.BatchConstants.canJoin(activeBatch, candidateOrder, dispatch))
+        assertFalse(com.example.data.constants.BatchConstants.canJoin(activeBatch, candidateOrder, dispatch))
+        val dispatchMartOn = dispatch.copy(martBatching = true)
+        assertTrue(com.example.data.constants.BatchConstants.canJoin(activeBatch, candidateOrder, dispatchMartOn))
+
+        // Close food order: allowed even when martBatching = false
+        val candidateFoodOrder = candidateOrder.copy(id = "c2", serviceType = "food")
+        assertTrue(com.example.data.constants.BatchConstants.canJoin(activeBatch, candidateFoodOrder, dispatch))
 
         // Same merchant cannot be joined if already picked up
-        val candidateSamePickedMerchant = candidateOrder.copy(
+        val candidateSamePickedMerchant = candidateFoodOrder.copy(
             merchantId = "m1"
         )
         val batchWithPickedUpM1 = listOf(batchOrder.copy(riderStep = OrderStepConstants.STEP_PICKED_UP))
         assertFalse(com.example.data.constants.BatchConstants.canJoin(batchWithPickedUpM1, candidateSamePickedMerchant, dispatch))
 
         // Far away pickup > 1.0 km
-        val candidateFar = candidateOrder.copy(
+        val candidateFar = candidateFoodOrder.copy(
             merchantLat = 9.8000,
             merchantLng = 118.8000
         )
@@ -2242,5 +2249,144 @@ class ExampleRobolectricTest {
             branchCode = "RZL"
         )
         assertEquals("Jollibee - Palawan Rizal (RZL)", chatThread.displayMerchantName)
+    }
+
+    @Test
+    fun `verify martBatching dispatch rules for Mart single booking and Food batching`() {
+        val now = 1700000000000L
+        val dispatchOff = com.example.data.constants.DispatchSettings() // martBatching defaults to false
+        assertFalse(dispatchOff.martBatching)
+        val dispatchOn = dispatchOff.copy(martBatching = true)
+
+        val martStandardPreparing = Order(
+            id = "mart_std",
+            serviceType = OrderStepConstants.SERVICE_MART,
+            status = OrderStepConstants.STATUS_PREPARING,
+            badge = "Standard",
+            fulfillment = "delivery",
+            cityId = "puerto_princesa",
+            merchantLat = 9.7392,
+            merchantLng = 118.7353,
+            customerLat = 9.7402,
+            customerLng = 118.7363,
+            isPoolable = true,
+            holdMinutes = 5.0,
+            holdUntilMillis = now + 180000L,
+            riderStep = OrderStepConstants.STEP_TO_MERCHANT
+        )
+        val martSaverReady = martStandardPreparing.copy(
+            id = "mart_saver",
+            badge = "Saver",
+            status = OrderStepConstants.STATUS_READY,
+            endsWhenReady = false
+        )
+        val foodOrder1 = Order(
+            id = "food_1",
+            serviceType = OrderStepConstants.SERVICE_FOOD,
+            status = OrderStepConstants.STATUS_PREPARING,
+            badge = "Standard",
+            fulfillment = "delivery",
+            cityId = "puerto_princesa",
+            merchantId = "m_food_1",
+            merchantLat = 9.7393,
+            merchantLng = 118.7354,
+            customerLat = 9.7403,
+            customerLng = 118.7364,
+            isPoolable = true,
+            holdMinutes = 5.0,
+            holdUntilMillis = now + 180000L,
+            riderStep = OrderStepConstants.STEP_TO_MERCHANT
+        )
+        val foodOrder2 = foodOrder1.copy(id = "food_2", merchantId = "m_food_2")
+        val foodOrder3 = foodOrder1.copy(id = "food_3", merchantId = "m_food_3")
+
+        // When martBatching == false:
+        // 1. Mart orders are never poolable and skip Standard & Saver hold timers
+        assertFalse(com.example.data.constants.BatchConstants.isPoolable(martStandardPreparing, dispatchOff))
+        assertFalse(com.example.data.constants.BatchConstants.isPoolable(martSaverReady, dispatchOff))
+        assertFalse(com.example.data.constants.BatchConstants.isHolding(martStandardPreparing, dispatchOff, now))
+        assertFalse(com.example.data.constants.BatchConstants.isHolding(martSaverReady, dispatchOff, now))
+
+        // 2. Mart orders are never paired with Food or another Mart order
+        assertFalse(com.example.data.constants.BatchConstants.isPairable(martStandardPreparing, foodOrder1, dispatchOff))
+        assertFalse(com.example.data.constants.BatchConstants.isPairable(martStandardPreparing, martSaverReady, dispatchOff))
+
+        // 3. Self-check: a rider holding a Mart order is offered nothing else (even for a Priority rider)
+        assertFalse(
+            com.example.data.constants.BatchConstants.canReceiveMoreOffers(
+                activeList = listOf(martStandardPreparing),
+                dispatch = dispatchOff,
+                isPriorityRider = true
+            )
+        )
+        assertFalse(
+            com.example.data.constants.BatchConstants.canJoin(
+                batch = listOf(martStandardPreparing),
+                order = foodOrder1,
+                dispatch = dispatchOff,
+                isPriorityRider = true
+            )
+        )
+
+        // 4. Self-check: a rider on a Food order or Food batch is NOT offered a Mart order
+        assertTrue(
+            com.example.data.constants.BatchConstants.canReceiveMoreOffers(
+                activeList = listOf(foodOrder1, foodOrder2),
+                dispatch = dispatchOff,
+                isPriorityRider = true
+            )
+        )
+        assertFalse(
+            com.example.data.constants.BatchConstants.isCandidateCompatibleWithActive(
+                activeList = listOf(foodOrder1, foodOrder2),
+                candidate = martSaverReady,
+                dispatch = dispatchOff
+            )
+        )
+        assertFalse(
+            com.example.data.constants.BatchConstants.canJoin(
+                batch = listOf(foodOrder1, foodOrder2),
+                order = martSaverReady,
+                dispatch = dispatchOff,
+                isPriorityRider = true
+            )
+        )
+
+        // 5. Priority-rider batch maximum (4) still applies to Food batches
+        assertTrue(
+            com.example.data.constants.BatchConstants.canJoin(
+                batch = listOf(foodOrder1, foodOrder2),
+                order = foodOrder3,
+                dispatch = dispatchOff,
+                isPriorityRider = true
+            )
+        )
+
+        // When martBatching == true (behaves as before: Mart can hold and batch with Food):
+        assertTrue(com.example.data.constants.BatchConstants.isPoolable(martSaverReady, dispatchOn))
+        assertTrue(com.example.data.constants.BatchConstants.isHolding(martSaverReady, dispatchOn, now))
+        assertTrue(com.example.data.constants.BatchConstants.isPairable(martStandardPreparing, foodOrder1, dispatchOn))
+        assertTrue(
+            com.example.data.constants.BatchConstants.canReceiveMoreOffers(
+                activeList = listOf(martStandardPreparing),
+                dispatch = dispatchOn,
+                isPriorityRider = true
+            )
+        )
+        assertTrue(
+            com.example.data.constants.BatchConstants.isCandidateCompatibleWithActive(
+                activeList = listOf(foodOrder1),
+                candidate = martSaverReady,
+                dispatch = dispatchOn
+            )
+        )
+        assertTrue(
+            com.example.data.constants.BatchConstants.canJoin(
+                batch = listOf(foodOrder1),
+                order = martSaverReady,
+                dispatch = dispatchOn,
+                isPriorityRider = true
+            )
+        )
     }
 }
