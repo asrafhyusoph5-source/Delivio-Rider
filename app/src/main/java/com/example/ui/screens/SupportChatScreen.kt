@@ -173,7 +173,7 @@ fun SupportChatScreen(
                             )
                             Spacer(modifier = Modifier.width(10.dp))
                             Text(
-                                text = "Waiting for support to accept your report",
+                                text = "Support is reviewing your request",
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 13.sp,
                                 color = Color(0xFFE65100)

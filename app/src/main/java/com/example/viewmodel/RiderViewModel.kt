@@ -24,7 +24,7 @@ import kotlinx.coroutines.launch
 class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
     val prefsRepository = UserPreferencesRepository(application.applicationContext)
-    val riderRepository = RiderRepository()
+    val riderRepository = RiderRepository(application.applicationContext)
     private val auth: FirebaseAuth by lazy {
         try {
             FirebaseAuth.getInstance()
@@ -421,7 +421,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     val hasOrderAtMerchant: StateFlow<Boolean> = activeOrders.map { orders ->
         orders.any { ord ->
             val s = ord.serviceType.lowercase().trim()
-            val isFoodOrConv = s in listOf("food", "convenience", "instant", OrderStepConstants.SERVICE_FOOD)
+            val isFoodOrConv = s in listOf("food", "convenience", "mart", OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_MART)
             val step = ord.riderStep.lowercase().trim()
             val atMerchant = step in setOf(
                 OrderStepConstants.STEP_AT_MERCHANT,
@@ -432,6 +432,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             isFoodOrConv && atMerchant
         }
     }.stateIn(viewModelScope, SharingStarted.Lazily, false)
+
+    fun logOfferDisplayed(bundle: OfferBundle) {
+        riderRepository.logOfferDisplayed(bundle)
+    }
 
     fun selectSupportTicket(ticketId: String) {
         riderRepository.selectTicket(ticketId)
@@ -1106,8 +1110,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             val svcLogs = logs.filter {
                 val st = it.serviceType.lowercase().trim()
                 when (key) {
-                    "convenience" -> st == "convenience" || st == "mart" || st == "instant"
-                    "request_rider" -> st == "request_rider" || st == "request"
+                    "convenience" -> st == "convenience" || st == "mart"
+                    "request_rider" -> st == "request_rider"
                     else -> st == key
                 }
             }
@@ -1147,8 +1151,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             val svcLogs = logs.filter {
                 val st = it.serviceType.lowercase().trim()
                 when (key) {
-                    "convenience" -> st == "convenience" || st == "mart" || st == "instant"
-                    "request_rider" -> st == "request_rider" || st == "request"
+                    "convenience" -> st == "convenience" || st == "mart"
+                    "request_rider" -> st == "request_rider"
                     else -> st == key
                 }
             }

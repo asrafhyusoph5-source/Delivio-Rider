@@ -3,13 +3,13 @@ package com.example.ui.components
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
@@ -19,7 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.*
+import androidx.compose.material.icons.automirrored.filled.AltRoute
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -36,15 +37,16 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import com.example.data.constants.OrderStepConstants
 import com.example.data.models.*
 import com.example.ui.theme.*
-import androidx.compose.ui.window.Dialog
+import java.util.Locale
 
 enum class OrderSheetState {
-    HIDDEN,
-    COMPACT,
-    EXPANDED
+    PEEK,
+    HALF,
+    FULL
 }
 
 @Composable
@@ -60,7 +62,7 @@ fun OrderDetailsSheet(
     supportPhone: String?,
     routeDistanceKm: Double = 0.0,
     routeEtaMinutes: Int = 0,
-    sheetState: OrderSheetState = OrderSheetState.COMPACT,
+    sheetState: OrderSheetState = OrderSheetState.PEEK,
     onSheetStateChange: (OrderSheetState) -> Unit = {},
     onGoOnlineClick: () -> Unit,
     onAdvanceStep: (Double?, String?) -> Unit,
@@ -69,64 +71,75 @@ fun OrderDetailsSheet(
     onCallClick: (String, String) -> Unit,
     onChatClick: (Order) -> Unit = {},
     hasUnreadChat: (String) -> Boolean = { false },
+    onHeadsetClick: () -> Unit = {},
     onFocusStop: (RouteStop) -> Unit = {},
     onOpenEarnings: () -> Unit = {},
+    onHeightChangedPx: (Int) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val configuration = LocalConfiguration.current
-    val screenHeight = configuration.screenHeightDp.dp
+    val screenHeight = LocalConfiguration.current.screenHeightDp.dp
 
     var showProblemDialog by remember { mutableStateOf(false) }
     var problemReason by remember { mutableStateOf("Merchant delay / waiting") }
-    var showReleaseDialog by remember { mutableStateOf(false) }
-    var releaseReason by remember { mutableStateOf("Emergency / Flat tire") }
 
     // Dialogs for Slide confirmations
     var showItemChecklistDialog by remember { mutableStateOf(false) }
     var showCodConfirmDialog by remember { mutableStateOf(false) }
     var pabiliReceiptInput by remember(currentStop?.orderId) {
-        mutableStateOf(if ((currentStop?.order?.finalReceiptTotal ?: 0.0) > 0.0) currentStop?.order?.finalReceiptTotal.toString() else "")
+        mutableStateOf(
+            if ((currentStop?.order?.finalReceiptTotal ?: 0.0) > 0.0) {
+                currentStop?.order?.finalReceiptTotal.toString()
+            } else ""
+        )
     }
 
-    // Spring animation for sheet snap height
-    val targetHeight = if (activeOrders.isEmpty()) {
-        185.dp
-    } else {
-        when (sheetState) {
-            OrderSheetState.HIDDEN -> 64.dp
-            OrderSheetState.COMPACT -> (screenHeight * 0.32f).coerceIn(225.dp, 280.dp)
-            OrderSheetState.EXPANDED -> (screenHeight * 0.65f).coerceAtLeast(420.dp)
-        }
+    var selectedStopKey by remember(currentStop?.orderId, currentStop?.type) {
+        mutableStateOf(currentStop?.let { "${it.orderId}_${it.type.name}" } ?: "")
+    }
+    val selectedStop = remember(batchStops, currentStop, selectedStopKey) {
+        batchStops.firstOrNull { "${it.orderId}_${it.type.name}" == selectedStopKey } ?: currentStop
     }
 
-    val animatedHeight by animateDpAsState(
-        targetValue = targetHeight,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessMediumLow
-        ),
-        label = "order_sheet_height"
-    )
+    var showEarningsDetails by remember(activeOrders.size) { mutableStateOf(false) }
 
-    // Vertical drag gesture for snap states
+    // Swipe up/down gesture across PEEK <-> HALF <-> FULL (one step per gesture)
     val dragModifier = Modifier.pointerInput(sheetState) {
-        detectVerticalDragGestures { change, dragAmount ->
-            change.consume()
-            if (dragAmount < -18f) {
-                when (sheetState) {
-                    OrderSheetState.HIDDEN -> onSheetStateChange(OrderSheetState.COMPACT)
-                    OrderSheetState.COMPACT -> onSheetStateChange(OrderSheetState.EXPANDED)
-                    OrderSheetState.EXPANDED -> {}
-                }
-            } else if (dragAmount > 18f) {
-                when (sheetState) {
-                    OrderSheetState.EXPANDED -> onSheetStateChange(OrderSheetState.COMPACT)
-                    OrderSheetState.COMPACT -> onSheetStateChange(OrderSheetState.HIDDEN)
-                    OrderSheetState.HIDDEN -> {}
+        var cumulativeDrag = 0f
+        var transitioned = false
+        detectVerticalDragGestures(
+            onDragStart = {
+                cumulativeDrag = 0f
+                transitioned = false
+            },
+            onVerticalDrag = { change, dragAmount ->
+                change.consume()
+                if (transitioned) return@detectVerticalDragGestures
+                cumulativeDrag += dragAmount
+                if (cumulativeDrag < -36f) {
+                    transitioned = true
+                    when (sheetState) {
+                        OrderSheetState.PEEK -> onSheetStateChange(OrderSheetState.HALF)
+                        OrderSheetState.HALF -> onSheetStateChange(OrderSheetState.FULL)
+                        OrderSheetState.FULL -> {}
+                    }
+                } else if (cumulativeDrag > 36f) {
+                    transitioned = true
+                    when (sheetState) {
+                        OrderSheetState.FULL -> onSheetStateChange(OrderSheetState.HALF)
+                        OrderSheetState.HALF -> onSheetStateChange(OrderSheetState.PEEK)
+                        OrderSheetState.PEEK -> {}
+                    }
                 }
             }
-        }
+        )
+    }
+
+    val cardMaxHeight = when {
+        activeOrders.isEmpty() || currentStop == null -> (screenHeight * 0.45f).coerceAtLeast(240.dp)
+        sheetState == OrderSheetState.PEEK -> (screenHeight * 0.42f).coerceAtLeast(230.dp)
+        sheetState == OrderSheetState.HALF -> (screenHeight * 0.56f).coerceAtLeast(360.dp)
+        else -> (screenHeight * 0.80f).coerceAtLeast(460.dp)
     }
 
     Card(
@@ -135,15 +148,24 @@ fun OrderDetailsSheet(
         elevation = CardDefaults.cardElevation(defaultElevation = 12.dp),
         modifier = modifier
             .fillMaxWidth()
-            .height(animatedHeight)
+            .wrapContentHeight()
+            .heightIn(max = cardMaxHeight)
+            .animateContentSize(
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = Spring.StiffnessMediumLow
+                )
+            )
+            .onSizeChanged { onHeightChangedPx(it.height) }
             .testTag("order_details_sheet")
     ) {
         if (activeOrders.isEmpty() || currentStop == null) {
-            // ================= IDLE STATE =================
+            // ================= IDLE STATE (WRAPPED HEIGHT) =================
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 18.dp, vertical = 12.dp)
+                    .wrapContentHeight()
+                    .padding(horizontal = 18.dp, vertical = 14.dp)
             ) {
                 Box(
                     modifier = Modifier
@@ -154,14 +176,14 @@ fun OrderDetailsSheet(
                         .background(MaterialTheme.colorScheme.outlineVariant)
                 )
 
-                Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = if (isOnline) "Ready for Bookings" else "You are Offline",
                             fontSize = 17.sp,
@@ -176,6 +198,7 @@ fun OrderDetailsSheet(
                     }
 
                     if (!isOnline) {
+                        Spacer(modifier = Modifier.width(12.dp))
                         Button(
                             onClick = onGoOnlineClick,
                             colors = ButtonDefaults.buttonColors(
@@ -183,21 +206,28 @@ fun OrderDetailsSheet(
                                 contentColor = Color.White
                             ),
                             shape = RoundedCornerShape(14.dp),
-                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .testTag("go_online_button")
                         ) {
                             Text("Go Online", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                 Spacer(modifier = Modifier.height(12.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                Spacer(modifier = Modifier.height(10.dp))
 
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { onOpenEarnings() },
+                        .defaultMinSize(minHeight = 48.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { onOpenEarnings() }
+                        .padding(vertical = 4.dp)
+                        .testTag("idle_earnings_row"),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -245,13 +275,23 @@ fun OrderDetailsSheet(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .then(dragModifier)
+                    .wrapContentHeight()
             ) {
-                // Drag Handle
+                // Drag Handle (supports swipe up/down AND tap to cycle PEEK -> HALF -> FULL -> PEEK)
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(top = 8.dp, bottom = 4.dp),
+                        .then(dragModifier)
+                        .clickable {
+                            val next = when (sheetState) {
+                                OrderSheetState.PEEK -> OrderSheetState.HALF
+                                OrderSheetState.HALF -> OrderSheetState.FULL
+                                OrderSheetState.FULL -> OrderSheetState.PEEK
+                            }
+                            onSheetStateChange(next)
+                        }
+                        .padding(top = 10.dp, bottom = 6.dp)
+                        .testTag("sheet_drag_handle"),
                     contentAlignment = Alignment.Center
                 ) {
                     Box(
@@ -264,52 +304,15 @@ fun OrderDetailsSheet(
                 }
 
                 when (sheetState) {
-                    OrderSheetState.HIDDEN -> {
-                        // Minimal bar
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 6.dp)
-                                .clickable { onSheetStateChange(OrderSheetState.COMPACT) },
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                StopNumberBadge(stop = currentStop, size = 28)
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = currentStop.displayActionTitle,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 13.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                            if (routeEtaMinutes > 0) {
-                                Text(
-                                    text = "$routeEtaMinutes min • ${String.format("%.1f", routeDistanceKm)} km",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = DelivioYellowDark
-                                )
-                            }
-                        }
-                    }
-
-                    OrderSheetState.COMPACT -> {
-                        // ================= COMPACT STATE =================
-                        CompactOrderSheetContent(
+                    OrderSheetState.PEEK -> {
+                        PeekOrderSheetContent(
                             currentStop = currentStop,
+                            totalStops = batchStops.size.coerceAtLeast(1),
                             routeDistanceKm = routeDistanceKm,
                             routeEtaMinutes = routeEtaMinutes,
-                            onCallClick = {
-                                if (currentStop.phone.isNotBlank()) {
-                                    onCallClick(currentStop.name, currentStop.phone)
-                                }
-                            },
-                            onChatClick = onChatClick,
-                            hasUnreadChat = hasUnreadChat,
-                            onExpandClick = { onSheetStateChange(OrderSheetState.EXPANDED) },
+                            dragModifier = dragModifier,
+                            onExpandToHalf = { onSheetStateChange(OrderSheetState.HALF) },
+                            onNavigateClick = { launchExternalNavigation(context, currentStop) },
                             onSlideConfirmed = {
                                 handleSlideAction(
                                     currentStop = currentStop,
@@ -321,17 +324,65 @@ fun OrderDetailsSheet(
                         )
                     }
 
-                    OrderSheetState.EXPANDED -> {
-                        // ================= EXPANDED STATE =================
-                        ExpandedOrderSheetContent(
+                    OrderSheetState.HALF -> {
+                        HalfOrderSheetContent(
                             batchStops = batchStops,
                             currentStop = currentStop,
+                            currencySymbol = currencySymbol,
+                            routeDistanceKm = routeDistanceKm,
+                            routeEtaMinutes = routeEtaMinutes,
+                            onNavigateClick = { launchExternalNavigation(context, currentStop) },
+                            onCallClick = {
+                                if (currentStop.phone.isNotBlank()) {
+                                    onCallClick(currentStop.name, currentStop.phone)
+                                }
+                            },
+                            onChatClick = onChatClick,
+                            hasUnreadChat = hasUnreadChat,
+                            onHeadsetClick = onHeadsetClick,
+                            onSelectStop = { stop ->
+                                selectedStopKey = "${stop.orderId}_${stop.type.name}"
+                                onFocusStop(stop)
+                                onSheetStateChange(OrderSheetState.FULL)
+                            },
+                            onExpandToFull = { onSheetStateChange(OrderSheetState.FULL) },
+                            onSlideConfirmed = {
+                                handleSlideAction(
+                                    currentStop = currentStop,
+                                    onOpenChecklist = { showItemChecklistDialog = true },
+                                    onOpenCodConfirm = { showCodConfirmDialog = true },
+                                    onAdvanceDirect = { onAdvanceStep(null, currentStop.orderId) }
+                                )
+                            }
+                        )
+                    }
+
+                    OrderSheetState.FULL -> {
+                        FullOrderSheetContent(
+                            batchStops = batchStops,
+                            currentStop = currentStop,
+                            selectedStop = selectedStop ?: currentStop,
                             activeOrders = activeOrders,
                             currencySymbol = currencySymbol,
                             routeDistanceKm = routeDistanceKm,
                             routeEtaMinutes = routeEtaMinutes,
-                            onFocusStop = onFocusStop,
-                            onCollapseClick = { onSheetStateChange(OrderSheetState.COMPACT) },
+                            showEarningsDetails = showEarningsDetails,
+                            onToggleEarningsDetails = { showEarningsDetails = !showEarningsDetails },
+                            onSelectStop = { stop ->
+                                selectedStopKey = "${stop.orderId}_${stop.type.name}"
+                                onFocusStop(stop)
+                            },
+                            onNavigateClick = { launchExternalNavigation(context, currentStop) },
+                            onCallClick = {
+                                val target = selectedStop ?: currentStop
+                                if (target.phone.isNotBlank()) {
+                                    onCallClick(target.name, target.phone)
+                                }
+                            },
+                            onChatClick = onChatClick,
+                            hasUnreadChat = hasUnreadChat,
+                            onHeadsetClick = onHeadsetClick,
+                            onCollapseToHalf = { onSheetStateChange(OrderSheetState.HALF) },
                             onReportProblemClick = { showProblemDialog = true },
                             onSlideConfirmed = {
                                 handleSlideAction(
@@ -403,6 +454,7 @@ fun OrderDetailsSheet(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .defaultMinSize(minHeight = 48.dp)
                                 .clickable { problemReason = r }
                                 .padding(vertical = 4.dp)
                         ) {
@@ -419,13 +471,17 @@ fun OrderDetailsSheet(
                         showProblemDialog = false
                         onReportProblem(problemReason)
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = DelivioRed, contentColor = Color.White)
+                    colors = ButtonDefaults.buttonColors(containerColor = DelivioRed, contentColor = Color.White),
+                    modifier = Modifier.heightIn(min = 48.dp)
                 ) {
                     Text("Submit Report", fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showProblemDialog = false }) {
+                TextButton(
+                    onClick = { showProblemDialog = false },
+                    modifier = Modifier.heightIn(min = 48.dp)
+                ) {
                     Text("Cancel")
                 }
             }
@@ -433,9 +489,43 @@ fun OrderDetailsSheet(
     }
 }
 
-/**
- * Handles slide button action based on current stop type and order riderStep.
- */
+private fun launchExternalNavigation(context: Context, stop: RouteStop) {
+    val geoUri = Uri.parse("geo:${stop.lat},${stop.lng}?q=${stop.lat},${stop.lng}(${Uri.encode(stop.name)})")
+    val navIntent = Intent(Intent.ACTION_VIEW, geoUri)
+    try {
+        context.startActivity(Intent.createChooser(navIntent, "Navigate with"))
+    } catch (_: Exception) {
+        Toast.makeText(context, "No navigation app installed", Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun formatPaymentAmount(amount: Double): String {
+    return if (amount % 1.0 == 0.0) {
+        String.format(Locale.US, "%.0f", amount)
+    } else {
+        String.format(Locale.US, "%.2f", amount)
+    }
+}
+
+private fun formatOnePaymentLine(order: Order, currencySymbol: String): String {
+    if (order.isSplitChild || order.badge.equals("split", ignoreCase = true)) {
+        return "No cash collected (Split order)"
+    }
+    val amount = order.cashAmountToCollect
+    if (order.isRequestRider) {
+        return if (amount > 0.0) {
+            "Collect $currencySymbol${formatPaymentAmount(amount)} cash"
+        } else {
+            "No cash to collect (paid)"
+        }
+    }
+    return if (order.isCod && amount > 0.0) {
+        "Collect $currencySymbol${formatPaymentAmount(amount)} cash"
+    } else {
+        "Paid online - no cash"
+    }
+}
+
 private fun handleSlideAction(
     currentStop: RouteStop,
     onOpenChecklist: () -> Unit,
@@ -475,11 +565,6 @@ private fun handleSlideAction(
     }
 }
 
-/**
- * Returns the exact slide button text required:
- * Merchant: "Slide to confirm Arrival at <merchant>" then "Slide to confirm Picked Up"
- * Customer: "Slide to confirm Arrival at Customer" then "Slide to Complete Delivery"
- */
 private fun getSlideButtonLabel(stop: RouteStop): String {
     val step = stop.order.riderStep.lowercase().trim()
     return if (stop.isMerchant) {
@@ -510,269 +595,448 @@ private fun getSlideButtonLabel(stop: RouteStop): String {
 }
 
 @Composable
-private fun CompactOrderSheetContent(
+private fun StepBadgeRow(
     currentStop: RouteStop,
+    totalStops: Int
+) {
+    val actionLabel = if (currentStop.isMerchant) "Pick up" else "Drop off"
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = if (currentStop.isMerchant) DelivioGreen.copy(alpha = 0.14f) else DelivioRed.copy(alpha = 0.14f)
+        ) {
+            Text(
+                text = "Stop ${currentStop.stopNumber} of $totalStops - $actionLabel",
+                fontWeight = FontWeight.Bold,
+                fontSize = 11.sp,
+                color = if (currentStop.isMerchant) DelivioGreenDark else DelivioRed,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+            )
+        }
+        if (currentStop.order.isSplitChild || currentStop.order.badge.equals("split", ignoreCase = true)) {
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = Color(0xFF7B1FA2)
+            ) {
+                Text(
+                    text = "SPLIT",
+                    color = Color.White,
+                    fontWeight = FontWeight.Black,
+                    fontSize = 10.sp,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                )
+            }
+        }
+        if (currentStop.order.isScheduled) {
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = Color(0xFF1565C0)
+            ) {
+                Text(
+                    text = if (currentStop.order.scheduledDateText.isNotBlank()) "SCHEDULED • ${currentStop.order.scheduledDateText}" else "SCHEDULED",
+                    color = Color.White,
+                    fontWeight = FontWeight.Black,
+                    fontSize = 10.sp,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PeekOrderSheetContent(
+    currentStop: RouteStop,
+    totalStops: Int,
     routeDistanceKm: Double,
     routeEtaMinutes: Int,
-    onCallClick: () -> Unit,
-    onChatClick: (Order) -> Unit = {},
-    hasUnreadChat: (String) -> Boolean = { false },
-    onExpandClick: () -> Unit,
+    dragModifier: Modifier,
+    onExpandToHalf: () -> Unit,
+    onNavigateClick: () -> Unit,
     onSlideConfirmed: () -> Unit
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .wrapContentHeight()
+            .padding(horizontal = 16.dp)
+            .padding(bottom = 12.dp)
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { onExpandClick() },
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+                .then(dragModifier)
+                .clickable { onExpandToHalf() }
         ) {
             Row(
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                StopNumberBadge(stop = currentStop, size = 32)
-                Spacer(modifier = Modifier.width(10.dp))
-                Column {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = currentStop.displayActionTitle,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 15.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        if (currentStop.order.isSplitChild || currentStop.order.badge.equals("split", ignoreCase = true)) {
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Surface(
-                                shape = RoundedCornerShape(4.dp),
-                                color = Color(0xFF7B1FA2)
-                            ) {
-                                Text(
-                                    text = "SPLIT",
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Black,
-                                    fontSize = 9.sp,
-                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
-                                )
-                            }
-                        }
-                        if (currentStop.order.isScheduled) {
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Surface(
-                                shape = RoundedCornerShape(4.dp),
-                                color = Color(0xFF1565C0)
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Schedule,
-                                        contentDescription = "Scheduled",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(10.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(3.dp))
-                                    Text(
-                                        text = if (currentStop.order.scheduledDateText.isNotBlank()) "SCHEDULED • ${currentStop.order.scheduledDateText}" else "SCHEDULED",
-                                        color = Color.White,
-                                        fontWeight = FontWeight.Black,
-                                        fontSize = 9.sp
-                                    )
-                                }
-                            }
-                        }
-                    }
+                StepBadgeRow(currentStop = currentStop, totalStops = totalStops)
+                Icon(
+                    imageVector = Icons.Default.KeyboardArrowUp,
+                    contentDescription = "Expand trip details",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = currentStop.address,
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        text = currentStop.name,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 16.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                }
-            }
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                // Customer chat icon (beside customer's call icon)
-                if (currentStop.isCustomer && !OrderChatConstants.isInstantOrder(currentStop.order.serviceType)) {
-                    Box(modifier = Modifier.size(38.dp)) {
-                        IconButton(
-                            onClick = { onChatClick(currentStop.order) },
-                            modifier = Modifier
-                                .size(38.dp)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.surfaceVariant)
-                                .testTag("customer_chat_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.ChatBubble,
-                                contentDescription = "Chat with customer",
-                                tint = MaterialTheme.colorScheme.onSurface,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                        if (hasUnreadChat(currentStop.order.id)) {
-                            Box(
-                                modifier = Modifier
-                                    .size(8.dp)
-                                    .clip(CircleShape)
-                                    .background(DelivioRed)
-                                    .align(Alignment.TopEnd)
-                                    .testTag("chat_unread_dot")
-                            )
-                        }
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
+                    val etaPart = if (routeEtaMinutes > 0) "$routeEtaMinutes min" else "Calculating ETA"
+                    val distPart = if (routeDistanceKm > 0.0) " • ${String.format(Locale.US, "%.1f", routeDistanceKm)} km" else ""
+                    Text(
+                        text = "$etaPart$distPart",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1
+                    )
                 }
 
-                // Call icon
-                if (currentStop.phone.isNotBlank()) {
-                    IconButton(
-                        onClick = onCallClick,
-                        modifier = Modifier
-                            .size(38.dp)
-                            .clip(CircleShape)
-                            .background(DelivioGreen.copy(alpha = 0.15f))
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Call,
-                            contentDescription = "Call",
-                            tint = DelivioGreen,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                }
+                Spacer(modifier = Modifier.width(10.dp))
 
-                // ETA badge
-                if (routeEtaMinutes > 0) {
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = DelivioYellowLight,
-                        modifier = Modifier.padding(start = 4.dp)
-                    ) {
-                        Text(
-                            text = "$routeEtaMinutes min",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp,
-                            color = TextOnYellow,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                        )
-                    }
+                Button(
+                    onClick = onNavigateClick,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = DelivioYellow,
+                        contentColor = TextOnYellow
+                    ),
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("navigate_stop_button")
+                ) {
+                    Icon(Icons.Default.Navigation, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text("Navigate", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                 }
             }
         }
 
-        if (currentStop.isCustomer && (currentStop.order.isSplitChild || currentStop.order.badge.equals("split", ignoreCase = true))) {
-            Spacer(modifier = Modifier.height(8.dp))
-            NoCashCollectedChip(isLarge = false)
-        }
+        Spacer(modifier = Modifier.height(10.dp))
 
-        Spacer(modifier = Modifier.height(14.dp))
-
-        // ONE slide button for the action
         SlideToConfirmButton(
             text = getSlideButtonLabel(currentStop),
             onConfirmed = onSlideConfirmed,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("sheet_slide_button")
         )
     }
 }
 
 @Composable
-private fun ExpandedOrderSheetContent(
+private fun HalfOrderSheetContent(
     batchStops: List<RouteStop>,
     currentStop: RouteStop,
-    activeOrders: List<Order>,
     currencySymbol: String,
     routeDistanceKm: Double,
     routeEtaMinutes: Int,
-    onFocusStop: (RouteStop) -> Unit,
-    onCollapseClick: () -> Unit,
-    onReportProblemClick: () -> Unit,
+    onNavigateClick: () -> Unit,
+    onCallClick: () -> Unit,
+    onChatClick: (Order) -> Unit,
+    hasUnreadChat: (String) -> Boolean,
+    onHeadsetClick: () -> Unit,
+    onSelectStop: (RouteStop) -> Unit,
+    onExpandToFull: () -> Unit,
     onSlideConfirmed: () -> Unit
 ) {
-    val scrollState = rememberScrollState()
-
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .wrapContentHeight()
             .padding(horizontal = 16.dp)
-            .verticalScroll(scrollState)
+            .padding(bottom = 12.dp)
     ) {
-        // Header
+        // Header row
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 4.dp),
+            modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
+            Column(modifier = Modifier.weight(1f)) {
+                StepBadgeRow(currentStop = currentStop, totalStops = batchStops.size.coerceAtLeast(1))
+                Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Trip Stops (${batchStops.size} Stops)",
+                    text = currentStop.name,
                     fontWeight = FontWeight.ExtraBold,
-                    fontSize = 18.sp
+                    fontSize = 16.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
-                Text(
-                    text = "Tap a stop to focus it on the map",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                val etaText = buildString {
+                    if (routeEtaMinutes > 0) append("$routeEtaMinutes min")
+                    if (routeDistanceKm > 0.0) {
+                        if (isNotEmpty()) append(" • ")
+                        append("${String.format(Locale.US, "%.1f", routeDistanceKm)} km")
+                    }
+                }
+                if (etaText.isNotBlank()) {
+                    Text(
+                        text = etaText,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = onNavigateClick,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .testTag("half_navigate_button")
+                ) {
+                    Icon(Icons.Default.Navigation, contentDescription = "Navigate", tint = DelivioYellow)
+                }
+                IconButton(
+                    onClick = onExpandToFull,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .testTag("expand_sheet_button")
+                ) {
+                    Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Full details", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Scrollable compact stop timeline + one payment line
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f, fill = false)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            batchStops.forEach { stop ->
+                CompactTimelineStopRow(
+                    stop = stop,
+                    isSelected = stop.orderId == currentStop.orderId && stop.type == currentStop.type,
+                    onClick = { onSelectStop(stop) }
                 )
             }
-            IconButton(onClick = onCollapseClick) {
-                Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Collapse", tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+
+            // One payment line
+            OnePaymentLineBar(
+                order = currentStop.order,
+                currencySymbol = currencySymbol
+            )
         }
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // Vertical Timeline 1..N
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            batchStops.forEachIndexed { index, stop ->
-                TimelineStopCard(
-                    stop = stop,
-                    currencySymbol = currencySymbol,
-                    isLast = index == batchStops.size - 1,
-                    onTap = { onFocusStop(stop) }
+        // Round icon action buttons row (Call, Chat, Headset) + Slide button
+        SheetQuickActionIconsRow(
+            currentStop = currentStop,
+            onCallClick = onCallClick,
+            onChatClick = onChatClick,
+            hasUnreadChat = hasUnreadChat,
+            onHeadsetClick = onHeadsetClick
+        )
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        SlideToConfirmButton(
+            text = getSlideButtonLabel(currentStop),
+            onConfirmed = onSlideConfirmed,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("sheet_slide_button")
+        )
+    }
+}
+
+@Composable
+private fun FullOrderSheetContent(
+    batchStops: List<RouteStop>,
+    currentStop: RouteStop,
+    selectedStop: RouteStop,
+    activeOrders: List<Order>,
+    currencySymbol: String,
+    routeDistanceKm: Double,
+    routeEtaMinutes: Int,
+    showEarningsDetails: Boolean,
+    onToggleEarningsDetails: () -> Unit,
+    onSelectStop: (RouteStop) -> Unit,
+    onNavigateClick: () -> Unit,
+    onCallClick: () -> Unit,
+    onChatClick: (Order) -> Unit,
+    hasUnreadChat: (String) -> Boolean,
+    onHeadsetClick: () -> Unit,
+    onCollapseToHalf: () -> Unit,
+    onReportProblemClick: () -> Unit,
+    onSlideConfirmed: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .wrapContentHeight()
+            .padding(horizontal = 16.dp)
+            .padding(bottom = 12.dp)
+    ) {
+        // Header
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                StepBadgeRow(currentStop = currentStop, totalStops = batchStops.size.coerceAtLeast(1))
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = currentStop.name,
+                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = 17.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = onNavigateClick,
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Icon(Icons.Default.Navigation, contentDescription = "Navigate", tint = DelivioYellow)
+                }
+                IconButton(
+                    onClick = onCollapseToHalf,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .testTag("collapse_sheet_button")
+                ) {
+                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Collapse", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
-        // Pay Summary
-        PaySummarySection(
-            activeOrders = activeOrders,
-            currencySymbol = currencySymbol
-        )
+        // Scrollable Details Body
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f, fill = false)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            // Stop Timeline (tap any stop to view its items)
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                batchStops.forEach { stop ->
+                    CompactTimelineStopRow(
+                        stop = stop,
+                        isSelected = stop.orderId == selectedStop.orderId && stop.type == selectedStop.type,
+                        onClick = { onSelectStop(stop) }
+                    )
+                }
+            }
 
-        Spacer(modifier = Modifier.height(14.dp))
+            // Items & Notes for selected stop
+            SelectedStopItemsCard(
+                stop = selectedStop,
+                currencySymbol = currencySymbol
+            )
+
+            // One Payment Line
+            OnePaymentLineBar(
+                order = selectedStop.order,
+                currencySymbol = currencySymbol
+            )
+
+            // Round Action Buttons (Call, Chat, Headset)
+            SheetQuickActionIconsRow(
+                currentStop = selectedStop,
+                onCallClick = onCallClick,
+                onChatClick = onChatClick,
+                hasUnreadChat = hasUnreadChat,
+                onHeadsetClick = onHeadsetClick
+            )
+
+            // Collapsed "Earnings details" row
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .clickable { onToggleEarningsDetails() }
+                    .testTag("earnings_details_toggle")
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val totalEarned = activeOrders.sumOf { it.estimatedEarnings }
+                        Text(
+                            text = "Earnings details ($currencySymbol${String.format("%.2f", totalEarned)})",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Icon(
+                            imageVector = if (showEarningsDetails) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            contentDescription = "Toggle earnings details",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    AnimatedVisibility(visible = showEarningsDetails) {
+                        Column(modifier = Modifier.padding(top = 10.dp)) {
+                            PaySummarySection(
+                                activeOrders = activeOrders,
+                                currencySymbol = currencySymbol
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
 
         // Slide Button
         SlideToConfirmButton(
             text = getSlideButtonLabel(currentStop),
             onConfirmed = onSlideConfirmed,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("sheet_slide_button")
         )
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
         // Report a problem button
         OutlinedButton(
             onClick = onReportProblemClick,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(44.dp),
+                .heightIn(min = 48.dp)
+                .testTag("report_problem_button"),
             shape = RoundedCornerShape(12.dp),
             colors = ButtonDefaults.outlinedButtonColors(contentColor = DelivioRed)
         ) {
@@ -780,196 +1044,288 @@ private fun ExpandedOrderSheetContent(
             Spacer(modifier = Modifier.width(6.dp))
             Text("Report a Problem", fontWeight = FontWeight.Bold, fontSize = 13.sp)
         }
-
-        Spacer(modifier = Modifier.height(20.dp))
     }
 }
 
 @Composable
-private fun TimelineStopCard(
+private fun CompactTimelineStopRow(
     stop: RouteStop,
-    currencySymbol: String,
-    isLast: Boolean,
-    onTap: () -> Unit
+    isSelected: Boolean,
+    onClick: () -> Unit
 ) {
-    Card(
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = when (stop.status) {
-                StopStatus.CURRENT -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
-                StopStatus.DONE -> MaterialTheme.colorScheme.surface.copy(alpha = 0.5f)
-                StopStatus.NEXT -> MaterialTheme.colorScheme.surface
-            }
-        ),
-        border = if (stop.status == StopStatus.CURRENT) {
-            androidx.compose.foundation.BorderStroke(1.5.dp, DelivioYellow)
-        } else {
-            androidx.compose.foundation.BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = when {
+            isSelected -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+            stop.status == StopStatus.DONE -> MaterialTheme.colorScheme.surface.copy(alpha = 0.45f)
+            else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
         },
+        border = BorderStroke(
+            width = if (isSelected) 1.5.dp else 0.5.dp,
+            color = if (isSelected) DelivioYellow else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
+        ),
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onTap() }
+            .defaultMinSize(minHeight = 48.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            // Header row: Badge, Type, Status, OrderNumber
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            StopNumberBadge(stop = stop, size = 26)
+            Column(modifier = Modifier.weight(1f)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = if (stop.isMerchant) "PICKUP" else "DROP-OFF",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = if (stop.isMerchant) DelivioGreenDark else DelivioRed
+                    )
+                    if (stop.status == StopStatus.DONE) {
+                        Text(
+                            text = "• Done",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = DelivioGreenDark
+                        )
+                    }
+                }
+                Text(
+                    text = stop.name,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (stop.address.isNotBlank()) {
+                    Text(
+                        text = stop.address,
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            if (stop.items.isNotEmpty()) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surface
+                ) {
+                    Text(
+                        text = "${stop.items.size} ${if (stop.items.size == 1) "item" else "items"}",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun OnePaymentLineBar(
+    order: Order,
+    currencySymbol: String
+) {
+    val lineText = formatOnePaymentLine(order, currencySymbol)
+    val isCashCollect = !order.isSplitChild && !order.badge.equals("split", ignoreCase = true) &&
+        ((order.isRequestRider && order.cashAmountToCollect > 0.0) || (!order.isRequestRider && order.isCod && order.cashAmountToCollect > 0.0))
+
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = if (isCashCollect) Color(0xFFFFF3E0) else DelivioGreen.copy(alpha = 0.12f),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(
+                imageVector = if (isCashCollect) Icons.Default.LocalAtm else Icons.Default.CheckCircle,
+                contentDescription = null,
+                tint = if (isCashCollect) Color(0xFFE65100) else DelivioGreenDark,
+                modifier = Modifier.size(18.dp)
+            )
+            Text(
+                text = lineText,
+                fontWeight = FontWeight.Bold,
+                fontSize = 13.sp,
+                color = if (isCashCollect) Color(0xFFBF360C) else DelivioGreenDark
+            )
+        }
+    }
+}
+
+@Composable
+private fun SheetQuickActionIconsRow(
+    currentStop: RouteStop,
+    onCallClick: () -> Unit,
+    onChatClick: (Order) -> Unit,
+    hasUnreadChat: (String) -> Boolean,
+    onHeadsetClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (currentStop.phone.isNotBlank()) {
+            Surface(
+                shape = CircleShape,
+                color = DelivioGreen.copy(alpha = 0.16f),
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onCallClick)
+                    .testTag("sheet_call_button")
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Default.Call,
+                        contentDescription = "Call",
+                        tint = DelivioGreen,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+        }
+
+        if (currentStop.isCustomer && !OrderChatConstants.isInstantOrder(currentStop.order.serviceType)) {
+            Box(modifier = Modifier.size(48.dp)) {
+                Surface(
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .clickable { onChatClick(currentStop.order) }
+                        .testTag("customer_chat_button")
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Default.ChatBubble,
+                            contentDescription = "Chat",
+                            tint = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+                if (hasUnreadChat(currentStop.order.id)) {
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(DelivioRed)
+                            .align(Alignment.TopEnd)
+                            .testTag("chat_unread_dot")
+                    )
+                }
+            }
+        }
+
+        Surface(
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            modifier = Modifier
+                .size(48.dp)
+                .clip(CircleShape)
+                .clickable(onClick = onHeadsetClick)
+                .testTag("sheet_headset_button")
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    imageVector = Icons.Default.HeadsetMic,
+                    contentDescription = "Support options",
+                    tint = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SelectedStopItemsCard(
+    stop: RouteStop,
+    currencySymbol: String
+) {
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    StopNumberBadge(stop = stop, size = 26)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = if (stop.isMerchant) "PICKUP" else "DROP-OFF",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = if (stop.isMerchant) DelivioGreenDark else Color(0xFFC62828)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = stop.displayOrderNumber,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    if (stop.order.isSplitChild || stop.order.badge.equals("split", ignoreCase = true)) {
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Surface(
-                            shape = RoundedCornerShape(4.dp),
-                            color = Color(0xFF7B1FA2)
-                        ) {
-                            Text(
-                                text = "SPLIT",
-                                color = Color.White,
-                                fontWeight = FontWeight.Black,
-                                fontSize = 9.sp,
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
-                            )
-                        }
-                        if (stop.isCustomer) {
-                            Spacer(modifier = Modifier.width(6.dp))
-                            NoCashCollectedChip(isLarge = false)
-                        }
-                    }
-                    if (stop.order.isScheduled) {
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Surface(
-                            shape = RoundedCornerShape(4.dp),
-                            color = Color(0xFF1565C0)
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Schedule,
-                                    contentDescription = "Scheduled",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(10.dp)
-                                )
-                                Spacer(modifier = Modifier.width(3.dp))
-                                Text(
-                                    text = if (stop.order.scheduledDateText.isNotBlank()) "SCHEDULED • ${stop.order.scheduledDateText}" else "SCHEDULED",
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Black,
-                                    fontSize = 9.sp
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // Status chip: Done, Current, Next
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = when (stop.status) {
-                        StopStatus.DONE -> DelivioGreen.copy(alpha = 0.15f)
-                        StopStatus.CURRENT -> DelivioYellow.copy(alpha = 0.25f)
-                        StopStatus.NEXT -> MaterialTheme.colorScheme.surfaceVariant
-                    }
-                ) {
-                    Text(
-                        text = when (stop.status) {
-                            StopStatus.DONE -> "✓ Done"
-                            StopStatus.CURRENT -> "● Current"
-                            StopStatus.NEXT -> "Next"
-                        },
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = when (stop.status) {
-                            StopStatus.DONE -> DelivioGreenDark
-                            StopStatus.CURRENT -> TextOnYellow
-                            StopStatus.NEXT -> MaterialTheme.colorScheme.onSurfaceVariant
-                        },
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(6.dp))
-
-            // Name & Address
-            Text(
-                text = stop.name,
-                fontWeight = FontWeight.Bold,
-                fontSize = 14.sp
-            )
-            Text(
-                text = stop.address,
-                fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            if (stop.order.isScheduled) {
-                Spacer(modifier = Modifier.height(4.dp))
-                ScheduledOrderChip(order = stop.order, isLarge = false)
-            }
-
-            // Items & selections list
-            if (stop.items.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(8.dp))
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
-                Spacer(modifier = Modifier.height(6.dp))
-
-                // Split delivery banner for first rider
-                if (stop.order.splitOut.isNotEmpty()) {
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = Color(0xFFF3E5F5),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFCE93D8)),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(bottom = 6.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                Icons.AutoMirrored.Filled.AltRoute,
-                                contentDescription = null,
-                                tint = Color(0xFF7B1FA2),
-                                modifier = Modifier.size(15.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "Another rider is picking up part of this order",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFF7B1FA2)
-                            )
-                        }
-                    }
-                }
-
                 Text(
-                    text = if (stop.isMerchant) "Items to Pick Up:" else "Items to Deliver:",
-                    fontSize = 11.sp,
+                    text = if (stop.isMerchant) "Items to Pick Up" else "Items to Deliver",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = stop.displayOrderNumber,
+                    fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
 
+            if (stop.order.splitOut.isNotEmpty()) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0xFFF3E5F5),
+                    border = BorderStroke(1.dp, Color(0xFFCE93D8)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.AltRoute,
+                            contentDescription = null,
+                            tint = Color(0xFF7B1FA2),
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Another rider carries part of this order",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF7B1FA2)
+                        )
+                    }
+                }
+            }
+
+            if (stop.items.isEmpty()) {
+                Text(
+                    text = "No item list provided",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
                 stop.items.forEach { item ->
                     val isTakenByOther = stop.order.splitOut.any { splitName ->
                         val sn = splitName.trim()
@@ -990,7 +1346,8 @@ private fun TimelineStopCard(
                                     text = "• ${item.displayName}",
                                     fontWeight = FontWeight.SemiBold,
                                     fontSize = 12.sp,
-                                    color = if (isTakenByOther) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f) else MaterialTheme.colorScheme.onSurface
+                                    color = if (isTakenByOther) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                    else MaterialTheme.colorScheme.onSurface
                                 )
                                 if (isTakenByOther) {
                                     Spacer(modifier = Modifier.width(6.dp))
@@ -1013,148 +1370,58 @@ private fun TimelineStopCard(
                                     text = "x${item.quantity}",
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 12.sp,
-                                    color = if (isTakenByOther) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f) else MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                                 if (item.price > 0.0) {
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text(
                                         text = "$currencySymbol${String.format("%.2f", item.price * item.quantity)}",
                                         fontWeight = FontWeight.SemiBold,
-                                        fontSize = 12.sp,
-                                        color = if (isTakenByOther) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f) else MaterialTheme.colorScheme.onSurface
+                                        fontSize = 12.sp
                                     )
                                 }
                             }
                         }
-
-                        // Selections as small indented lines under item name (never show empty "()")
                         val validSelections = item.selections
                             .map { it.trim() }
                             .filter { it.isNotBlank() && it != "()" && it != "( )" }
-
                         validSelections.forEach { sel ->
                             Text(
                                 text = "  └ $sel",
                                 fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
-                                modifier = Modifier.padding(start = 12.dp)
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(start = 10.dp)
+                            )
+                        }
+                        if (item.specialInstructions.isNotBlank()) {
+                            Text(
+                                text = "  Note: ${item.specialInstructions.trim()}",
+                                fontSize = 11.sp,
+                                color = DelivioYellowDark,
+                                modifier = Modifier.padding(start = 10.dp)
                             )
                         }
                     }
                 }
             }
 
-            // Money lines in order details (Requirement 2):
-            // - Cash on delivery: show the product lines with prices, the Tip (if any), and "Total to collect ₱X" (cashToCollect or fees.total). Never show subtotal, service fee, VAT, delivery fee, or discount.
-            // - Paid online or wallet: show the product lines, then "Paid online - no cash to collect". Do NOT show a total, tip, or any fee line.
-            if (stop.isCustomer) {
-                Spacer(modifier = Modifier.height(8.dp))
-                if (stop.order.isSplitChild || stop.order.badge.equals("split", ignoreCase = true)) {
-                    NoCashCollectedChip(modifier = Modifier.fillMaxWidth(), isLarge = true)
-                } else if (stop.isCod) {
-                    Column(
+            if (stop.order.customerNotes.isNotBlank()) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                Row(verticalAlignment = Alignment.Top) {
+                    Icon(
+                        imageVector = Icons.Default.StickyNote2,
+                        contentDescription = null,
+                        tint = DelivioYellow,
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(Color(0xFFFFF3E0))
-                            .padding(10.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        if (stop.order.hasSplitOut && !stop.order.isSplitChild) {
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = Color(0xFFF3E5F5),
-                                border = BorderStroke(1.dp, Color(0xFFCE93D8)),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(bottom = 6.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        Icons.AutoMirrored.Filled.AltRoute,
-                                        contentDescription = null,
-                                        tint = Color(0xFF7B1FA2),
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = "Other riders carry part of this order. You collect the full cash.",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color(0xFF7B1FA2)
-                                    )
-                                }
-                            }
-                        }
-                        if (stop.order.tip > 0.0) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "Tip",
-                                    fontSize = 12.sp,
-                                    color = Color(0xFFE65100),
-                                    fontWeight = FontWeight.Medium
-                                )
-                                Text(
-                                    text = "$currencySymbol${String.format("%.2f", stop.order.tip)}",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFFE65100)
-                                )
-                            }
-                        }
-
-                        val totalToCollect = if (stop.cashToCollect > 0.0) stop.cashToCollect else stop.order.feesTotal
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.LocalAtm, contentDescription = "COD", tint = Color(0xFFE65100), modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "Total to collect",
-                                    fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 13.sp,
-                                    color = Color(0xFFBF360C)
-                                )
-                            }
-                            Text(
-                                text = "$currencySymbol${String.format("%.2f", totalToCollect)}",
-                                fontWeight = FontWeight.Black,
-                                fontSize = 15.sp,
-                                color = Color(0xFFBF360C)
-                            )
-                        }
-                    }
-                } else {
-                    // Paid online or wallet
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = DelivioGreen.copy(alpha = 0.12f),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(Icons.Default.CheckCircle, contentDescription = "Paid Online", tint = DelivioGreenDark, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "Paid online - no cash to collect",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp,
-                                color = DelivioGreenDark
-                            )
-                        }
-                    }
+                            .size(16.dp)
+                            .padding(top = 2.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = stop.order.customerNotes.trim(),
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
                 }
             }
         }
@@ -1166,43 +1433,37 @@ private fun PaySummarySection(
     activeOrders: List<Order>,
     currencySymbol: String
 ) {
-    Card(
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("Batch Driver Pay Summary", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-            HorizontalDivider()
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
 
-            val pickupFee = activeOrders.firstOrNull()?.riderEarning?.pickupFee ?: 15.0
-            val isBatch = activeOrders.size > 1
-
+        val pickupFee = activeOrders.firstOrNull()?.riderEarning?.pickupFee ?: 0.0
+        if (pickupFee > 0.0) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("Stop 1 Pickup Fee", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text("$currencySymbol${String.format("%.2f", pickupFee)}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             }
+        }
 
-            activeOrders.forEachIndexed { idx, order ->
-                val delivFee = order.riderEarning?.bookingFee ?: order.riderFeeEstimate.coerceAtLeast(order.deliveryFee * 0.8)
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Order ${order.displayOrderNumber} Delivery Fee (Rank ${idx + 1})", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("$currencySymbol${String.format("%.2f", delivFee)}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                }
-                if (order.tip > 0) {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("  + Customer Tip", fontSize = 11.sp, color = DelivioGreenDark)
-                        Text("+$currencySymbol${String.format("%.2f", order.tip)}", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = DelivioGreenDark)
-                    }
-                }
-            }
-
-            val totalEarned = activeOrders.sumOf { it.estimatedEarnings }
-            HorizontalDivider()
+        activeOrders.forEachIndexed { idx, order ->
+            val delivFee = order.riderEarning?.bookingFee ?: order.riderFeeEstimate.coerceAtLeast(order.deliveryFee * 0.8)
+            val label = if (activeOrders.size > 1) "Order ${idx + 1} Delivery Fee" else "Delivery Fee"
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("Estimated Total Pay", fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
-                Text("$currencySymbol${String.format("%.2f", totalEarned)}", fontWeight = FontWeight.Black, fontSize = 15.sp, color = DelivioYellowDark)
+                Text(label, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("$currencySymbol${String.format("%.2f", delivFee)}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             }
+            if (order.tip > 0) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("  + Customer Tip", fontSize = 11.sp, color = DelivioGreenDark)
+                    Text("+$currencySymbol${String.format("%.2f", order.tip)}", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = DelivioGreenDark)
+                }
+            }
+        }
+
+        val totalEarned = activeOrders.sumOf { it.estimatedEarnings }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("Estimated Total Pay", fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
+            Text("$currencySymbol${String.format("%.2f", totalEarned)}", fontWeight = FontWeight.Black, fontSize = 14.sp, color = DelivioYellowDark)
         }
     }
 }
@@ -1210,9 +1471,9 @@ private fun PaySummarySection(
 @Composable
 private fun StopNumberBadge(stop: RouteStop, size: Int = 30) {
     val bgColor = if (stop.isMerchant) {
-        Color(0xFF2E7D32) // Green
+        Color(0xFF2E7D32)
     } else {
-        Color(0xFFE53935) // Red
+        Color(0xFFE53935)
     }
     Box(
         modifier = Modifier
@@ -1230,9 +1491,6 @@ private fun StopNumberBadge(stop: RouteStop, size: Int = 30) {
     }
 }
 
-/**
- * Item checklist dialog for "Slide to confirm Picked Up"
- */
 @Composable
 private fun ItemChecklistDialog(
     currentStop: RouteStop,
@@ -1279,12 +1537,11 @@ private fun ItemChecklistDialog(
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(10.dp))
 
-                // Split delivery banner for first rider
                 if (currentStop.order.splitOut.isNotEmpty()) {
                     Surface(
                         shape = RoundedCornerShape(8.dp),
                         color = Color(0xFFF3E5F5),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFCE93D8)),
+                        border = BorderStroke(1.dp, Color(0xFFCE93D8)),
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(bottom = 8.dp)
@@ -1310,7 +1567,6 @@ private fun ItemChecklistDialog(
                     }
                 }
 
-                // Items list
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1327,6 +1583,7 @@ private fun ItemChecklistDialog(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .defaultMinSize(minHeight = 48.dp)
                                 .clickable(enabled = !isTakenByOther) {
                                     checkedItems[idx] = !(checkedItems[idx] ?: false)
                                 },
@@ -1352,7 +1609,8 @@ private fun ItemChecklistDialog(
                                         text = item.displayNameWithQty,
                                         fontWeight = FontWeight.SemiBold,
                                         fontSize = 13.sp,
-                                        color = if (isTakenByOther) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f) else MaterialTheme.colorScheme.onSurface
+                                        color = if (isTakenByOther) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                        else MaterialTheme.colorScheme.onSurface
                                     )
                                     if (isTakenByOther) {
                                         Spacer(modifier = Modifier.width(6.dp))
@@ -1381,7 +1639,6 @@ private fun ItemChecklistDialog(
                     }
                 }
 
-                // If Pabili, prompt for final receipt total
                 if (currentStop.serviceType.lowercase().contains("pabili")) {
                     Spacer(modifier = Modifier.height(12.dp))
                     OutlinedTextField(
@@ -1411,7 +1668,9 @@ private fun ItemChecklistDialog(
                 ) {
                     OutlinedButton(
                         onClick = onDismiss,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp)
                     ) {
                         Text("Cancel")
                     }
@@ -1420,7 +1679,9 @@ private fun ItemChecklistDialog(
                         onClick = onConfirmPickedUp,
                         enabled = allRequiredChecked,
                         colors = ButtonDefaults.buttonColors(containerColor = DelivioGreen, contentColor = Color.White),
-                        modifier = Modifier.weight(1.3f)
+                        modifier = Modifier
+                            .weight(1.3f)
+                            .heightIn(min = 48.dp)
                     ) {
                         Text("Confirm Picked Up", fontWeight = FontWeight.Bold)
                     }
@@ -1430,9 +1691,6 @@ private fun ItemChecklistDialog(
     }
 }
 
-/**
- * COD Cash received confirmation dialog for "Slide to Complete Delivery"
- */
 @Composable
 private fun CodCollectionDialog(
     currentStop: RouteStop,
@@ -1477,7 +1735,7 @@ private fun CodCollectionDialog(
                         border = BorderStroke(1.dp, Color(0xFFCE93D8)),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(bottom = 12.dp)
+                            .padding(vertical = 10.dp)
                     ) {
                         Row(
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
@@ -1499,6 +1757,8 @@ private fun CodCollectionDialog(
                         }
                     }
                 }
+
+                Spacer(modifier = Modifier.height(10.dp))
 
                 Surface(
                     shape = RoundedCornerShape(12.dp),
@@ -1524,6 +1784,7 @@ private fun CodCollectionDialog(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .defaultMinSize(minHeight = 48.dp)
                         .clickable { isConfirmed = !isConfirmed },
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -1547,7 +1808,9 @@ private fun CodCollectionDialog(
                 ) {
                     OutlinedButton(
                         onClick = onDismiss,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp)
                     ) {
                         Text("Cancel")
                     }
@@ -1556,7 +1819,9 @@ private fun CodCollectionDialog(
                         onClick = onConfirmDelivery,
                         enabled = isConfirmed,
                         colors = ButtonDefaults.buttonColors(containerColor = DelivioGreen, contentColor = Color.White),
-                        modifier = Modifier.weight(1.3f)
+                        modifier = Modifier
+                            .weight(1.3f)
+                            .heightIn(min = 48.dp)
                     ) {
                         Text("Complete Delivery", fontWeight = FontWeight.Bold)
                     }

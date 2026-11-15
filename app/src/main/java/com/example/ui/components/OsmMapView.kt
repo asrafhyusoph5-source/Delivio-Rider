@@ -17,6 +17,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -45,6 +46,8 @@ fun OsmMapView(
     isSatelliteLayer: Boolean = false,
     showBusyAreas: Boolean = false,
     busyGridCells: List<com.example.data.models.BusyGridCell> = emptyList(),
+    topBannerPaddingDp: Dp = 88.dp,
+    bottomAttributionPaddingDp: Dp = 6.dp,
     onRouteCalculated: (OsrmRouteResult) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -361,7 +364,8 @@ fun OsmMapView(
             visible = routeResult?.isFallbackDirect == true,
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(top = 80.dp)
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(top = topBannerPaddingDp)
         ) {
             Surface(
                 shape = RoundedCornerShape(16.dp),
@@ -395,7 +399,8 @@ fun OsmMapView(
             color = androidx.compose.ui.graphics.Color(0xCCFFFFFF),
             modifier = Modifier
                 .align(Alignment.BottomStart)
-                .padding(start = 6.dp, bottom = 4.dp)
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(start = 8.dp, bottom = bottomAttributionPaddingDp + 4.dp)
         ) {
             Text(
                 text = "Routing by OSRM, © OpenStreetMap contributors",
@@ -414,7 +419,8 @@ fun OsmMapView(
                 shadowElevation = 6.dp,
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .padding(top = 110.dp)
+                    .windowInsetsPadding(WindowInsets.statusBars)
+                    .padding(top = topBannerPaddingDp + 34.dp)
             ) {
                 Text(
                     text = label,

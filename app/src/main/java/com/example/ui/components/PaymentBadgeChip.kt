@@ -85,117 +85,88 @@ fun PaymentBadgeContent(
     isLarge: Boolean = true,
     modifier: Modifier = Modifier
 ) {
-    when (paymentType) {
-        PaymentType.COD -> {
-            // Large chip, orange "COD - collect ₱X"
-            val text = "COD - collect $currencySymbol${String.format("%.2f", amountToCollect)}"
-            val bg = Color(0xFFFFF3E0)
-            val borderColor = Color(0xFFFF9800)
-            val textColor = Color(0xFFE65100)
+    if (paymentType == PaymentType.COD && (!isRequestRider || amountToCollect > 0.0)) {
+        val text = if (isRequestRider) {
+            val formatted = if (amountToCollect % 1.0 == 0.0) {
+                String.format("%.0f", amountToCollect)
+            } else {
+                String.format("%.2f", amountToCollect)
+            }
+            "Collect $currencySymbol$formatted"
+        } else {
+            "COD - collect $currencySymbol${String.format("%.2f", amountToCollect)}"
+        }
+        val bg = Color(0xFFFFF3E0)
+        val borderColor = Color(0xFFFF9800)
+        val textColor = Color(0xFFE65100)
 
-            Surface(
-                shape = RoundedCornerShape(if (isLarge) 12.dp else 8.dp),
-                color = bg,
-                border = BorderStroke(1.dp, borderColor),
-                modifier = modifier.testTag("payment_chip_cod")
+        Surface(
+            shape = RoundedCornerShape(if (isLarge) 12.dp else 8.dp),
+            color = bg,
+            border = BorderStroke(1.dp, borderColor),
+            modifier = modifier.testTag("payment_chip_cod")
+        ) {
+            Row(
+                modifier = Modifier.padding(
+                    horizontal = if (isLarge) 12.dp else 8.dp,
+                    vertical = if (isLarge) 6.dp else 4.dp
+                ),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
             ) {
-                Row(
-                    modifier = Modifier.padding(
-                        horizontal = if (isLarge) 12.dp else 8.dp,
-                        vertical = if (isLarge) 6.dp else 4.dp
-                    ),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Payments,
-                        contentDescription = "COD",
-                        tint = textColor,
-                        modifier = Modifier.size(if (isLarge) 18.dp else 14.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = text,
-                        fontWeight = FontWeight.ExtraBold,
-                        fontSize = if (isLarge) 13.sp else 11.sp,
-                        color = textColor
-                    )
-                }
+                Icon(
+                    imageVector = Icons.Default.Payments,
+                    contentDescription = "COD",
+                    tint = textColor,
+                    modifier = Modifier.size(if (isLarge) 18.dp else 14.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = text,
+                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = if (isLarge) 13.sp else 11.sp,
+                    color = textColor
+                )
             }
         }
-        PaymentType.PAID_ONLINE -> {
-            // Large chip, green "Paid Online - no cash to collect" plus provider name
-            val providerSuffix = if (providerLabel.isNotBlank()) " ($providerLabel)" else ""
-            val text = "Paid Online - no cash to collect$providerSuffix"
-            val bg = Color(0xFFE8F5E9)
-            val borderColor = Color(0xFF4CAF50)
-            val textColor = Color(0xFF2E7D32)
-
-            Surface(
-                shape = RoundedCornerShape(if (isLarge) 12.dp else 8.dp),
-                color = bg,
-                border = BorderStroke(1.dp, borderColor),
-                modifier = modifier.testTag("payment_chip_paid_online")
-            ) {
-                Row(
-                    modifier = Modifier.padding(
-                        horizontal = if (isLarge) 12.dp else 8.dp,
-                        vertical = if (isLarge) 6.dp else 4.dp
-                    ),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.CheckCircle,
-                        contentDescription = "Paid Online",
-                        tint = textColor,
-                        modifier = Modifier.size(if (isLarge) 18.dp else 14.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = text,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = if (isLarge) 13.sp else 11.sp,
-                        color = textColor
-                    )
-                }
-            }
+    } else {
+        val providerSuffix = if (!isRequestRider && providerLabel.isNotBlank()) " ($providerLabel)" else ""
+        val text = if (isRequestRider) {
+            "No cash to collect (paid)"
+        } else {
+            "Paid Online - no cash to collect$providerSuffix"
         }
-        PaymentType.UNKNOWN -> {
-            // Never default to "Paid Online". If missing or unknown, show "Payment unknown - contact support"
-            val text = "Payment unknown - contact support"
-            val bg = Color(0xFFFFEBEE)
-            val borderColor = Color(0xFFE57373)
-            val textColor = Color(0xFFC62828)
+        val bg = Color(0xFFE8F5E9)
+        val borderColor = Color(0xFF4CAF50)
+        val textColor = Color(0xFF2E7D32)
 
-            Surface(
-                shape = RoundedCornerShape(if (isLarge) 12.dp else 8.dp),
-                color = bg,
-                border = BorderStroke(1.dp, borderColor),
-                modifier = modifier.testTag("payment_chip_unknown")
+        Surface(
+            shape = RoundedCornerShape(if (isLarge) 12.dp else 8.dp),
+            color = bg,
+            border = BorderStroke(1.dp, borderColor),
+            modifier = modifier.testTag("payment_chip_paid_online")
+        ) {
+            Row(
+                modifier = Modifier.padding(
+                    horizontal = if (isLarge) 12.dp else 8.dp,
+                    vertical = if (isLarge) 6.dp else 4.dp
+                ),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
             ) {
-                Row(
-                    modifier = Modifier.padding(
-                        horizontal = if (isLarge) 12.dp else 8.dp,
-                        vertical = if (isLarge) 6.dp else 4.dp
-                    ),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Warning,
-                        contentDescription = "Payment unknown",
-                        tint = textColor,
-                        modifier = Modifier.size(if (isLarge) 18.dp else 14.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = text,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = if (isLarge) 13.sp else 11.sp,
-                        color = textColor
-                    )
-                }
+                Icon(
+                    imageVector = Icons.Default.CheckCircle,
+                    contentDescription = "Paid Online",
+                    tint = textColor,
+                    modifier = Modifier.size(if (isLarge) 18.dp else 14.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = text,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = if (isLarge) 13.sp else 11.sp,
+                    color = textColor
+                )
             }
         }
     }

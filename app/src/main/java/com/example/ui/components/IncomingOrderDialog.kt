@@ -6,8 +6,10 @@ import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -21,9 +23,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -33,6 +37,7 @@ import com.example.data.models.OfferBundle
 import com.example.data.models.OfferType
 import com.example.data.models.Order
 import com.example.data.models.OrderPayBreakdown
+import com.example.data.models.deduplicateAddress
 import com.example.ui.theme.*
 import kotlinx.coroutines.delay
 
@@ -44,13 +49,18 @@ fun IncomingOrderDialog(
     vibrationEnabled: Boolean,
     onAccept: () -> Unit,
     onDecline: () -> Unit,
-    onMissed: () -> Unit = onDecline
+    onMissed: () -> Unit = onDecline,
+    onDisplayed: () -> Unit = {}
 ) {
     val context = LocalContext.current
-    var secondsLeft by remember(bundle.id) { mutableIntStateOf(30) }
+    val screenHeight = LocalConfiguration.current.screenHeightDp.dp
+    val totalTimerSeconds = bundle.timerSeconds.coerceAtLeast(10)
+    var secondsLeft by remember(bundle.id) { mutableIntStateOf(totalTimerSeconds) }
+    var showPayBreakdown by remember(bundle.id) { mutableStateOf(false) }
 
-    // Sound & Vibration on launch
+    // Log display, play sound & trigger vibration on launch
     LaunchedEffect(bundle.id) {
+        onDisplayed()
         if (soundEnabled) {
             try {
                 val notification = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
@@ -73,7 +83,7 @@ fun IncomingOrderDialog(
         }
     }
 
-    // 30-second countdown
+    // Countdown timer (20s for Delivio Instant, 30s otherwise)
     LaunchedEffect(bundle.id) {
         while (secondsLeft > 0) {
             delay(1000L)
@@ -84,10 +94,15 @@ fun IncomingOrderDialog(
 
     val firstOrder = bundle.firstOrder
     val serviceBadge = OrderStepConstants.getServiceBadge(firstOrder.serviceType)
+    val timerProgress = (secondsLeft.toFloat() / totalTimerSeconds.toFloat()).coerceIn(0f, 1f)
 
     Dialog(
-        onDismissRequest = { /* Modal dialog */ },
-        properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false, usePlatformDefaultWidth = false)
+        onDismissRequest = { /* Modal offer dialog */ },
+        properties = DialogProperties(
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+            usePlatformDefaultWidth = false
+        )
     ) {
         Card(
             shape = RoundedCornerShape(24.dp),
@@ -95,24 +110,28 @@ fun IncomingOrderDialog(
             elevation = CardDefaults.cardElevation(defaultElevation = 12.dp),
             modifier = Modifier
                 .fillMaxWidth(0.94f)
-                .fillMaxHeight(0.88f)
+                .wrapContentHeight()
+                .heightIn(max = (screenHeight * 0.85f).coerceAtLeast(360.dp))
+                .navigationBarsPadding()
                 .testTag("incoming_order_dialog")
         ) {
             Column(
                 modifier = Modifier
-                    .fillMaxSize()
+                    .fillMaxWidth()
+                    .wrapContentHeight()
                     .padding(18.dp)
             ) {
-                // Top Fixed Header: Badges & 30s Countdown Timer
+                // Top Header: Service Badges & Circular Countdown Ring
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
+                    @OptIn(ExperimentalLayoutApi::class)
+                    FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        modifier = Modifier.weight(1f, fill = false)
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.weight(1f)
                     ) {
                         Surface(
                             shape = RoundedCornerShape(8.dp),
@@ -122,8 +141,8 @@ fun IncomingOrderDialog(
                                 text = serviceBadge.uppercase(),
                                 color = TextOnYellow,
                                 fontWeight = FontWeight.Black,
-                                fontSize = 12.sp,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                             )
                         }
 
@@ -136,26 +155,25 @@ fun IncomingOrderDialog(
                                     text = "DOUBLE BOOKING",
                                     color = Color.White,
                                     fontWeight = FontWeight.Black,
-                                    fontSize = 11.sp,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                                    fontSize = 10.sp,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                                 )
                             }
                         } else if (bundle.isAddToBooking) {
                             Surface(
                                 shape = RoundedCornerShape(8.dp),
-                                color = Color(0xFF2E7D32)
+                                color = DelivioGreenDark
                             ) {
                                 Text(
                                     text = "ADD TO BOOKING",
                                     color = Color.White,
                                     fontWeight = FontWeight.Black,
-                                    fontSize = 11.sp,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                                    fontSize = 10.sp,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                                 )
                             }
                         }
 
-                        // Order badges (Priority, Saver, SPLIT)
                         val badgesList = bundle.orders.map {
                             if (it.isSplitChild) "SPLIT" else it.badge
                         }.distinct()
@@ -176,15 +194,11 @@ fun IncomingOrderDialog(
                                         text = b.uppercase(),
                                         color = Color.White,
                                         fontWeight = FontWeight.Black,
-                                        fontSize = 11.sp,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                                        fontSize = 10.sp,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                                     )
                                 }
                             }
-                        }
-
-                        if (bundle.orders.any { it.isSplitChild || it.badge.equals("split", ignoreCase = true) }) {
-                            NoCashCollectedChip(isLarge = false)
                         }
 
                         val schedOrder = bundle.orders.firstOrNull { it.isScheduled }
@@ -195,20 +209,20 @@ fun IncomingOrderDialog(
                             ) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp)
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.Schedule,
                                         contentDescription = "Scheduled",
                                         tint = Color.White,
-                                        modifier = Modifier.size(12.dp)
+                                        modifier = Modifier.size(11.dp)
                                     )
-                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Spacer(modifier = Modifier.width(3.dp))
                                     Text(
                                         text = if (schedOrder.scheduledDateText.isNotBlank()) "SCHEDULED • ${schedOrder.scheduledDateText}" else "SCHEDULED",
                                         color = Color.White,
                                         fontWeight = FontWeight.Black,
-                                        fontSize = 11.sp
+                                        fontSize = 10.sp
                                     )
                                 }
                             }
@@ -222,65 +236,75 @@ fun IncomingOrderDialog(
                                 Text(
                                     text = OrderStepConstants.getVehicleDisplayName(firstOrder.vehicleType),
                                     fontWeight = FontWeight.Bold,
-                                    fontSize = 11.sp,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 5.dp)
+                                    fontSize = 10.sp,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
                                 )
                             }
                         }
                     }
 
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(10.dp))
 
-                    // Circular Countdown Timer
+                    // Circular Countdown Ring
                     Box(
                         modifier = Modifier
-                            .size(42.dp)
+                            .size(48.dp)
                             .clip(CircleShape)
-                            .background(if (secondsLeft <= 5) DelivioRed else DelivioYellowLight),
+                            .background(
+                                if (secondsLeft <= 5) DelivioRed.copy(alpha = 0.14f)
+                                else DelivioYellow.copy(alpha = 0.16f)
+                            ),
                         contentAlignment = Alignment.Center
                     ) {
+                        CircularProgressIndicator(
+                            progress = { timerProgress },
+                            modifier = Modifier.fillMaxSize(),
+                            color = if (secondsLeft <= 5) DelivioRed else DelivioYellow,
+                            trackColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f),
+                            strokeWidth = 4.dp
+                        )
                         Text(
                             text = "$secondsLeft",
                             fontWeight = FontWeight.Black,
-                            fontSize = 17.sp,
-                            color = if (secondsLeft <= 5) Color.White else TextOnYellow
+                            fontSize = 16.sp,
+                            color = if (secondsLeft <= 5) DelivioRed else MaterialTheme.colorScheme.onSurface
                         )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
-                // Scrollable Body Content
+                // Body (wraps content height, scrolls only if taller than screen max)
                 Column(
                     modifier = Modifier
-                        .weight(1f)
+                        .fillMaxWidth()
+                        .weight(1f, fill = false)
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    // Estimated Earnings Callout
+                    // Large Total Earnings Callout
                     Surface(
                         shape = RoundedCornerShape(16.dp),
                         color = DelivioYellowLight,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(
-                            modifier = Modifier.padding(14.dp),
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             Text(
-                                text = "TOTAL ESTIMATED EARNINGS",
+                                text = "ESTIMATED EARNINGS",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = TextOnYellow.copy(alpha = 0.85f)
+                                color = TextOnYellow.copy(alpha = 0.8f)
                             )
                             Text(
                                 text = "$currencySymbol${String.format("%.2f", bundle.totalDriverPay)}",
-                                fontSize = 28.sp,
+                                fontSize = 32.sp,
                                 fontWeight = FontWeight.Black,
                                 color = TextOnYellow
                             )
                             Spacer(modifier = Modifier.height(6.dp))
-
                             Row(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalAlignment = Alignment.CenterVertically
@@ -302,7 +326,7 @@ fun IncomingOrderDialog(
                                     color = MaterialTheme.colorScheme.surface
                                 ) {
                                     Text(
-                                        text = "~${String.format("%.1f", bundle.firstPickupDistanceKm)} km to pickup",
+                                        text = "~${String.format("%.1f", bundle.firstPickupDistanceKm)} km away",
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 12.sp,
                                         color = MaterialTheme.colorScheme.onSurface,
@@ -313,278 +337,178 @@ fun IncomingOrderDialog(
                         }
                     }
 
-                    // Itemized Pay Breakdown Section
-                    Surface(
-                        shape = RoundedCornerShape(14.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(5.dp)
-                        ) {
-                            Text(
-                                text = "ITEMIZED DRIVER PAY",
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Black,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-
-                            if (bundle.pickupFee > 0.0) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Text(
-                                        text = "Pickup Fee (Stop 1)",
-                                        fontSize = 12.sp,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                    Text(
-                                        text = "$currencySymbol${String.format("%.2f", bundle.pickupFee)}",
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 12.sp,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                }
-                            }
-
-                            bundle.breakdowns.forEachIndexed { idx, bk ->
-                                val orderLabel = if (bundle.orders.size > 1) "Order ${idx + 1} (${bk.displayOrderNumber}) Delivery" else "Delivery Fee"
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Text(
-                                        text = orderLabel,
-                                        fontSize = 12.sp,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                    Text(
-                                        text = "$currencySymbol${String.format("%.2f", bk.deliveryFee)}",
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 12.sp,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                }
-                                if (bk.tip > 0.0) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Text(
-                                            text = if (bundle.orders.size > 1) "  ↳ Order ${idx + 1} Tip" else "Customer Tip",
-                                            fontSize = 12.sp,
-                                            color = Color(0xFF2E7D32)
-                                        )
-                                        Text(
-                                            text = "+$currencySymbol${String.format("%.2f", bk.tip)}",
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 12.sp,
-                                            color = Color(0xFF2E7D32)
-                                        )
-                                    }
-                                }
-                            }
-
-                            HorizontalDivider(modifier = Modifier.padding(vertical = 3.dp))
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(
-                                    text = "Total Driver Pay",
-                                    fontWeight = FontWeight.Black,
-                                    fontSize = 13.sp,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                                Text(
-                                    text = "$currencySymbol${String.format("%.2f", bundle.totalDriverPay)}",
-                                    fontWeight = FontWeight.Black,
-                                    fontSize = 13.sp,
-                                    color = DelivioYellowDark
-                                )
-                            }
-                        }
-                    }
-
-                    // Orders List & Payment Details (COD amounts / Paid Online)
+                    // Route Summary Cards (Concise 2-line pickup -> drop-off + 1 payment chip)
                     bundle.orders.forEachIndexed { idx, ord ->
-                        val bk = bundle.breakdowns.getOrNull(idx)
                         Surface(
                             shape = RoundedCornerShape(14.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Column(
                                 modifier = Modifier.padding(12.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
+                                // Line 1: Pickup
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = if (ord.isTaxi) Icons.Default.DirectionsCar else Icons.Default.Storefront,
+                                        contentDescription = "Pickup",
+                                        tint = DelivioGreen,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    val pickupAddressClean = deduplicateAddress(ord.merchantAddress)
+                                    val pickupLabel = if (ord.isTaxi) {
+                                        pickupAddressClean.ifBlank { ord.displayPickupName }
+                                    } else {
+                                        ord.displayPickupName
+                                    }
+                                    Text(
+                                        text = if (bundle.orders.size > 1) "${idx + 1}. $pickupLabel" else pickupLabel,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+
+                                // Line 2: Drop-off area + distance
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.LocationOn,
+                                        contentDescription = "Drop-off",
+                                        tint = DelivioRed,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    val dropoffArea = deduplicateAddress(ord.customerArea)
+                                        .ifBlank { deduplicateAddress(ord.customerAddress) }
+                                        .ifBlank { "Drop-off location" }
+                                    val distSuffix = if (ord.deliveryDistanceKm > 0.0) {
+                                        " • ${String.format("%.1f", ord.deliveryDistanceKm)} km"
+                                    } else {
+                                        ""
+                                    }
+                                    Text(
+                                        text = "$dropoffArea$distSuffix",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+
+                                // Single payment chip (+ tip/prep/scheduled if relevant)
+                                @OptIn(ExperimentalLayoutApi::class)
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        Text(
-                                            text = if (bundle.orders.size > 1) "Order ${idx + 1} • ${ord.displayOrderNumber}" else "Order ${ord.displayOrderNumber}",
-                                            fontWeight = FontWeight.Black,
-                                            fontSize = 13.sp,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                        if (ord.badge.isNotBlank() && !ord.badge.equals("standard", ignoreCase = true)) {
-                                            Surface(
-                                                shape = RoundedCornerShape(6.dp),
-                                                color = DelivioYellowLight
+                                    PaymentBadgeChip(
+                                        order = ord,
+                                        currencySymbol = currencySymbol,
+                                        isLarge = false
+                                    )
+                                    if (ord.tip > 0.0) {
+                                        TipBadgeChip(tipAmount = ord.tip, currencySymbol = currencySymbol)
+                                    }
+                                    if (ord.prepStatusText.isNotBlank()) {
+                                        MerchantPrepStatusChip(order = ord)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Collapsed Pay Breakdown Toggle
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { showPayBreakdown = !showPayBreakdown }
+                            .testTag("offer_pay_breakdown_toggle")
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Pay breakdown",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Icon(
+                                    imageVector = if (showPayBreakdown) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                    contentDescription = if (showPayBreakdown) "Hide pay breakdown" else "Show pay breakdown",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            AnimatedVisibility(visible = showPayBreakdown) {
+                                Column(
+                                    modifier = Modifier.padding(top = 8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                                    if (bundle.pickupFee > 0.0) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Text("Pickup Fee (Stop 1)", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            Text("$currencySymbol${String.format("%.2f", bundle.pickupFee)}", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                        }
+                                    }
+                                    bundle.breakdowns.forEachIndexed { idx, bk ->
+                                        val orderLabel = if (bundle.orders.size > 1) "Order ${idx + 1} Delivery Fee" else "Delivery Fee"
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Text(orderLabel, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            Text("$currencySymbol${String.format("%.2f", bk.deliveryFee)}", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                        }
+                                        if (bk.tip > 0.0) {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween
                                             ) {
                                                 Text(
-                                                    text = ord.badge.uppercase(),
-                                                    color = TextOnYellow,
+                                                    if (bundle.orders.size > 1) "Order ${idx + 1} Tip" else "Customer Tip",
+                                                    fontSize = 12.sp,
+                                                    color = DelivioGreenDark
+                                                )
+                                                Text(
+                                                    "+$currencySymbol${String.format("%.2f", bk.tip)}",
                                                     fontWeight = FontWeight.Bold,
-                                                    fontSize = 10.sp,
-                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                    fontSize = 12.sp,
+                                                    color = DelivioGreenDark
                                                 )
                                             }
                                         }
-                                        if (ord.isScheduled) {
-                                            Surface(
-                                                shape = RoundedCornerShape(6.dp),
-                                                color = Color(0xFFE3F2FD),
-                                                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF2196F3))
-                                            ) {
-                                                Row(
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                                ) {
-                                                    Icon(
-                                                        imageVector = Icons.Default.Schedule,
-                                                        contentDescription = "Scheduled",
-                                                        tint = Color(0xFF1565C0),
-                                                        modifier = Modifier.size(10.dp)
-                                                    )
-                                                    Spacer(modifier = Modifier.width(3.dp))
-                                                    Text(
-                                                        text = if (ord.scheduledDateText.isNotBlank()) "SCHEDULED • ${ord.scheduledDateText}" else "SCHEDULED",
-                                                        color = Color(0xFF1565C0),
-                                                        fontWeight = FontWeight.Bold,
-                                                        fontSize = 10.sp
-                                                    )
-                                                }
-                                            }
-                                        }
                                     }
-
-                                    // Payment badge for this order (COD or Paid Online or Split child)
-                                    if (ord.isSplitChild || ord.badge.equals("split", ignoreCase = true)) {
-                                        NoCashCollectedChip(isLarge = false)
-                                    } else if (ord.isCod) {
-                                        val codAmt = if (bk != null && bk.codAmount > 0.0) bk.codAmount else ord.cashAmountToCollect
-                                        Surface(
-                                            shape = RoundedCornerShape(6.dp),
-                                            color = DelivioYellowDark
-                                        ) {
-                                            Text(
-                                                text = "COD: Collect $currencySymbol${String.format("%.2f", codAmt)}",
-                                                color = Color.White,
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 11.sp,
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
-                                            )
-                                        }
-                                    } else if (ord.isPaidOnline) {
-                                        Surface(
-                                            shape = RoundedCornerShape(6.dp),
-                                            color = Color(0xFF2E7D32)
-                                        ) {
-                                            Text(
-                                                text = "Paid Online",
-                                                color = Color.White,
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 11.sp,
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
-                                            )
-                                        }
-                                    } else {
-                                        Surface(
-                                            shape = RoundedCornerShape(6.dp),
-                                            color = DelivioRed
-                                        ) {
-                                            Text(
-                                                text = "Payment Unknown",
-                                                color = Color.White,
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 11.sp,
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
-                                            )
-                                        }
-                                    }
-                                }
-
-                                // Pickup location
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        if (ord.isTaxi) Icons.Default.DirectionsCar else Icons.Default.Storefront,
-                                        contentDescription = "Pickup",
-                                        tint = DelivioYellowDark,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    val pickupTitle = if (ord.isTaxi) {
-                                        ord.merchantAddress.ifBlank { ord.stops.firstOrNull()?.address ?: ord.displayMerchantName.ifBlank { "Pickup Point" } }
-                                    } else {
-                                        ord.displayMerchantName.ifBlank { ord.merchantAddress.ifBlank { "Merchant" } }
-                                    }
-                                    Column {
-                                        Text(
-                                            text = pickupTitle,
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            maxLines = 1
-                                        )
-                                        if (!ord.isTaxi && ord.merchantAddress.isNotBlank() && ord.merchantAddress != pickupTitle) {
-                                            Text(
-                                                text = ord.merchantAddress,
-                                                fontSize = 11.sp,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                maxLines = 1
-                                            )
-                                        }
-                                    }
-                                }
-
-                                // Drop-off location
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        Icons.Default.LocationOn,
-                                        contentDescription = "Drop-off",
-                                        tint = DelivioRed,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = "Drop-off Area: ${ord.customerArea}",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        maxLines = 1
-                                    )
-                                }
-
-                                if (ord.prepStatusText.isNotBlank() || ord.tip > 0) {
+                                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
                                     Row(
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                        verticalAlignment = Alignment.CenterVertically
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
-                                        if (ord.prepStatusText.isNotBlank()) {
-                                            MerchantPrepStatusChip(order = ord)
-                                        }
-                                        if (ord.tip > 0) {
-                                            TipBadgeChip(tipAmount = ord.tip, currencySymbol = currencySymbol)
-                                        }
+                                        Text("Total Driver Pay", fontWeight = FontWeight.Black, fontSize = 13.sp)
+                                        Text(
+                                            "$currencySymbol${String.format("%.2f", bundle.totalDriverPay)}",
+                                            fontWeight = FontWeight.Black,
+                                            fontSize = 13.sp,
+                                            color = DelivioYellowDark
+                                        )
                                     }
                                 }
                             }
@@ -592,9 +516,9 @@ fun IncomingOrderDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
-                // Actions: Accept & Decline
+                // Pinned Bottom Actions: Decline & Accept (>= 48.dp touch targets)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -604,7 +528,8 @@ fun IncomingOrderDialog(
                         shape = RoundedCornerShape(14.dp),
                         modifier = Modifier
                             .weight(1f)
-                            .height(48.dp)
+                            .height(50.dp)
+                            .testTag("decline_offer_button")
                     ) {
                         Text("Decline", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
                     }
@@ -613,7 +538,7 @@ fun IncomingOrderDialog(
                         bundle.orders.size > 1 -> "Accept ${bundle.orders.size} Orders"
                         bundle.isAddToBooking -> "Add to Booking"
                         firstOrder.isTaxi -> "Accept Trip"
-                        else -> "Accept Order"
+                        else -> "Accept"
                     }
 
                     Button(
@@ -622,7 +547,8 @@ fun IncomingOrderDialog(
                         colors = ButtonDefaults.buttonColors(containerColor = DelivioYellow, contentColor = TextOnYellow),
                         modifier = Modifier
                             .weight(1.5f)
-                            .height(48.dp)
+                            .height(50.dp)
+                            .testTag("accept_offer_button")
                     ) {
                         Text(acceptLabel, fontWeight = FontWeight.ExtraBold, fontSize = 15.sp)
                     }
@@ -641,7 +567,8 @@ fun IncomingOrderDialog(
     vibrationEnabled: Boolean,
     onAccept: () -> Unit,
     onDecline: () -> Unit,
-    onMissed: () -> Unit = onDecline
+    onMissed: () -> Unit = onDecline,
+    onDisplayed: () -> Unit = {}
 ) {
     val breakdown = OrderPayBreakdown(
         orderId = order.id,
@@ -656,6 +583,7 @@ fun IncomingOrderDialog(
         badge = order.badge,
         customerArea = order.customerArea
     )
+    val timerSecs = if (order.serviceType.equals(OrderStepConstants.SERVICE_REQUEST, ignoreCase = true)) 20 else 30
     val bundle = OfferBundle(
         id = order.id,
         type = OfferType.SINGLE,
@@ -667,7 +595,8 @@ fun IncomingOrderDialog(
         totalDriverPay = order.estimatedEarnings,
         eligibleSince = System.currentTimeMillis(),
         waveDelaySeconds = 0,
-        badge = order.badge
+        badge = order.badge,
+        timerSeconds = timerSecs
     )
     IncomingOrderDialog(
         bundle = bundle,
@@ -676,6 +605,7 @@ fun IncomingOrderDialog(
         vibrationEnabled = vibrationEnabled,
         onAccept = onAccept,
         onDecline = onDecline,
-        onMissed = onMissed
+        onMissed = onMissed,
+        onDisplayed = onDisplayed
     )
 }

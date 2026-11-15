@@ -396,6 +396,7 @@ data class Order(
 
     // Merchant / Pickup
     val merchantName: String = "",
+    val senderName: String = "",
     val branchName: String = "",
     val branchCode: String = "",
     val chainId: String = "",
@@ -485,6 +486,7 @@ data class Order(
     val endsWhenReady: Boolean? = null,
     val specialRadiusExtra: Double = 0.0,
     val excludeRiderIds: List<String> = emptyList(),
+    val targetRiderId: String = "",
     val riderEarning: RiderEarning? = null,
     val splitOut: List<String> = emptyList(),
     val splitOutInfo: SplitOutInfo? = null,
@@ -509,7 +511,23 @@ data class Order(
         }
 
     val displayMerchantName: String
-        get() = formatMerchantDisplayName(merchantName, branchName, branchCode)
+        get() = formatMerchantDisplayName(sanitizeDisplayName(merchantName, ""), branchName, branchCode)
+
+    val displayPickupName: String
+        get() {
+            val s = serviceType.lowercase().trim()
+            if (s == OrderStepConstants.SERVICE_PARCEL || s == OrderStepConstants.SERVICE_PABILI) {
+                val sender = sanitizeDisplayName(senderName, "")
+                if (sender.isNotBlank()) return sender
+                val merchantClean = sanitizeDisplayName(merchantName, "")
+                return if (merchantClean.isNotBlank()) merchantClean else "Sender"
+            }
+            if (s == OrderStepConstants.SERVICE_TAXI) {
+                return stops.firstOrNull()?.address?.let { deduplicateAddress(it) }?.ifBlank { "Passenger Pickup" }
+                    ?: "Passenger Pickup"
+            }
+            return displayMerchantName.ifBlank { "Merchant" }
+        }
 
     val deliveredAtMillis: Long
         get() {
@@ -684,13 +702,13 @@ data class Order(
         get() = if (tip % 1.0 == 0.0) "Tip ₱${String.format("%.0f", tip)}" else "Tip ₱${String.format("%.2f", tip)}"
 
     val isRequestRider: Boolean
-        get() = serviceType == OrderStepConstants.SERVICE_REQUEST
+        get() = serviceType.equals(OrderStepConstants.SERVICE_REQUEST, ignoreCase = true)
 
     val isParcel: Boolean
         get() = serviceType.lowercase() == OrderStepConstants.SERVICE_PARCEL
 
     val paymentType: PaymentType
-        get() = parsePaymentType(paymentMethod)
+        get() = parsePaymentType(paymentMethod, cashToCollect, codAmount)
 
     val isCod: Boolean
         get() = !isSplitChild && paymentType == PaymentType.COD
@@ -699,7 +717,7 @@ data class Order(
         get() = paymentType == PaymentType.PAID_ONLINE
 
     val isPaymentUnknown: Boolean
-        get() = paymentType == PaymentType.UNKNOWN
+        get() = false
 
     val paymentProviderLabel: String
         get() = formatPaymentProvider(paymentProvider)
@@ -712,12 +730,12 @@ data class Order(
     // For COD, the cash to collect is fees.total, which already includes the tip.
     // COD, parcel: cashToCollect, from party in cashCollectAt ("sender" at pickup, "recipient" at delivery).
     // COD, pabili: finalReceiptTotal + fees.deliveryFee + fees.serviceFee + tip, collected at delivery.
-    // request_rider: codAmount (collected from recipient). Delivery fee shows "Paid by merchant".
+    // request_rider: cashToCollect (or codAmount fallback) collected from recipient.
     // Taxi COD: fees.total
     // Paid Online or wallet: no cash to collect.
     val cashAmountToCollect: Double
         get() {
-            if (isSplitChild || paymentType == PaymentType.PAID_ONLINE || paymentType == PaymentType.UNKNOWN) {
+            if (isSplitChild || paymentType == PaymentType.PAID_ONLINE) {
                 return 0.0
             }
             return when (serviceType.lowercase()) {
@@ -727,7 +745,7 @@ data class Order(
                     val itemsTotal = if (finalReceiptTotal > 0.0) finalReceiptTotal else pabiliEstimatedTotal
                     itemsTotal + feesDeliveryFee + feesServiceFee + tip
                 }
-                OrderStepConstants.SERVICE_REQUEST, "request" -> codAmount
+                OrderStepConstants.SERVICE_REQUEST -> if (cashToCollect > 0.0) cashToCollect else codAmount
                 else -> {
                     // COD food or convenience: cashToCollect, falling back to fees.total (which includes tip)
                     if (cashToCollect > 0.0) cashToCollect else feesTotal
@@ -742,12 +760,16 @@ enum class PaymentType {
     UNKNOWN
 }
 
-fun parsePaymentType(paymentMethod: String?): PaymentType {
+fun parsePaymentType(
+    paymentMethod: String?,
+    cashToCollect: Double = 0.0,
+    codAmount: Double = 0.0
+): PaymentType {
     val pm = paymentMethod?.trim()?.lowercase() ?: ""
     return when (pm) {
         "cod", "cash", "cash on delivery" -> PaymentType.COD
-        "wallet", "online" -> PaymentType.PAID_ONLINE
-        else -> PaymentType.UNKNOWN
+        "wallet", "online", "paid", "paid online", "gcash", "maya", "card", "bank" -> PaymentType.PAID_ONLINE
+        else -> if (cashToCollect > 0.0 || codAmount > 0.0) PaymentType.COD else PaymentType.PAID_ONLINE
     }
 }
 
@@ -1079,7 +1101,8 @@ data class OfferBundle(
     val totalDriverPay: Double,
     val eligibleSince: Long,
     val waveDelaySeconds: Int,
-    val badge: String = "Standard"
+    val badge: String = "Standard",
+    val timerSeconds: Int = 30
 ) {
     val totalStopsCount: Int
         get() {
@@ -1164,6 +1187,7 @@ object HelpCenterConstants {
         HelpCenterReason("merchant_wait", "Merchant is taking too long"),
         HelpCenterReason("merchant_closed", "Merchant is closed"),
         HelpCenterReason("customer_unreachable", "Customer unreachable"),
+        HelpCenterReason("wrong_address", "Wrong address or pin"),
         HelpCenterReason("vehicle_breakdown", "Vehicle breakdown"),
         HelpCenterReason("safety", "Safety concern"),
         HelpCenterReason("other", "Other")
@@ -1360,14 +1384,37 @@ fun formatGoalDescription(goal: QuestGoal, quest: Quest, currencySymbol: String 
     return parts.joinToString(" ")
 }
 
+fun sanitizeDisplayName(raw: String?, fallback: String = ""): String {
+    val trimmed = (raw ?: "").trim()
+    if (trimmed.isBlank()) return fallback
+    if (trimmed.contains("@")) return fallback
+    return trimmed
+}
+
+fun deduplicateAddress(raw: String?): String {
+    val input = (raw ?: "").trim()
+    if (input.isBlank()) return ""
+    val parts = input.split(",").map { it.trim() }.filter { it.isNotBlank() }
+    if (parts.isEmpty()) return input
+    val seen = LinkedHashSet<String>()
+    val result = mutableListOf<String>()
+    for (part in parts) {
+        val key = part.lowercase().replace("\\s+".toRegex(), " ")
+        if (seen.add(key)) {
+            result.add(part)
+        }
+    }
+    return result.joinToString(", ")
+}
+
 fun formatMerchantDisplayName(
     merchantName: String,
     branchName: String = "",
     branchCode: String = ""
 ): String {
-    val base = merchantName.trim()
-    val branch = branchName.trim()
-    val code = branchCode.trim()
+    val base = sanitizeDisplayName(merchantName, "")
+    val branch = sanitizeDisplayName(branchName, "")
+    val code = sanitizeDisplayName(branchCode, "")
     if (base.isBlank()) return ""
     val withBranch = if (branch.isNotBlank() &&
         !base.endsWith(" - $branch", ignoreCase = true) &&

@@ -49,6 +49,7 @@ enum class HelpCenterStep {
 fun HelpCenterFlowScreen(
     viewModel: RiderViewModel,
     preselectedOrderId: String? = null,
+    preselectedReasonKey: String? = null,
     onBack: () -> Unit,
     onTicketCreated: (String) -> Unit
 ) {
@@ -68,7 +69,12 @@ fun HelpCenterFlowScreen(
         )
     }
 
-    var selectedReason by remember { mutableStateOf<HelpCenterReason?>(null) }
+    val initialReason = remember(preselectedReasonKey) {
+        preselectedReasonKey?.let { key ->
+            HelpCenterConstants.REASONS.firstOrNull { it.key == key }
+        }
+    }
+    var selectedReason by remember { mutableStateOf<HelpCenterReason?>(initialReason) }
     val splitItemsMap = remember { mutableStateMapOf<String, Boolean>() }
 
     var titleInput by remember { mutableStateOf("") }
@@ -80,8 +86,14 @@ fun HelpCenterFlowScreen(
     // Navigation through the wizard steps
     var currentStep by remember {
         mutableStateOf(
-            if (candidateOrders.size > 1 && preselectedOrderId == null) HelpCenterStep.SELECT_ORDER
-            else HelpCenterStep.SELECT_REASON
+            when {
+                initialReason != null && selectedOrder != null -> {
+                    if (initialReason.requiresSplitChecklist) HelpCenterStep.CHECKLIST_SPLIT_ITEMS
+                    else HelpCenterStep.DETAILS_FORM
+                }
+                candidateOrders.size > 1 && preselectedOrderId == null -> HelpCenterStep.SELECT_ORDER
+                else -> HelpCenterStep.SELECT_REASON
+            }
         )
     }
 

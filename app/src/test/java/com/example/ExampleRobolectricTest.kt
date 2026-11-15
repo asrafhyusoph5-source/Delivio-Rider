@@ -63,7 +63,7 @@ class ExampleRobolectricTest {
     @Test
     fun `verify platform order step constants`() {
         assertEquals("food", OrderStepConstants.SERVICE_FOOD)
-        assertEquals("convenience", OrderStepConstants.SERVICE_INSTANT)
+        assertEquals("convenience", OrderStepConstants.SERVICE_MART)
         assertEquals("parcel", OrderStepConstants.SERVICE_PARCEL)
         assertEquals("pabili", OrderStepConstants.SERVICE_PABILI)
         assertEquals("request_rider", OrderStepConstants.SERVICE_REQUEST)
@@ -127,10 +127,11 @@ class ExampleRobolectricTest {
         assertEquals(com.example.data.models.PaymentType.PAID_ONLINE, com.example.data.models.parsePaymentType("online"))
         assertEquals(com.example.data.models.PaymentType.PAID_ONLINE, com.example.data.models.parsePaymentType(" ONLINE "))
 
-        // Unknown variants (never defaults to Paid Online)
-        assertEquals(com.example.data.models.PaymentType.UNKNOWN, com.example.data.models.parsePaymentType(null))
-        assertEquals(com.example.data.models.PaymentType.UNKNOWN, com.example.data.models.parsePaymentType(""))
-        assertEquals(com.example.data.models.PaymentType.UNKNOWN, com.example.data.models.parsePaymentType("credit_card_stripe"))
+        // Fallback variants (never shows Payment Unknown)
+        assertEquals(com.example.data.models.PaymentType.PAID_ONLINE, com.example.data.models.parsePaymentType(null))
+        assertEquals(com.example.data.models.PaymentType.PAID_ONLINE, com.example.data.models.parsePaymentType(""))
+        assertEquals(com.example.data.models.PaymentType.PAID_ONLINE, com.example.data.models.parsePaymentType("credit_card_stripe"))
+        assertEquals(com.example.data.models.PaymentType.COD, com.example.data.models.parsePaymentType("", cashToCollect = 120.0))
     }
 
     @Test
@@ -212,14 +213,15 @@ class ExampleRobolectricTest {
         assertEquals(0.0, onlineOrder.cashAmountToCollect, 0.001)
         assertEquals("GCash", onlineOrder.paymentProviderLabel)
 
-        // 6. Unknown payment (never asks for cash)
+        // 6. Missing payment method treats as paid online unless cashToCollect/codAmount > 0 (never Payment Unknown)
         val unknownOrder = com.example.data.models.Order(
             serviceType = "food",
             paymentMethod = "",
             feesTotal = 400.0
         )
         assertEquals(0.0, unknownOrder.cashAmountToCollect, 0.001)
-        assertTrue(unknownOrder.isPaymentUnknown)
+        assertFalse(unknownOrder.isPaymentUnknown)
+        assertTrue(unknownOrder.isPaidOnline)
     }
 
     @Test
@@ -501,8 +503,8 @@ class ExampleRobolectricTest {
         val rider = Rider(
             uid = "rider_food",
             isOnline = true,
-            activeServices = listOf(OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_INSTANT),
-            allowedServices = listOf(OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_INSTANT)
+            activeServices = listOf(OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_MART),
+            allowedServices = listOf(OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_MART)
         )
 
         // Food order with status Preparing, riderId null, fulfillment delivery, NO riderRequest
@@ -1072,7 +1074,7 @@ class ExampleRobolectricTest {
     @Test
     fun `verify HelpCenterReason keys and labels match requirements`() {
         val reasons = com.example.data.models.HelpCenterConstants.REASONS
-        assertEquals(10, reasons.size)
+        assertEquals(11, reasons.size)
 
         val keys = reasons.map { it.key }
         val expectedKeys = listOf(
@@ -1083,6 +1085,7 @@ class ExampleRobolectricTest {
             "merchant_wait",
             "merchant_closed",
             "customer_unreachable",
+            "wrong_address",
             "vehicle_breakdown",
             "safety",
             "other"
@@ -1978,10 +1981,10 @@ class ExampleRobolectricTest {
     @Test
     fun `verify delivio instant exclusion from chat`() {
         assertTrue(com.example.data.models.OrderChatConstants.isInstantOrder("request_rider"))
-        assertTrue(com.example.data.models.OrderChatConstants.isInstantOrder("INSTANT"))
-        assertTrue(com.example.data.models.OrderChatConstants.isInstantOrder("delivio instant"))
+        assertTrue(com.example.data.models.OrderChatConstants.isInstantOrder("REQUEST_RIDER"))
 
-        // Other 5 services support chat
+        // Legacy instant aliases and other 5 services are not matched as request_rider
+        assertFalse(com.example.data.models.OrderChatConstants.isInstantOrder("instant"))
         assertFalse(com.example.data.models.OrderChatConstants.isInstantOrder("food"))
         assertFalse(com.example.data.models.OrderChatConstants.isInstantOrder("FOOD"))
         assertFalse(com.example.data.models.OrderChatConstants.isInstantOrder("convenience"))
@@ -2421,4 +2424,165 @@ class ExampleRobolectricTest {
         assertEquals("Running Shoes (Black / 42)", alreadyFormattedItem.displayName)
         assertEquals("Running Shoes (Black / 42) x1", alreadyFormattedItem.displayNameWithQty)
     }
+
+    @Test
+    fun `verify Delivio Instant dispatch evaluation logs exact skip reasons and 20s timer`() {
+        val now = 1700000000000L
+        val dispatch = com.example.data.constants.DispatchSettings(searchRadiusKm = 5.0)
+        val baseRider = Rider(
+            uid = "r1",
+            isOnline = true,
+            cityId = "ppc",
+            vehicle = com.example.data.models.Vehicle(type = OrderStepConstants.VEHICLE_MOTORCYCLE),
+            allowedServices = listOf("food", "request_rider"),
+            activeServices = listOf("food", "request_rider")
+        )
+        val instantOrder = Order(
+            id = "inst_1",
+            serviceType = OrderStepConstants.SERVICE_REQUEST,
+            status = OrderStepConstants.STATUS_PLACED_ORDER,
+            riderRequestStatus = OrderStepConstants.REQ_SEARCHING,
+            cityId = "ppc",
+            merchantLat = 9.7392,
+            merchantLng = 118.7353
+        )
+        val freshLoc = Pair(9.7400, 118.7355)
+
+        // Eligible
+        val eligible = com.example.data.constants.InstantDispatchEvaluator.evaluateSkipReason(
+            order = instantOrder,
+            rider = baseRider,
+            activeOrders = emptyList(),
+            riderLoc = freshLoc,
+            lastLocationTimeMs = now - 5_000L,
+            nowMs = now,
+            isPlatformServiceEnabled = true,
+            isCityServiceEnabled = true,
+            dispatch = dispatch
+        )
+        assertTrue(eligible.isEligible)
+        assertNull(eligible.skipReason)
+        assertEquals(20, com.example.data.constants.InstantDispatchEvaluator.INSTANT_TIMER_SECONDS)
+
+        // Offline
+        assertEquals(
+            "offline",
+            com.example.data.constants.InstantDispatchEvaluator.evaluateSkipReason(
+                instantOrder, baseRider.copy(isOnline = false), emptyList(), freshLoc, now, now, true, true, dispatch
+            ).skipReason
+        )
+
+        // Busy
+        assertEquals(
+            "busy",
+            com.example.data.constants.InstantDispatchEvaluator.evaluateSkipReason(
+                instantOrder, baseRider, listOf(Order(id = "active_1")), freshLoc, now, now, true, true, dispatch
+            ).skipReason
+        )
+
+        // Service off
+        assertEquals(
+            "service off",
+            com.example.data.constants.InstantDispatchEvaluator.evaluateSkipReason(
+                instantOrder, baseRider.copy(activeServices = listOf("food")), emptyList(), freshLoc, now, now, true, true, dispatch
+            ).skipReason
+        )
+
+        // City off
+        assertEquals(
+            "city off",
+            com.example.data.constants.InstantDispatchEvaluator.evaluateSkipReason(
+                instantOrder, baseRider.copy(cityId = "other_city"), emptyList(), freshLoc, now, now, true, true, dispatch
+            ).skipReason
+        )
+
+        // Location too old
+        assertEquals(
+            "location too old",
+            com.example.data.constants.InstantDispatchEvaluator.evaluateSkipReason(
+                instantOrder, baseRider, emptyList(), freshLoc, now - 300_000L, now, true, true, dispatch
+            ).skipReason
+        )
+
+        // Outside radius
+        val farResult = com.example.data.constants.InstantDispatchEvaluator.evaluateSkipReason(
+            instantOrder.copy(merchantLat = 9.9000, merchantLng = 118.9000),
+            baseRider, emptyList(), freshLoc, now - 5_000L, now, true, true, dispatch
+        )
+        assertFalse(farResult.isEligible)
+        assertTrue(farResult.skipReason?.startsWith("outside radius (") == true)
+    }
+
+    @Test
+    fun `verify display names hide emails, parcel falls back to Sender, and address deduplicates`() {
+        assertEquals("Customer", com.example.data.models.sanitizeDisplayName("user@example.com", "Customer"))
+        assertEquals("Maria", com.example.data.models.sanitizeDisplayName("Maria", "Customer"))
+
+        val parcelNoSender = Order(
+            serviceType = OrderStepConstants.SERVICE_PARCEL,
+            senderName = "sender@gmail.com",
+            merchantName = ""
+        )
+        assertEquals("Sender", parcelNoSender.displayPickupName)
+
+        val parcelWithSender = Order(
+            serviceType = OrderStepConstants.SERVICE_PARCEL,
+            senderName = "Ana Reyes",
+            merchantName = "ignored"
+        )
+        assertEquals("Ana Reyes", parcelWithSender.displayPickupName)
+
+        val foodEmailMerchant = Order(
+            serviceType = OrderStepConstants.SERVICE_FOOD,
+            merchantName = "shop@delivio.com"
+        )
+        assertEquals("Merchant", foodEmailMerchant.displayPickupName)
+
+        assertEquals(
+            "123 Rizal Ave, Puerto Princesa, Palawan",
+            com.example.data.models.deduplicateAddress("123 Rizal Ave, Puerto Princesa, 123 Rizal Ave, Palawan, Puerto Princesa")
+        )
+    }
+
+    @Test
+    fun `verify split delivery eligibility only applies to food and convenience before pickup`() {
+        val foodBeforePickup = Order(
+            id = "f1",
+            serviceType = OrderStepConstants.SERVICE_FOOD,
+            riderStep = OrderStepConstants.STEP_AT_MERCHANT
+        )
+        val convenienceBeforePickup = Order(
+            id = "c1",
+            serviceType = OrderStepConstants.SERVICE_MART,
+            riderStep = OrderStepConstants.STEP_TO_MERCHANT
+        )
+        val foodAfterPickup = Order(
+            id = "f2",
+            serviceType = OrderStepConstants.SERVICE_FOOD,
+            riderStep = OrderStepConstants.STEP_TO_CUSTOMER
+        )
+        val instantOrder = Order(
+            id = "r1",
+            serviceType = OrderStepConstants.SERVICE_REQUEST,
+            riderStep = OrderStepConstants.STEP_HEADING_TO_MERCHANT
+        )
+        val parcelOrder = Order(
+            id = "p1",
+            serviceType = OrderStepConstants.SERVICE_PARCEL,
+            riderStep = OrderStepConstants.STEP_TO_PICKUP
+        )
+
+        assertEquals("f1", com.example.ui.components.findSplitEligibleOrder(listOf(foodBeforePickup))?.id)
+        assertEquals("c1", com.example.ui.components.findSplitEligibleOrder(listOf(convenienceBeforePickup))?.id)
+        assertNull(com.example.ui.components.findSplitEligibleOrder(listOf(foodAfterPickup)))
+        assertNull(com.example.ui.components.findSplitEligibleOrder(listOf(instantOrder)))
+        assertNull(com.example.ui.components.findSplitEligibleOrder(listOf(parcelOrder)))
+    }
+
+    @Test
+    fun `verify OrderSheetState has PEEK HALF FULL states`() {
+        val states = com.example.ui.components.OrderSheetState.values().map { it.name }
+        assertEquals(listOf("PEEK", "HALF", "FULL"), states)
+    }
 }
+

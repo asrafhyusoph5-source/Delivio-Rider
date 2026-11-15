@@ -91,7 +91,7 @@ object BatchConstants {
         if (!order.isPoolable) return false
         val s = order.serviceType.trim().lowercase()
         if (isMartService(s) && !dispatch.martBatching) return false
-        if (s != "food" && s != "convenience" && s != "mart" && s != "instant" && s != OrderStepConstants.SERVICE_FOOD) return false
+        if (s != "food" && s != "convenience" && s != "mart" && s != OrderStepConstants.SERVICE_FOOD) return false
         if (order.isPickup) return false
         return true
     }
@@ -107,7 +107,7 @@ object BatchConstants {
             if (!dispatch.martBatching && isMartService(s)) {
                 true
             } else {
-                s !in listOf("food", "convenience", "mart", "instant", OrderStepConstants.SERVICE_FOOD)
+                s !in listOf("food", "convenience", "mart", OrderStepConstants.SERVICE_FOOD)
             }
         }
         if (hasSingleOnlyActive) return false
@@ -137,9 +137,9 @@ object BatchConstants {
 
         val s = candidate.serviceType.lowercase().trim()
         val isBatchableCandidate = if (dispatch.martBatching) {
-            s in listOf("food", "convenience", "mart", "instant", OrderStepConstants.SERVICE_FOOD)
+            s in listOf("food", "convenience", "mart", OrderStepConstants.SERVICE_FOOD)
         } else {
-            !isMartService(s) && s in listOf("food", "instant", OrderStepConstants.SERVICE_FOOD)
+            !isMartService(s) && s in listOf("food", OrderStepConstants.SERVICE_FOOD)
         }
         return isBatchableCandidate
     }
@@ -382,3 +382,87 @@ object BatchConstants {
         return rate.minFare + (extraKm * rate.perKmExtra)
     }
 }
+
+data class InstantDispatchResult(
+    val isEligible: Boolean,
+    val skipReason: String? = null,
+    val distanceKm: Double = 0.0
+)
+
+object InstantDispatchEvaluator {
+    const val TAG = "DISPATCH"
+    const val INSTANT_TIMER_SECONDS = 20
+    const val DEFAULT_TIMER_SECONDS = 30
+    const val DEFAULT_MAX_LOCATION_AGE_MS = 180_000L
+
+    fun evaluateSkipReason(
+        order: Order,
+        rider: com.example.data.models.Rider?,
+        activeOrders: List<Order>,
+        riderLoc: Pair<Double, Double>?,
+        lastLocationTimeMs: Long,
+        nowMs: Long,
+        isPlatformServiceEnabled: Boolean,
+        isCityServiceEnabled: Boolean,
+        dispatch: DispatchSettings,
+        declinedIds: Set<String> = emptySet(),
+        releasedIds: Set<String> = emptySet(),
+        maxLocationAgeMs: Long = DEFAULT_MAX_LOCATION_AGE_MS
+    ): InstantDispatchResult {
+        if (rider == null || !rider.isOnline) {
+            return InstantDispatchResult(false, "offline")
+        }
+        if (activeOrders.isNotEmpty()) {
+            return InstantDispatchResult(false, "busy")
+        }
+        if (!isPlatformServiceEnabled ||
+            !rider.allowedServices.contains(OrderStepConstants.SERVICE_REQUEST) ||
+            !rider.activeServices.contains(OrderStepConstants.SERVICE_REQUEST)
+        ) {
+            return InstantDispatchResult(false, "service off")
+        }
+        if (!isCityServiceEnabled ||
+            (order.cityId.isNotBlank() && rider.cityId.isNotBlank() && order.cityId != rider.cityId)
+        ) {
+            return InstantDispatchResult(false, "city off")
+        }
+        if (OrderStepConstants.normalizeVehicleType(rider.vehicle.type) != OrderStepConstants.VEHICLE_MOTORCYCLE) {
+            return InstantDispatchResult(false, "service off (motorcycle required)")
+        }
+        if (declinedIds.contains(order.id) || releasedIds.contains(order.id) || order.excludeRiderIds.contains(rider.uid)) {
+            return InstantDispatchResult(false, "declined or excluded")
+        }
+        if (order.targetRiderId.isNotBlank() && order.targetRiderId != rider.uid) {
+            return InstantDispatchResult(false, "offered to another rider")
+        }
+        val reqStatus = order.riderRequestStatus.trim()
+        val ordStatus = order.status.trim()
+        val isSearching = reqStatus.equals(OrderStepConstants.REQ_SEARCHING, ignoreCase = true) ||
+            (reqStatus.isBlank() && (ordStatus.equals(OrderStepConstants.STATUS_PLACED_ORDER, ignoreCase = true) ||
+                ordStatus.equals(OrderStepConstants.REQ_SEARCHING, ignoreCase = true)))
+        if (!isSearching) {
+            return InstantDispatchResult(false, "not searching")
+        }
+        if (riderLoc == null || riderLoc.first == 0.0 || riderLoc.second == 0.0 ||
+            lastLocationTimeMs <= 0L || (nowMs - lastLocationTimeMs) > maxLocationAgeMs
+        ) {
+            return InstantDispatchResult(false, "location too old")
+        }
+        val distKm = if (order.merchantLat != 0.0 && order.merchantLng != 0.0) {
+            BatchConstants.distanceKm(riderLoc.first, riderLoc.second, order.merchantLat, order.merchantLng)
+        } else {
+            order.pickupDistanceKm
+        }
+        val maxRadius = if (rider.priorityRider) {
+            dispatch.searchRadiusKm + maxOf(order.specialRadiusExtra, dispatch.specialRadiusRiderExtra)
+        } else {
+            dispatch.searchRadiusKm
+        }
+        if (distKm > maxRadius) {
+            val formattedKm = String.format(java.util.Locale.US, "%.1f km", distKm)
+            return InstantDispatchResult(false, "outside radius ($formattedKm)", distKm)
+        }
+        return InstantDispatchResult(true, null, distKm)
+    }
+}
+

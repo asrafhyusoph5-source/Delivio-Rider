@@ -75,8 +75,11 @@ fun AppNavigation(
                     viewModel = viewModel,
                     onOpenDrawer = { isDrawerOpen = true },
                     onOpenSupport = { navController.navigate(NavRoutes.SUPPORT) },
-                    onOpenHelpCenter = { orderId ->
-                        val route = if (!orderId.isNullOrBlank()) "${NavRoutes.REPORT_ISSUE}?orderId=$orderId" else NavRoutes.REPORT_ISSUE
+                    onOpenHelpCenter = { orderId, reasonKey ->
+                        val params = mutableListOf<String>()
+                        if (!orderId.isNullOrBlank()) params.add("orderId=$orderId")
+                        if (!reasonKey.isNullOrBlank()) params.add("reasonKey=$reasonKey")
+                        val route = if (params.isNotEmpty()) "${NavRoutes.REPORT_ISSUE}?${params.joinToString("&")}" else NavRoutes.REPORT_ISSUE
                         navController.navigate(route)
                     },
                     onOpenSupportChat = { ticketId ->
@@ -200,17 +203,26 @@ fun AppNavigation(
             }
 
             composable(
-                route = "${NavRoutes.REPORT_ISSUE}?orderId={orderId}",
-                arguments = listOf(navArgument("orderId") {
-                    type = NavType.StringType
-                    nullable = true
-                    defaultValue = null
-                })
+                route = "${NavRoutes.REPORT_ISSUE}?orderId={orderId}&reasonKey={reasonKey}",
+                arguments = listOf(
+                    navArgument("orderId") {
+                        type = NavType.StringType
+                        nullable = true
+                        defaultValue = null
+                    },
+                    navArgument("reasonKey") {
+                        type = NavType.StringType
+                        nullable = true
+                        defaultValue = null
+                    }
+                )
             ) { backStackEntry ->
                 val orderId = backStackEntry.arguments?.getString("orderId")
+                val reasonKey = backStackEntry.arguments?.getString("reasonKey")
                 HelpCenterFlowScreen(
                     viewModel = viewModel,
                     preselectedOrderId = orderId,
+                    preselectedReasonKey = reasonKey,
                     onBack = { navController.popBackStack() },
                     onTicketCreated = { ticketId ->
                         navController.navigate("${NavRoutes.SUPPORT_CHAT_BASE}/$ticketId") {

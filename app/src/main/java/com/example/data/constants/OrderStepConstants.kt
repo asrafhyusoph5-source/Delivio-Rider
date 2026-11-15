@@ -86,8 +86,6 @@ object OrderStepConstants {
     const val SERVICE_FOOD = "food"
     const val SERVICE_MART = "convenience"
     const val SERVICE_CONVENIENCE = "convenience"
-    const val SERVICE_INSTANT_LEGACY = "convenience" // backward compatibility alias
-    const val SERVICE_INSTANT = "convenience"        // stored key for Mart is "convenience"
     const val SERVICE_PARCEL = "parcel"
     const val SERVICE_PABILI = "pabili"
     const val SERVICE_REQUEST = "request_rider"      // stored key for Delivio Instant
@@ -176,7 +174,7 @@ object OrderStepConstants {
             "convenience", "mart" -> "Delivio Mart"
             SERVICE_PARCEL -> "Delivio Parcel"
             SERVICE_PABILI -> "Delivio Pabili"
-            "request_rider", "request", "instant" -> "Delivio Instant"
+            SERVICE_REQUEST -> "Delivio Instant"
             SERVICE_TAXI -> "Delivio Taxi"
             else -> "Delivio Food"
         }
@@ -188,7 +186,7 @@ object OrderStepConstants {
             "convenience", "mart" -> "Convenience store, grocery, and pharmacy deliveries"
             SERVICE_PARCEL -> "Boxed items, packages, and documents"
             SERVICE_PABILI -> "On-demand grocery and item purchasing"
-            "request_rider", "request", "instant" -> "Rider requests booked by merchants (the Request a Rider button in the Partner app)"
+            SERVICE_REQUEST -> "Rider requests booked by merchants (the Request a Rider button in the Partner app)"
             SERVICE_TAXI -> "Passenger rides"
             else -> "Deliveries"
         }
@@ -200,7 +198,7 @@ object OrderStepConstants {
             "convenience", "mart" -> "MART"
             SERVICE_PARCEL -> "PARCEL"
             SERVICE_PABILI -> "PABILI"
-            "request_rider", "request", "instant" -> "INSTANT"
+            SERVICE_REQUEST -> "INSTANT"
             SERVICE_TAXI -> "TAXI"
             else -> "FOOD"
         }

@@ -544,10 +544,10 @@ private fun RatingsAndReviewsTab(viewModel: RiderViewModel) {
                 "1 ★" -> review.stars == 1
                 "With comments" -> review.comment.trim().isNotBlank()
                 "FOOD" -> svc == "food"
-                "MART" -> svc in listOf("convenience", "mart", "instant")
+                "MART" -> svc in listOf("convenience", "mart")
                 "PARCEL" -> svc == "parcel"
                 "PABILI" -> svc == "pabili"
-                "INSTANT" -> svc in listOf("request_rider", "request")
+                "INSTANT" -> svc == "request_rider"
                 "TAXI" -> svc == "taxi"
                 else -> true
             }

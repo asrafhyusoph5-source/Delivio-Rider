@@ -25,7 +25,7 @@ data class OrderChatThread(
     val expireAt: Any? = null
 ) {
     val displayMerchantName: String
-        get() = formatMerchantDisplayName(merchantName, branchName, branchCode)
+        get() = formatMerchantDisplayName(merchantName, branchName, branchCode).ifBlank { "Merchant" }
 
     val lastMessageTimeMillis: Long
         get() = parseChatTimestamp(lastMessageAt)
@@ -95,7 +95,7 @@ fun parseChatTimestamp(raw: Any?): Long {
 }
 
 fun formatCustomerFirstName(fullName: String?): String {
-    val clean = (fullName ?: "").trim()
+    val clean = sanitizeDisplayName(fullName, "")
     if (clean.isBlank()) return "Customer"
     val firstWord = clean.split("\\s+".toRegex()).firstOrNull() ?: "Customer"
     return firstWord.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
@@ -124,7 +124,7 @@ object OrderChatConstants {
 
     fun isInstantOrder(serviceType: String): Boolean {
         val st = serviceType.trim().lowercase()
-        return st == "request_rider" || st == "request" || st.contains("request") || st.contains("instant")
+        return st == "request_rider"
     }
 
     fun getOrderClosedTimeMillis(order: Order): Long? {

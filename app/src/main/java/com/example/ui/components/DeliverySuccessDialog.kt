@@ -196,14 +196,14 @@ fun DeliverySuccessDialog(
                     HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
                     if (order.isSplitChild || order.badge.equals("split", ignoreCase = true)) {
                         FareRow("Cash Collected", "No Cash Collected", isBold = true)
-                    } else if (order.isCod) {
+                    } else if (order.isCod && (!order.isRequestRider || order.cashAmountToCollect > 0.0)) {
                         val collected = if (order.codCollected > 0) order.codCollected else order.cashAmountToCollect
                         FareRow("COD Cash Collected", "$currencySymbol${String.format("%.2f", collected)}", isBold = true)
-                    } else if (order.isPaidOnline) {
+                    } else if (order.isRequestRider) {
+                        FareRow("Payment", "No cash to collect (paid)", isBold = true)
+                    } else {
                         val provider = if (order.paymentProviderLabel.isNotBlank()) " (${order.paymentProviderLabel})" else ""
                         FareRow("Payment", "Paid Online$provider", isBold = true)
-                    } else {
-                        FareRow("Payment", "Payment unknown - contact support", isBold = true)
                     }
 
                     if (order.isRequestRider) {

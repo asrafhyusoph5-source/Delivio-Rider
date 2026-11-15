@@ -19,7 +19,17 @@ object RiderLocationTracker {
     private val _activeOrderIds = MutableStateFlow<Set<String>>(emptySet())
     val activeOrderIds: StateFlow<Set<String>> = _activeOrderIds.asStateFlow()
 
+    private val _lastLocationTimeMillis = MutableStateFlow(0L)
+    val lastLocationTimeMillis: StateFlow<Long> = _lastLocationTimeMillis.asStateFlow()
+
     private var lastLocationTime = 0L
+
+    fun isLocationFresh(maxAgeMs: Long = 180_000L, nowMillis: Long = System.currentTimeMillis()): Boolean {
+        val loc = _currentLocation.value ?: return false
+        if (loc.first == 0.0 || loc.second == 0.0) return false
+        if (lastLocationTime <= 0L) return false
+        return (nowMillis - lastLocationTime) <= maxAgeMs
+    }
 
     fun updateLocation(lat: Double, lng: Double, headingBearing: Float? = null, speed: Float? = null) {
         val prev = _currentLocation.value
@@ -36,6 +46,7 @@ object RiderLocationTracker {
             }
         }
         lastLocationTime = now
+        _lastLocationTimeMillis.value = now
         _currentLocation.value = Pair(lat, lng)
     }
 

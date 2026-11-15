@@ -143,13 +143,7 @@ fun ProfileScreen(
                             }
                         }
 
-                        // Email (Locked)
-                        Text(
-                            text = rider.email,
-                            fontSize = 13.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(top = 4.dp)
-                        )
+                        // Email hidden per privacy/display rules
 
                         // Editable Phone number
                         Row(

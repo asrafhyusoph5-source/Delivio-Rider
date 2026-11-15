@@ -25,11 +25,15 @@ import java.text.SimpleDateFormat
 import java.util.*
 import kotlin.math.*
 
-class RiderRepository {
+class RiderRepository(
+    private val appContext: Context? = com.example.DelivioApplication.appContextOrNull
+) {
 
     private val auth: FirebaseAuth by lazy { FirebaseAuth.getInstance() }
     private val db: FirebaseFirestore by lazy { FirebaseFirestore.getInstance() }
     private val scope = CoroutineScope(Dispatchers.IO + Job())
+    @Volatile
+    private var riderDocLocationUpdatedAtMs: Long = 0L
 
     // Live state
     private val _rider = MutableStateFlow<Rider?>(null)
@@ -321,7 +325,10 @@ class RiderRepository {
 
         val totalDriverPay = breakdowns.sumOf { it.totalPay }
         val km = floor(firstPickupDist).toInt()
-        val waveDelaySeconds = if (isPriorityRider) {
+        val hasInstantOrder = orders.any { it.isRequestRider }
+        val waveDelaySeconds = if (hasInstantOrder) {
+            if (isPriorityRider) 0 else dispatchSettings.priorityHeadStartSeconds + (km * dispatchSettings.waveSeconds)
+        } else if (isPriorityRider) {
             min(km * dispatchSettings.waveSeconds, dispatchSettings.priorityHeadStartSeconds)
         } else {
             dispatchSettings.priorityHeadStartSeconds + (km * dispatchSettings.waveSeconds)
@@ -345,6 +352,12 @@ class RiderRepository {
             else -> firstOrder.badge
         }
 
+        val timerSeconds = if (hasInstantOrder) {
+            com.example.data.constants.InstantDispatchEvaluator.INSTANT_TIMER_SECONDS
+        } else {
+            com.example.data.constants.InstantDispatchEvaluator.DEFAULT_TIMER_SECONDS
+        }
+
         return OfferBundle(
             id = orders.joinToString("_") { it.id },
             type = type,
@@ -356,7 +369,8 @@ class RiderRepository {
             totalDriverPay = totalDriverPay,
             eligibleSince = eligibleSince,
             waveDelaySeconds = waveDelaySeconds,
-            badge = combinedBadge
+            badge = combinedBadge,
+            timerSeconds = timerSeconds
         )
     }
 
@@ -445,10 +459,22 @@ class RiderRepository {
                     else -> emptyList()
                 }
 
+                val locMap = snapshot.get("location") as? Map<*, *>
+                val rawLocUpdated = locMap?.get("updatedAt") ?: snapshot.get("locationUpdatedAt") ?: snapshot.get("lastSeenAt")
+                riderDocLocationUpdatedAtMs = when (rawLocUpdated) {
+                    is com.google.firebase.Timestamp -> rawLocUpdated.toDate().time
+                    is Date -> rawLocUpdated.time
+                    is Number -> {
+                        val n = rawLocUpdated.toLong()
+                        if (n < 1000000000000L) n * 1000L else n
+                    }
+                    else -> 0L
+                }
+
                 val r = Rider(
                     uid = uid,
                     riderCode = snapshot.getString("riderCode") ?: snapshot.getString("code") ?: ("RD-" + uid.takeLast(4).uppercase()),
-                    name = snapshot.getString("name") ?: "Rider",
+                    name = sanitizeDisplayName(snapshot.getString("name"), "Rider"),
                     email = snapshot.getString("email") ?: (auth.currentUser?.email ?: ""),
                     phone = snapshot.getString("phone") ?: "",
                     photoUrl = snapshot.getString("photoUrl") ?: snapshot.getString("avatarUrl") ?: "",
@@ -573,13 +599,18 @@ class RiderRepository {
             .addSnapshotListener { snapshots, error ->
                 if (error != null || snapshots == null) return@addSnapshotListener
                 val configs = snapshots.documents.mapNotNull { doc ->
-                    TierConfig(
-                        id = doc.id,
-                        name = doc.getString("name") ?: doc.id,
-                        ridesRequired = doc.getLong("ridesRequired")?.toInt() ?: 0,
-                        coins = doc.getLong("coins")?.toInt() ?: 0,
-                        sortOrder = doc.getLong("sortOrder")?.toInt() ?: 0
-                    )
+                    try {
+                        TierConfig(
+                            id = doc.id,
+                            name = doc.getString("name") ?: doc.id,
+                            ridesRequired = doc.getLong("ridesRequired")?.toInt() ?: 0,
+                            coins = doc.getLong("coins")?.toInt() ?: 0,
+                            sortOrder = doc.getLong("sortOrder")?.toInt() ?: 0
+                        )
+                    } catch (e: Exception) {
+                        com.example.util.CrashReportStore.logNonFatalParseError(appContext, doc.reference.path, e)
+                        null
+                    }
                 }
                 _tierConfigs.value = configs
             }
@@ -611,13 +642,18 @@ class RiderRepository {
         coinTxListener = db.collection("riders").document(uid).collection("coinTransactions")
             .addSnapshotListener { snapshots, _ ->
                 _coinHistory.value = snapshots?.documents?.mapNotNull { doc ->
-                    CoinTransaction(
-                        id = doc.id,
-                        title = doc.getString("title") ?: "Coin Credit",
-                        amount = doc.getLong("amount")?.toInt() ?: 0,
-                        timestampText = doc.getString("timestampText") ?: "Recent",
-                        isCredit = doc.getBoolean("isCredit") ?: true
-                    )
+                    try {
+                        CoinTransaction(
+                            id = doc.id,
+                            title = doc.getString("title") ?: "Coin Credit",
+                            amount = doc.getLong("amount")?.toInt() ?: 0,
+                            timestampText = doc.getString("timestampText") ?: "Recent",
+                            isCredit = doc.getBoolean("isCredit") ?: true
+                        )
+                    } catch (e: Exception) {
+                        com.example.util.CrashReportStore.logNonFatalParseError(appContext, doc.reference.path, e)
+                        null
+                    }
                 } ?: emptyList()
             }
 
@@ -693,20 +729,25 @@ class RiderRepository {
             .addSnapshotListener { snapshots, error ->
                 if (error != null || snapshots == null) return@addSnapshotListener
                 val logs = snapshots.documents.mapNotNull { doc ->
-                    val oid = doc.getString("orderId") ?: doc.id
-                    val st = doc.getString("serviceType") ?: ""
-                    val outcome = doc.getString("outcome") ?: ""
-                    val finalOutcome = doc.getString("finalOutcome")
-                    val atTimestamp = doc.getTimestamp("at")
-                    val finalAtTimestamp = doc.getTimestamp("finalAt")
-                    OfferLogEntry(
-                        orderId = oid,
-                        serviceType = st,
-                        outcome = outcome,
-                        finalOutcome = finalOutcome,
-                        at = atTimestamp,
-                        finalAt = finalAtTimestamp
-                    )
+                    try {
+                        val oid = doc.getString("orderId") ?: doc.id
+                        val st = doc.getString("serviceType") ?: ""
+                        val outcome = doc.getString("outcome") ?: ""
+                        val finalOutcome = doc.getString("finalOutcome")
+                        val atTimestamp = doc.getTimestamp("at")
+                        val finalAtTimestamp = doc.getTimestamp("finalAt")
+                        OfferLogEntry(
+                            orderId = oid,
+                            serviceType = st,
+                            outcome = outcome,
+                            finalOutcome = finalOutcome,
+                            at = atTimestamp,
+                            finalAt = finalAtTimestamp
+                        )
+                    } catch (e: Exception) {
+                        com.example.util.CrashReportStore.logNonFatalParseError(appContext, doc.reference.path, e)
+                        null
+                    }
                 }
                 _offerLogs.value = logs
                 val releasedIds = logs.filter { it.finalOutcome == "released" }.map { it.orderId }.toSet()
@@ -720,27 +761,33 @@ class RiderRepository {
             .addSnapshotListener { snapshots, error ->
                 if (error != null || snapshots == null) return@addSnapshotListener
                 val revs = snapshots.documents.mapNotNull { doc ->
-                    val ratingVal = doc.getDouble("ratingRider")
-                        ?: (doc.getDouble("stars") ?: (doc.getLong("stars")?.toDouble() ?: 0.0))
-                    val comment = doc.getString("comment") ?: doc.getString("review") ?: ""
-                    val customerName = doc.getString("customerName") ?: doc.getString("userName") ?: "Customer"
-                    val orderNum = doc.getString("orderNumber") ?: doc.getString("orderId") ?: doc.id
-                    val serviceType = doc.getString("serviceType") ?: doc.getString("service") ?: "Food"
-                    val dateStr = doc.getString("date") ?: ""
-                    val ts = doc.getTimestamp("createdAt") ?: doc.getTimestamp("timestamp") ?: doc.getTimestamp("date")
-                    val dateMillis = ts?.toDate()?.time ?: 0L
-                    CustomerReview(
-                        id = doc.id,
-                        riderId = doc.getString("riderId") ?: uid,
-                        ratingRider = ratingVal,
-                        comment = comment,
-                        customerName = customerName,
-                        orderNumber = orderNum,
-                        serviceType = serviceType,
-                        date = dateStr,
-                        createdAt = ts,
-                        dateMillis = dateMillis
-                    )
+                    try {
+                        val ratingVal = doc.getDouble("ratingRider")
+                            ?: (doc.getDouble("stars") ?: (doc.getLong("stars")?.toDouble() ?: 0.0))
+                        val comment = doc.getString("comment") ?: doc.getString("review") ?: ""
+                        val rawCustomerName = doc.getString("customerName") ?: doc.getString("userName")
+                        val customerName = sanitizeDisplayName(rawCustomerName, "Customer")
+                        val orderNum = doc.getString("orderNumber") ?: doc.getString("orderId") ?: doc.id
+                        val serviceType = doc.getString("serviceType") ?: doc.getString("service") ?: "Food"
+                        val dateStr = doc.getString("date") ?: ""
+                        val ts = doc.getTimestamp("createdAt") ?: doc.getTimestamp("timestamp") ?: doc.getTimestamp("date")
+                        val dateMillis = ts?.toDate()?.time ?: 0L
+                        CustomerReview(
+                            id = doc.id,
+                            riderId = doc.getString("riderId") ?: uid,
+                            ratingRider = ratingVal,
+                            comment = comment,
+                            customerName = customerName,
+                            orderNumber = orderNum,
+                            serviceType = serviceType,
+                            date = dateStr,
+                            createdAt = ts,
+                            dateMillis = dateMillis
+                        )
+                    } catch (e: Exception) {
+                        com.example.util.CrashReportStore.logNonFatalParseError(appContext, doc.reference.path, e)
+                        null
+                    }
                 }.sortedByDescending { it.dateMillis }
                 _customerReviews.value = revs
             }
@@ -811,8 +858,36 @@ class RiderRepository {
         val currentRider = _rider.value
         val activeList = _activeOrders.value
         val riderLoc = RiderLocationTracker.currentLocation.value
+        val lastLocMs = maxOf(RiderLocationTracker.lastLocationTimeMillis.value, riderDocLocationUpdatedAtMs)
         val dispatch = _dispatchSettings.value
         val rates = _riderPaySettings.value
+        val nowMs = System.currentTimeMillis()
+        val declinedIds = userPrefs?.declinedOrderIds?.value ?: emptySet()
+        val releasedIds = _releasedOrderIds.value
+
+        // Log skip reasons under DISPATCH tag for every request_rider (Delivio Instant) order seen
+        rawCandidates.filter { it.isRequestRider }.forEach { order ->
+            val checkCity = if (order.cityId.isNotBlank()) order.cityId else (currentRider?.cityId ?: "")
+            val eval = com.example.data.constants.InstantDispatchEvaluator.evaluateSkipReason(
+                order = order,
+                rider = currentRider,
+                activeOrders = activeList,
+                riderLoc = riderLoc,
+                lastLocationTimeMs = lastLocMs,
+                nowMs = nowMs,
+                isPlatformServiceEnabled = isPlatformServiceOn(OrderStepConstants.SERVICE_REQUEST),
+                isCityServiceEnabled = isCityServiceOn(OrderStepConstants.SERVICE_REQUEST, checkCity),
+                dispatch = dispatch,
+                declinedIds = declinedIds,
+                releasedIds = releasedIds
+            )
+            if (!eval.isEligible && !eval.skipReason.isNullOrBlank()) {
+                android.util.Log.d(
+                    com.example.data.constants.InstantDispatchEvaluator.TAG,
+                    "Order ${order.id} skipped: ${eval.skipReason}"
+                )
+            }
+        }
 
         if (currentRider == null || !currentRider.isOnline) {
             _incomingOfferBundle.value = null
@@ -839,13 +914,28 @@ class RiderRepository {
             } else null
         }.toSet()
 
-        val declinedIds = userPrefs?.declinedOrderIds?.value ?: emptySet()
-        val releasedIds = _releasedOrderIds.value
         val uid = currentRider.uid
         val leadMinutes = _scheduledReleaseLeadMinutes.value
 
         // Filter unassigned candidate orders
         val candidateOrders = rawCandidates.filter { order ->
+            if (order.isRequestRider) {
+                val checkCity = if (order.cityId.isNotBlank()) order.cityId else currentRider.cityId
+                return@filter com.example.data.constants.InstantDispatchEvaluator.evaluateSkipReason(
+                    order = order,
+                    rider = currentRider,
+                    activeOrders = activeList,
+                    riderLoc = riderLoc,
+                    lastLocationTimeMs = lastLocMs,
+                    nowMs = nowMs,
+                    isPlatformServiceEnabled = isPlatformServiceOn(OrderStepConstants.SERVICE_REQUEST),
+                    isCityServiceEnabled = isCityServiceOn(OrderStepConstants.SERVICE_REQUEST, checkCity),
+                    dispatch = dispatch,
+                    declinedIds = declinedIds,
+                    releasedIds = releasedIds
+                ).isEligible
+            }
+
             // Never offer again an order I released or declined
             if (declinedIds.contains(order.id) || releasedIds.contains(order.id)) return@filter false
 
@@ -910,7 +1000,7 @@ class RiderRepository {
 
             // Skip any beyond dispatch.searchRadiusKm from the pickup, UNLESS priority rider for Food/Convenience
             val isFoodOrConv = order.serviceType.lowercase().trim() in listOf(
-                "food", "convenience", "mart", "instant", OrderStepConstants.SERVICE_FOOD
+                "food", "convenience", "mart", OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_MART
             )
             val skipRadius = currentRider.priorityRider && isFoodOrConv
             if (!skipRadius) {
@@ -929,15 +1019,12 @@ class RiderRepository {
                     order.status != OrderStepConstants.STATUS_PLACED_ORDER
             } else {
                 when (order.serviceType.lowercase().trim()) {
-                    OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_INSTANT, "convenience", "mart", "instant" -> {
+                    OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_MART, "mart" -> {
                         val s = order.status.trim().lowercase()
                         s in listOf("preparing", "ready") ||
                             order.status == OrderStepConstants.STATUS_PREPARING ||
                             order.status == OrderStepConstants.STATUS_READY ||
                             (order.merchantAccepted && s != "placed order" && s != "placed_order")
-                    }
-                    OrderStepConstants.SERVICE_REQUEST -> {
-                        order.riderRequestStatus == OrderStepConstants.REQ_SEARCHING
                     }
                     OrderStepConstants.SERVICE_PARCEL, OrderStepConstants.SERVICE_PABILI -> {
                         order.status == OrderStepConstants.STATUS_PLACED_ORDER
@@ -1516,8 +1603,8 @@ class RiderRepository {
                 }
             }
             else -> {
-                // FOOD, CONVENIENCE (Instant), and REQUEST
-                val isRequest = serviceType == OrderStepConstants.SERVICE_REQUEST || serviceType == "request"
+                // FOOD, CONVENIENCE (Mart), and REQUEST (Delivio Instant)
+                val isRequest = serviceType == OrderStepConstants.SERVICE_REQUEST
                 when (currentStep) {
                     OrderStepConstants.STEP_TO_MERCHANT, OrderStepConstants.STEP_HEADING_TO_MERCHANT -> {
                         nextStep = OrderStepConstants.STEP_AT_MERCHANT
@@ -1788,7 +1875,7 @@ class RiderRepository {
         val revertStatus = when (order.serviceType.lowercase()) {
             OrderStepConstants.SERVICE_TAXI -> OrderStepConstants.STATUS_PLACED_ORDER
             OrderStepConstants.SERVICE_PARCEL, OrderStepConstants.SERVICE_PABILI -> OrderStepConstants.STATUS_PLACED_ORDER
-            OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_INSTANT -> OrderStepConstants.STATUS_READY
+            OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_MART -> OrderStepConstants.STATUS_READY
             OrderStepConstants.SERVICE_REQUEST -> OrderStepConstants.STATUS_PLACED_ORDER
             else -> OrderStepConstants.STATUS_READY
         }
@@ -1818,13 +1905,35 @@ class RiderRepository {
     }
 
     // OFFER LOGGING & OUTCOME HELPERS
+    fun logOfferDisplayed(bundle: OfferBundle) {
+        val uid = auth.currentUser?.uid ?: _rider.value?.uid ?: return
+        val expiresAt = com.google.firebase.Timestamp(Date(System.currentTimeMillis() + bundle.timerSeconds * 1000L))
+        bundle.orders.forEach { order ->
+            val docRef = db.collection("riders").document(uid).collection("offerLog").document(order.id)
+            val data = mapOf(
+                "orderId" to order.id,
+                "serviceType" to order.serviceType,
+                "timerSeconds" to bundle.timerSeconds,
+                "offeredAt" to FieldValue.serverTimestamp(),
+                "expiresAt" to expiresAt
+            )
+            docRef.set(data, SetOptions.merge())
+        }
+    }
+
     fun logOfferOutcome(orderId: String, serviceType: String, outcome: String) {
         val uid = auth.currentUser?.uid ?: _rider.value?.uid ?: return
         val docRef = db.collection("riders").document(uid).collection("offerLog").document(orderId)
+        val timerSeconds = if (serviceType.equals(OrderStepConstants.SERVICE_REQUEST, ignoreCase = true)) {
+            com.example.data.constants.InstantDispatchEvaluator.INSTANT_TIMER_SECONDS
+        } else {
+            com.example.data.constants.InstantDispatchEvaluator.DEFAULT_TIMER_SECONDS
+        }
         val data = mapOf(
             "orderId" to orderId,
             "serviceType" to serviceType,
             "outcome" to outcome,
+            "timerSeconds" to timerSeconds,
             "at" to FieldValue.serverTimestamp()
         )
         docRef.set(data, SetOptions.merge())
@@ -1846,6 +1955,9 @@ class RiderRepository {
         if (_incomingOffer.value?.id == orderId) {
             _incomingOffer.value = null
         }
+        if (_incomingOfferBundle.value?.orders?.any { it.id == orderId } == true) {
+            _incomingOfferBundle.value = null
+        }
     }
 
     fun missOffer(orderId: String, serviceType: String, userPrefs: UserPreferencesRepository) {
@@ -1853,6 +1965,9 @@ class RiderRepository {
         logOfferOutcome(orderId, serviceType, "missed")
         if (_incomingOffer.value?.id == orderId) {
             _incomingOffer.value = null
+        }
+        if (_incomingOfferBundle.value?.orders?.any { it.id == orderId } == true) {
+            _incomingOfferBundle.value = null
         }
     }
 
@@ -2163,7 +2278,8 @@ class RiderRepository {
                 partnerReadAt = doc.get("partnerReadAt"),
                 expireAt = doc.get("expireAt")
             )
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            com.example.util.CrashReportStore.logNonFatalParseError(appContext, doc.reference.path, e)
             null
         }
     }
@@ -2181,7 +2297,8 @@ class RiderRepository {
                 createdAt = doc.get("createdAt"),
                 expireAt = doc.get("expireAt")
             )
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            com.example.util.CrashReportStore.logNonFatalParseError(appContext, doc.reference.path, e)
             null
         }
     }
@@ -2405,7 +2522,8 @@ class RiderRepository {
                 unreadByAdmin = doc.getBoolean("unreadByAdmin") ?: false,
                 unreadByRider = doc.getBoolean("unreadByRider") ?: false
             )
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            com.example.util.CrashReportStore.logNonFatalParseError(appContext, doc.reference.path, e)
             null
         }
     }
@@ -2421,7 +2539,8 @@ class RiderRepository {
                 isInitial = doc.getBoolean("isInitial") ?: false,
                 createdAt = doc.getTimestamp("createdAt")
             )
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            com.example.util.CrashReportStore.logNonFatalParseError(appContext, doc.reference.path, e)
             null
         }
     }
@@ -2492,6 +2611,7 @@ class RiderRepository {
                 isCredit = amount >= 0 && type.lowercase() !in listOf("cash_out", "deduction", "fee", "penalty", "debit")
             )
         } catch (e: Exception) {
+            com.example.util.CrashReportStore.logNonFatalParseError(appContext, doc.reference.path, e)
             return null
         }
     }
@@ -2570,21 +2690,29 @@ class RiderRepository {
             val rawMerchantLng = (pickupMap?.get("lng") as? Number)?.toDouble()
                 ?: (pickupMap?.get("longitude") as? Number)?.toDouble()
                 ?: doc.getDouble("merchantLng") ?: 0.0
-            val rawMerchantName = pickupMap?.get("name")?.toString()?.trim()?.takeIf { it.isNotBlank() }
-                ?: doc.getString("merchantName")?.trim()?.takeIf { it.isNotBlank() }
-                ?: doc.getString("senderName")?.trim()?.takeIf { it.isNotBlank() }
-                ?: ""
-            val rawBranchName = doc.getString("branchName")?.trim()?.takeIf { it.isNotBlank() }
-                ?: pickupMap?.get("branchName")?.toString()?.trim()?.takeIf { it.isNotBlank() }
-                ?: ""
-            val rawBranchCode = doc.getString("branchCode")?.trim()?.takeIf { it.isNotBlank() }
-                ?: pickupMap?.get("branchCode")?.toString()?.trim()?.takeIf { it.isNotBlank() }
-                ?: ""
+            val rawMerchantName = sanitizeDisplayName(
+                pickupMap?.get("name")?.toString() ?: doc.getString("merchantName"),
+                ""
+            )
+            val rawSenderName = sanitizeDisplayName(
+                pickupMap?.get("senderName")?.toString() ?: doc.getString("senderName"),
+                ""
+            )
+            val rawBranchName = sanitizeDisplayName(
+                doc.getString("branchName") ?: pickupMap?.get("branchName")?.toString(),
+                ""
+            )
+            val rawBranchCode = sanitizeDisplayName(
+                doc.getString("branchCode") ?: pickupMap?.get("branchCode")?.toString(),
+                ""
+            )
             val rawChainId = doc.getString("chainId")?.trim()?.takeIf { it.isNotBlank() }
                 ?: pickupMap?.get("chainId")?.toString()?.trim()?.takeIf { it.isNotBlank() }
                 ?: ""
-            val rawMerchantAddress = pickupMap?.get("address")?.toString()
-                ?: doc.getString("merchantAddress") ?: doc.getString("senderAddress") ?: ""
+            val rawMerchantAddress = deduplicateAddress(
+                pickupMap?.get("address")?.toString()
+                    ?: doc.getString("merchantAddress") ?: doc.getString("senderAddress") ?: ""
+            )
             val rawMerchantPhone = pickupMap?.get("phone")?.toString()
                 ?: doc.getString("merchantPhone") ?: doc.getString("senderPhone") ?: ""
 
@@ -2595,24 +2723,26 @@ class RiderRepository {
             val merchantLng = if (rawMerchantLng != 0.0) rawMerchantLng else (cachedMerchant?.get("lng") as? Double ?: 0.0)
             val merchantName = when {
                 rawMerchantName.isNotBlank() && !rawMerchantName.equals("Merchant", ignoreCase = true) -> rawMerchantName
-                else -> (cachedMerchant?.get("name") as? String)?.takeIf { it.isNotBlank() } ?: rawMerchantName.ifBlank { "Merchant" }
+                else -> sanitizeDisplayName(cachedMerchant?.get("name") as? String, "").ifBlank { rawMerchantName }
             }
             val branchName = if (rawBranchName.isNotBlank() || rawBranchCode.isNotBlank()) {
                 rawBranchName
             } else {
-                cachedMerchant?.get("branchName") as? String ?: ""
+                sanitizeDisplayName(cachedMerchant?.get("branchName") as? String, "")
             }
             val branchCode = if (rawBranchName.isNotBlank() || rawBranchCode.isNotBlank()) {
                 rawBranchCode
             } else {
-                cachedMerchant?.get("branchCode") as? String ?: ""
+                sanitizeDisplayName(cachedMerchant?.get("branchCode") as? String, "")
             }
             val chainId = if (rawChainId.isNotBlank()) {
                 rawChainId
             } else {
                 cachedMerchant?.get("chainId") as? String ?: ""
             }
-            val merchantAddress = rawMerchantAddress.ifBlank { cachedMerchant?.get("address") as? String ?: "" }
+            val merchantAddress = rawMerchantAddress.ifBlank {
+                deduplicateAddress(cachedMerchant?.get("address") as? String ?: "")
+            }
             val merchantPhone = rawMerchantPhone.ifBlank { cachedMerchant?.get("phone") as? String ?: "" }
 
             // Asynchronously fall back to merchants/{shopId} when lat/lng or outlet branch snapshots are missing
@@ -2639,14 +2769,21 @@ class RiderRepository {
             val customerId = dropoffMap?.get("customerId")?.toString()
                 ?: dropoffMap?.get("uid")?.toString()
                 ?: doc.getString("customerId") ?: ""
-            val customerName = dropoffMap?.get("name")?.toString()
-                ?: doc.getString("customerName") ?: doc.getString("recipientName") ?: "Customer"
-            val customerAddress = dropoffMap?.get("address")?.toString()
-                ?: doc.getString("customerAddress") ?: doc.getString("recipientAddress") ?: ""
+            val customerName = sanitizeDisplayName(
+                dropoffMap?.get("name")?.toString()
+                    ?: doc.getString("customerName") ?: doc.getString("recipientName"),
+                "Customer"
+            )
+            val customerAddress = deduplicateAddress(
+                dropoffMap?.get("address")?.toString()
+                    ?: doc.getString("customerAddress") ?: doc.getString("recipientAddress") ?: ""
+            )
             val customerPhone = dropoffMap?.get("phone")?.toString()
                 ?: doc.getString("customerPhone") ?: doc.getString("recipientPhone") ?: ""
-            val customerArea = dropoffMap?.get("area")?.toString()
-                ?: doc.getString("customerArea") ?: doc.getString("recipientArea") ?: "Downtown"
+            val customerArea = deduplicateAddress(
+                dropoffMap?.get("area")?.toString()
+                    ?: doc.getString("customerArea") ?: doc.getString("recipientArea") ?: "Downtown"
+            )
             val customerNotes = dropoffMap?.get("notes")?.toString()
                 ?: doc.getString("customerNotes") ?: ""
 
@@ -2779,8 +2916,8 @@ class RiderRepository {
                 val m = obj as? Map<*, *> ?: return@mapIndexedNotNull null
                 TaxiStop(
                     stopNumber = (m["stopNumber"] as? Number)?.toInt() ?: (index + 3),
-                    address = m["address"]?.toString() ?: "",
-                    area = m["area"]?.toString() ?: "",
+                    address = deduplicateAddress(m["address"]?.toString() ?: ""),
+                    area = deduplicateAddress(m["area"]?.toString() ?: ""),
                     lat = (m["lat"] as? Number)?.toDouble() ?: 0.0,
                     lng = (m["lng"] as? Number)?.toDouble() ?: 0.0
                 )
@@ -2832,7 +2969,11 @@ class RiderRepository {
             val isPoolable = !isSplitChild && ((dispatchDocMap?.get("poolable") as? Boolean)
                 ?: doc.getBoolean("poolable")
                 ?: doc.getBoolean("dispatch.poolable")
-                ?: (!isPriority && serviceType.lowercase() in listOf("food", "convenience", "instant", OrderStepConstants.SERVICE_FOOD)))
+                ?: (!isPriority && serviceType.lowercase() in listOf("food", "convenience", OrderStepConstants.SERVICE_FOOD)))
+            val targetRiderId = (dispatchDocMap?.get("targetRiderId")
+                ?: dispatchDocMap?.get("offeredRiderId")
+                ?: doc.getString("targetRiderId")
+                ?: doc.getString("offeredRiderId"))?.toString()?.trim() ?: ""
             val maxBatch = (dispatchDocMap?.get("maxBatch") as? Number)?.toInt()
                 ?: doc.getLong("maxBatch")?.toInt()
                 ?: 2
@@ -2959,6 +3100,7 @@ class RiderRepository {
                 prepMinutes = prepMinutes,
                 editedAt = editedAt,
                 merchantName = merchantName,
+                senderName = rawSenderName,
                 branchName = branchName,
                 branchCode = branchCode,
                 chainId = chainId,
@@ -3025,13 +3167,15 @@ class RiderRepository {
                 endsWhenReady = endsWhenReadyOrder,
                 specialRadiusExtra = specialExtra,
                 excludeRiderIds = excludeRiderIds,
+                targetRiderId = targetRiderId,
                 riderEarning = riderEarning,
                 splitOut = splitOut,
                 splitOutInfo = splitOutInfo,
                 splitParentOrderId = splitParentOrderId,
                 isSplitChild = isSplitChild
             )
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            com.example.util.CrashReportStore.logNonFatalParseError(appContext, doc.reference.path, e)
             return null
         }
     }
@@ -3056,7 +3200,8 @@ class RiderRepository {
                 return null
             }
             return msg
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            com.example.util.CrashReportStore.logNonFatalParseError(appContext, doc.reference.path, e)
             return null
         }
     }
@@ -3239,7 +3384,8 @@ class RiderRepository {
                 goals = goals.sortedBy { it.target },
                 createdAt = createdAt
             )
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            com.example.util.CrashReportStore.logNonFatalParseError(appContext, doc.reference.path, e)
             null
         }
     }
@@ -3264,7 +3410,8 @@ class RiderRepository {
                 note = doc.getString("note") ?: doc.getString("resolutionNote") ?: "",
                 createdAt = doc.getTimestamp("createdAt")
             )
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            com.example.util.CrashReportStore.logNonFatalParseError(appContext, doc.reference.path, e)
             null
         }
     }

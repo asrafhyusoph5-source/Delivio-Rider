@@ -318,19 +318,15 @@ object RouteStopCalculator {
     ): RouteStop {
         val isMerchant = type == StopType.MERCHANT
         val name = if (isMerchant) {
-            if (order.isTaxi) {
-                order.stops.firstOrNull()?.address ?: "Passenger Pickup"
-            } else {
-                order.displayMerchantName.ifBlank { "Merchant" }
-            }
+            order.displayPickupName
         } else {
-            order.customerName.ifBlank { "Customer" }
+            sanitizeDisplayName(order.customerName, "Customer")
         }
 
         val fullAddress = if (isMerchant) {
-            order.merchantAddress.ifBlank { order.displayMerchantName }
+            deduplicateAddress(order.merchantAddress).ifBlank { order.displayPickupName }
         } else {
-            order.customerAddress.ifBlank { order.customerArea }
+            deduplicateAddress(order.customerAddress).ifBlank { deduplicateAddress(order.customerArea) }
         }
 
         // Address according to stage visibility rules
@@ -341,8 +337,9 @@ object RouteStopCalculator {
             if (isRevealed) {
                 fullAddress
             } else {
-                if (order.customerArea.isNotBlank()) {
-                    "${order.customerArea} (Full address revealed after pickup)"
+                val area = deduplicateAddress(order.customerArea)
+                if (area.isNotBlank()) {
+                    "$area (Full address revealed after pickup)"
                 } else {
                     "Destination hidden until pickup"
                 }
