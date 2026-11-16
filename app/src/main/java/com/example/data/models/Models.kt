@@ -244,12 +244,7 @@ object BusyHeatMapCalculator {
                 true
             } else {
                 // For delivered / completed orders, check if delivered within last 60 minutes
-                val dTime = when (val del = order.deliveredAt) {
-                    is com.google.firebase.Timestamp -> del.toDate().time
-                    is Date -> del.time
-                    is Number -> del.toLong()
-                    else -> 0L
-                }
+                val dTime = OrderDocumentParser.parseTolerantTimeMillisOrZero(order.deliveredAt)
                 dTime >= minTime
             }
         }
@@ -530,56 +525,10 @@ data class Order(
         }
 
     val deliveredAtMillis: Long
-        get() {
-            return when (val d = deliveredAt) {
-                is com.google.firebase.Timestamp -> d.toDate().time
-                is java.util.Date -> d.time
-                is Number -> d.toLong()
-                is String -> d.toLongOrNull() ?: 0L
-                else -> 0L
-            }
-        }
+        get() = OrderDocumentParser.parseTolerantTimeMillisOrZero(deliveredAt)
 
     val scheduledForMillis: Long
-        get() {
-            return when (val raw = scheduledFor) {
-                is com.google.firebase.Timestamp -> raw.toDate().time
-                is java.util.Date -> raw.time
-                is Number -> {
-                    val num = raw.toLong()
-                    if (num < 1000000000000L) num * 1000L else num
-                }
-                is String -> {
-                    val trimmed = raw.trim()
-                    val num = trimmed.toLongOrNull()
-                    if (num != null) {
-                        if (num < 1000000000000L) num * 1000L else num
-                    } else {
-                        val patterns = listOf(
-                            "yyyy-MM-dd'T'HH:mm:ss",
-                            "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
-                            "yyyy-MM-dd HH:mm:ss",
-                            "yyyy-MM-dd",
-                            "MMM d, yyyy h:mm a",
-                            "MMM d, h:mm a"
-                        )
-                        var parsed = 0L
-                        for (pat in patterns) {
-                            try {
-                                val sdf = java.text.SimpleDateFormat(pat, java.util.Locale.US)
-                                val d = sdf.parse(trimmed)
-                                if (d != null) {
-                                    parsed = d.time
-                                    break
-                                }
-                            } catch (_: Exception) {}
-                        }
-                        parsed
-                    }
-                }
-                else -> 0L
-            }
-        }
+        get() = OrderDocumentParser.parseTolerantTimeMillisOrZero(scheduledFor)
 
     fun getReleaseTimeMillis(leadMinutes: Double = 0.0): Long {
         val sched = scheduledForMillis
@@ -602,6 +551,12 @@ data class Order(
 
     val isTaxi: Boolean
         get() = serviceType.lowercase() == OrderStepConstants.SERVICE_TAXI
+
+    val isNonMerchantService: Boolean
+        get() = isTaxi || serviceType.trim().lowercase() in listOf(
+            OrderStepConstants.SERVICE_PARCEL,
+            OrderStepConstants.SERVICE_PABILI
+        )
 
     val isMart: Boolean
         get() = serviceType.trim().lowercase().let { it == OrderStepConstants.SERVICE_MART || it == "mart" }
@@ -1430,6 +1385,47 @@ fun formatMerchantDisplayName(
         withBranch
     }
 }
+
+enum class ListenerConnectionState {
+    CONNECTED,
+    RESTARTING,
+    DISCONNECTED
+}
+
+data class DispatchListenerStatus(
+    val state: ListenerConnectionState = ListenerConnectionState.CONNECTED,
+    val lastUpdateMillis: Long = 0L,
+    val restartAttempt: Int = 0,
+    val nextRetrySeconds: Int = 0,
+    val lastError: String? = null
+)
+
+data class SkippedOrderRecord(
+    val orderId: String,
+    val displayLabel: String,
+    val reason: String,
+    val timestampMillis: Long = System.currentTimeMillis(),
+    val isBadData: Boolean = false
+) {
+    val formattedLine: String
+        get() = "$displayLabel: $reason"
+
+    companion object {
+        fun labelForOrder(order: Order): String {
+            return if (order.isTaxi) "Taxi" else "Order ${order.displayOrderNumber}"
+        }
+
+        fun labelForBadDoc(docId: String, orderNumberHint: String, serviceTypeHint: String): String {
+            if (serviceTypeHint.equals(OrderStepConstants.SERVICE_TAXI, ignoreCase = true)) {
+                return "Taxi"
+            }
+            val raw = orderNumberHint.trim().ifBlank { docId.takeLast(6).uppercase(Locale.US) }
+            val prefixed = if (raw.startsWith("#")) raw else "#$raw"
+            return "Order $prefixed"
+        }
+    }
+}
+
 
 
 

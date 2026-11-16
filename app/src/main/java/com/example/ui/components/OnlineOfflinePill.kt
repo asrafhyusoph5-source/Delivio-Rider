@@ -48,7 +48,7 @@ fun OnlineOfflinePill(
         shadowElevation = 6.dp,
         color = MaterialTheme.colorScheme.surface,
         modifier = modifier
-            .height(44.dp)
+            .heightIn(min = 48.dp)
             .testTag("online_offline_pill")
     ) {
         Row(

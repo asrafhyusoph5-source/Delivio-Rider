@@ -33,8 +33,13 @@ data class DispatchSettings(
     val specialRadiusRiderExtra: Double = 0.0,
     val priorityMaxBatch: Int = 4,
     val priorityHeadStartSeconds: Int = 15,
-    val martBatching: Boolean = false
+    val martBatching: Boolean = false,
+    val taxiSearchRadiusKm: Double = 5.0
 )
+
+fun formatKmLimit(km: Double): String {
+    return if (km % 1.0 == 0.0) km.toInt().toString() else String.format(java.util.Locale.US, "%.1f", km)
+}
 
 object BatchConstants {
 
@@ -459,8 +464,222 @@ object InstantDispatchEvaluator {
             dispatch.searchRadiusKm
         }
         if (distKm > maxRadius) {
-            val formattedKm = String.format(java.util.Locale.US, "%.1f km", distKm)
-            return InstantDispatchResult(false, "outside radius ($formattedKm)", distKm)
+            val formattedKm = String.format(java.util.Locale.US, "%.1f", distKm)
+            return InstantDispatchResult(false, "outside radius ($formattedKm km, limit ${formatKmLimit(maxRadius)})", distKm)
+        }
+        return InstantDispatchResult(true, null, distKm)
+    }
+}
+
+object TaxiDispatchEvaluator {
+    const val TAG = "DISPATCH"
+    const val TAXI_TIMER_SECONDS = 20
+
+    fun computePickupDistanceKm(order: Order, riderLoc: Pair<Double, Double>?): Double {
+        return if (riderLoc != null && riderLoc.first != 0.0 && riderLoc.second != 0.0 &&
+            order.merchantLat != 0.0 && order.merchantLng != 0.0
+        ) {
+            BatchConstants.distanceKm(riderLoc.first, riderLoc.second, order.merchantLat, order.merchantLng)
+        } else {
+            order.pickupDistanceKm.coerceAtLeast(0.0)
+        }
+    }
+
+    /**
+     * Evaluates Delivio Taxi order eligibility without ANY merchant-based condition
+     * (no merchant location, merchant radius, or merchant status).
+     */
+    fun evaluateSkipReason(
+        order: Order,
+        rider: com.example.data.models.Rider?,
+        activeOrders: List<Order>,
+        riderLoc: Pair<Double, Double>?,
+        isPlatformServiceEnabled: Boolean,
+        isCityServiceEnabled: Boolean,
+        dispatch: DispatchSettings,
+        declinedIds: Set<String> = emptySet(),
+        releasedIds: Set<String> = emptySet()
+    ): InstantDispatchResult {
+        if (rider == null || !rider.isOnline) {
+            return InstantDispatchResult(false, "offline")
+        }
+        if (!rider.status.equals("active", ignoreCase = true)) {
+            return InstantDispatchResult(false, "account ${rider.status}")
+        }
+        if (declinedIds.contains(order.id) || releasedIds.contains(order.id) || order.excludeRiderIds.contains(rider.uid)) {
+            return InstantDispatchResult(false, "declined or excluded")
+        }
+        if (order.targetRiderId.isNotBlank() && order.targetRiderId != rider.uid) {
+            return InstantDispatchResult(false, "offered to another rider")
+        }
+        if (!isPlatformServiceEnabled) {
+            return InstantDispatchResult(false, "service off on platform")
+        }
+        if (!isCityServiceEnabled) {
+            return InstantDispatchResult(false, "service off in city")
+        }
+        if (order.cityId.isNotBlank() && rider.cityId.isNotBlank() && order.cityId != rider.cityId) {
+            return InstantDispatchResult(false, "service off in city")
+        }
+        if (!rider.allowedServices.contains(OrderStepConstants.SERVICE_TAXI) ||
+            !rider.activeServices.contains(OrderStepConstants.SERVICE_TAXI)
+        ) {
+            return InstantDispatchResult(false, "service off for rider")
+        }
+        val riderVehicleType = OrderStepConstants.normalizeVehicleType(rider.vehicle.type)
+        val orderVehicleType = OrderStepConstants.normalizeVehicleType(order.vehicleType)
+        if (orderVehicleType != riderVehicleType) {
+            return InstantDispatchResult(false, "vehicle mismatch (order wants $orderVehicleType)")
+        }
+        if (activeOrders.isNotEmpty()) {
+            return InstantDispatchResult(false, "busy with active order")
+        }
+        val ordStatus = order.status.trim()
+        val reqStatus = order.riderRequestStatus.trim()
+        val validTaxiStatus = ordStatus.equals(OrderStepConstants.REQ_SEARCHING, ignoreCase = true) ||
+            ordStatus.equals(OrderStepConstants.STATUS_PLACED_ORDER, ignoreCase = true) ||
+            ordStatus.equals(OrderStepConstants.STATUS_PREPARING, ignoreCase = true) ||
+            ordStatus.equals(OrderStepConstants.STATUS_READY, ignoreCase = true)
+        val validReqStatus = reqStatus.isBlank() || reqStatus.equals(OrderStepConstants.REQ_SEARCHING, ignoreCase = true)
+        if (!validTaxiStatus || !validReqStatus) {
+            return InstantDispatchResult(false, "not searching (${order.status})")
+        }
+        val distKm = computePickupDistanceKm(order, riderLoc)
+        val maxRadius = dispatch.taxiSearchRadiusKm.coerceAtLeast(0.5)
+        if (distKm > maxRadius) {
+            val formattedKm = String.format(java.util.Locale.US, "%.1f", distKm)
+            return InstantDispatchResult(
+                false,
+                "outside radius ($formattedKm km, limit ${formatKmLimit(maxRadius)})",
+                distKm
+            )
+        }
+        return InstantDispatchResult(true, null, distKm)
+    }
+}
+
+object GeneralDispatchEvaluator {
+    fun evaluateSkipReason(
+        order: Order,
+        rider: com.example.data.models.Rider?,
+        activeOrders: List<Order>,
+        riderLoc: Pair<Double, Double>?,
+        isPlatformServiceEnabled: Boolean,
+        isCityServiceEnabled: Boolean,
+        dispatch: DispatchSettings,
+        activeSplitFamilyIds: Set<String> = emptySet(),
+        declinedIds: Set<String> = emptySet(),
+        releasedIds: Set<String> = emptySet(),
+        scheduledLeadMinutes: Double = 0.0,
+        nowMs: Long = System.currentTimeMillis()
+    ): InstantDispatchResult {
+        if (rider == null || !rider.isOnline) {
+            return InstantDispatchResult(false, "offline")
+        }
+        if (!rider.status.equals("active", ignoreCase = true)) {
+            return InstantDispatchResult(false, "account ${rider.status}")
+        }
+        if (declinedIds.contains(order.id) || releasedIds.contains(order.id)) {
+            return InstantDispatchResult(false, "declined or excluded")
+        }
+        if (order.excludeRiderIds.contains(rider.uid)) {
+            return InstantDispatchResult(false, "declined or excluded")
+        }
+        if (order.targetRiderId.isNotBlank() && order.targetRiderId != rider.uid) {
+            return InstantDispatchResult(false, "offered to another rider")
+        }
+        if (order.isPickup) {
+            return InstantDispatchResult(false, "customer pickup order")
+        }
+        if (order.isFutureScheduled(scheduledLeadMinutes, nowMs)) {
+            return InstantDispatchResult(false, "scheduled for later")
+        }
+        val candidateFamilyId = if (!order.splitParentOrderId.isNullOrBlank()) {
+            order.splitParentOrderId.trim()
+        } else if (order.hasSplitOut) {
+            order.id
+        } else null
+        if (candidateFamilyId != null && activeSplitFamilyIds.contains(candidateFamilyId)) {
+            return InstantDispatchResult(false, "split sibling active")
+        }
+        if (!BatchConstants.isCandidateCompatibleWithActive(activeOrders, order, dispatch)) {
+            return InstantDispatchResult(false, "incompatible with active batch")
+        }
+        if (!isPlatformServiceEnabled) {
+            return InstantDispatchResult(false, "service off on platform")
+        }
+        if (!isCityServiceEnabled) {
+            return InstantDispatchResult(false, "service off in city")
+        }
+        if (order.cityId.isNotBlank() && rider.cityId.isNotBlank() && order.cityId != rider.cityId) {
+            return InstantDispatchResult(false, "service off in city")
+        }
+        val normService = order.serviceType.lowercase().trim()
+        val riderHasActive = rider.activeServices.any { it.lowercase().trim() == normService }
+        val riderHasAllowed = rider.allowedServices.any { it.lowercase().trim() == normService }
+        if (!riderHasAllowed || !riderHasActive) {
+            return InstantDispatchResult(false, "service off for rider")
+        }
+
+        val riderVehicleType = OrderStepConstants.normalizeVehicleType(rider.vehicle.type)
+        val allowedForVehicle = OrderStepConstants.getServicesForVehicle(riderVehicleType)
+        if (!allowedForVehicle.any { it.lowercase().trim() == normService }) {
+            return InstantDispatchResult(false, "vehicle mismatch (not eligible for $riderVehicleType)")
+        }
+
+        // Non-merchant services (parcel & pabili) must NEVER be filtered out by merchant location,
+        // merchant radius, or merchant status checks.
+        if (order.isNonMerchantService) {
+            val s = order.status.trim().lowercase()
+            val validNonMerchantStatus = s in setOf(
+                "placed order",
+                "placed_order",
+                "searching",
+                "preparing",
+                "ready"
+            )
+            if (!validNonMerchantStatus) {
+                return InstantDispatchResult(false, "not searching (${order.status})")
+            }
+            val distKm = if (riderLoc != null && order.merchantLat != 0.0 && order.merchantLng != 0.0) {
+                BatchConstants.distanceKm(riderLoc.first, riderLoc.second, order.merchantLat, order.merchantLng)
+            } else {
+                order.pickupDistanceKm.coerceAtLeast(0.0)
+            }
+            return InstantDispatchResult(true, null, distKm)
+        }
+
+        // Merchant orders (Food / Convenience / Mart)
+        val distKm = if (riderLoc != null && order.merchantLat != 0.0 && order.merchantLng != 0.0) {
+            BatchConstants.distanceKm(riderLoc.first, riderLoc.second, order.merchantLat, order.merchantLng)
+        } else {
+            order.pickupDistanceKm.coerceAtLeast(0.0)
+        }
+        val isFoodOrConv = normService in listOf("food", "convenience", "mart", OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_MART)
+        val skipRadius = rider.priorityRider && isFoodOrConv
+        if (!skipRadius && distKm > dispatch.searchRadiusKm) {
+            val formattedKm = String.format(java.util.Locale.US, "%.1f", distKm)
+            return InstantDispatchResult(
+                false,
+                "outside radius ($formattedKm km, limit ${formatKmLimit(dispatch.searchRadiusKm)})",
+                distKm
+            )
+        }
+
+        val readyOk = if (order.isScheduled) {
+            order.merchantAccepted ||
+                order.status.equals(OrderStepConstants.STATUS_PREPARING, ignoreCase = true) ||
+                order.status.equals(OrderStepConstants.STATUS_READY, ignoreCase = true) ||
+                !order.status.equals(OrderStepConstants.STATUS_PLACED_ORDER, ignoreCase = true)
+        } else {
+            val s = order.status.trim().lowercase()
+            s in listOf("preparing", "ready") ||
+                order.status == OrderStepConstants.STATUS_PREPARING ||
+                order.status == OrderStepConstants.STATUS_READY ||
+                (order.merchantAccepted && s != "placed order" && s != "placed_order")
+        }
+        if (!readyOk) {
+            return InstantDispatchResult(false, "waiting for merchant (${order.status})", distKm)
         }
         return InstantDispatchResult(true, null, distKm)
     }

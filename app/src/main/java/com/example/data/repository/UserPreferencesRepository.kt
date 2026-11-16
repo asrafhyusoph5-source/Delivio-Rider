@@ -179,6 +179,16 @@ class UserPreferencesRepository(context: Context) {
         saveShifts(newShifts)
     }
 
+    private val _onlineSinceMillis = MutableStateFlow(prefs.getLong(KEY_ONLINE_SINCE_MS, 0L))
+    val onlineSinceMillis: StateFlow<Long> = _onlineSinceMillis.asStateFlow()
+
+    fun getOnlineSinceMillis(): Long = _onlineSinceMillis.value
+
+    fun setOnlineSinceMillis(millis: Long) {
+        prefs.edit().putLong(KEY_ONLINE_SINCE_MS, millis).apply()
+        _onlineSinceMillis.value = millis
+    }
+
     companion object {
         private const val KEY_NAV_APP = "key_nav_app"
         private const val KEY_DARK_MODE = "key_dark_mode"
@@ -188,5 +198,6 @@ class UserPreferencesRepository(context: Context) {
         private const val KEY_DECLINED_ORDERS = "key_declined_orders"
         private const val KEY_CELEBRATED_TIERS = "key_celebrated_tiers"
         private const val KEY_DRIVER_SHIFTS = "key_driver_shifts"
+        private const val KEY_ONLINE_SINCE_MS = "key_online_since_ms"
     }
 }

@@ -31,9 +31,32 @@ class RiderRepository(
 
     private val auth: FirebaseAuth by lazy { FirebaseAuth.getInstance() }
     private val db: FirebaseFirestore by lazy { FirebaseFirestore.getInstance() }
-    private val scope = CoroutineScope(Dispatchers.IO + Job())
+    private val scope = CoroutineScope(Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
+    private val _riderDocLocationUpdatedAtMs = MutableStateFlow(0L)
+    val riderDocLocationUpdatedAtMs: StateFlow<Long> = _riderDocLocationUpdatedAtMs.asStateFlow()
+
+    private val _onlineSinceMillis = MutableStateFlow(0L)
+    val onlineSinceMillis: StateFlow<Long> = _onlineSinceMillis.asStateFlow()
+
+    private val _dispatchListenerStatus = MutableStateFlow(DispatchListenerStatus())
+    val dispatchListenerStatus: StateFlow<DispatchListenerStatus> = _dispatchListenerStatus.asStateFlow()
+
+    private val _ordersSeenCount = MutableStateFlow(0)
+    val ordersSeenCount: StateFlow<Int> = _ordersSeenCount.asStateFlow()
+
+    private val _badDataSkippedCount = MutableStateFlow(0)
+    val badDataSkippedCount: StateFlow<Int> = _badDataSkippedCount.asStateFlow()
+
+    private val _eligibleOrdersCount = MutableStateFlow(0)
+    val eligibleOrdersCount: StateFlow<Int> = _eligibleOrdersCount.asStateFlow()
+
+    private val _skippedOrderRecords = MutableStateFlow<List<SkippedOrderRecord>>(emptyList())
+    val skippedOrderRecords: StateFlow<List<SkippedOrderRecord>> = _skippedOrderRecords.asStateFlow()
+
+    private val badDocRecords = ArrayDeque<SkippedOrderRecord>()
     @Volatile
-    private var riderDocLocationUpdatedAtMs: Long = 0L
+    private var latestEvaluationSkips: List<SkippedOrderRecord> = emptyList()
+    private val skipLock = Any()
 
     // Live state
     private val _rider = MutableStateFlow<Rider?>(null)
@@ -223,6 +246,67 @@ class RiderRepository(
     private var currentChatId: String? = null
     private var lastChatCleanupTimeMillis = 0L
     private var activeUserPrefs: UserPreferencesRepository? = null
+    @Volatile
+    private var activeSessionUid: String? = null
+    private var activeOrdersRetryJob: Job? = null
+    private var offersRetryJob: Job? = null
+    private var deliveredOrdersRetryJob: Job? = null
+    private var waveDelayJob: Job? = null
+
+    private fun refreshCombinedSkippedOrders() {
+        synchronized(skipLock) {
+            val merged = (badDocRecords.toList() + latestEvaluationSkips)
+                .distinctBy { "${it.orderId}:${it.isBadData}" }
+                .sortedByDescending { it.timestampMillis }
+                .take(MAX_SKIP_RECORDS)
+            _skippedOrderRecords.value = merged
+        }
+    }
+
+    private fun recordBadOrderDocument(doc: DocumentSnapshot, sourceLabel: String, throwable: Throwable) {
+        val rawData = try {
+            doc.data
+        } catch (_: Throwable) {
+            null
+        }
+        val orderNumberHint = OrderDocumentParser.safeStringOrNull(rawData?.get("orderNumber"))
+            ?: OrderDocumentParser.safeStringOrNull(rawData?.get("orderId"))
+            ?: doc.id
+        val serviceTypeHint = OrderDocumentParser.safeString(rawData?.get("serviceType"))
+        android.util.Log.e(
+            OrderDocumentParser.TAG,
+            "[$sourceLabel] Bad order document skipped (id=${doc.id}): ${throwable.message}",
+            throwable
+        )
+        com.example.util.CrashReportStore.logNonFatalParseError(
+            appContext,
+            "orders/${doc.id}",
+            throwable
+        )
+        synchronized(skipLock) {
+            _badDataSkippedCount.value = _badDataSkippedCount.value + 1
+            badDocRecords.removeAll { it.orderId == doc.id }
+            val detail = throwable.message?.take(60)?.ifBlank { "corrupt fields" } ?: "corrupt fields"
+            badDocRecords.addFirst(
+                SkippedOrderRecord(
+                    orderId = doc.id,
+                    displayLabel = SkippedOrderRecord.labelForBadDoc(doc.id, orderNumberHint, serviceTypeHint),
+                    reason = "bad data ($detail)",
+                    timestampMillis = System.currentTimeMillis(),
+                    isBadData = true
+                )
+            )
+            while (badDocRecords.size > MAX_SKIP_RECORDS) {
+                badDocRecords.removeLast()
+            }
+        }
+        refreshCombinedSkippedOrders()
+    }
+
+    companion object {
+        private const val MAX_SKIP_RECORDS = 10
+        private val LISTENER_BACKOFF_SECONDS = listOf(2, 5, 10)
+    }
 
     private fun syncDeliveryRates(cityId: String) {
         if (cityId.isBlank() || cityId == currentRatesCityId) return
@@ -326,6 +410,7 @@ class RiderRepository(
         val totalDriverPay = breakdowns.sumOf { it.totalPay }
         val km = floor(firstPickupDist).toInt()
         val hasInstantOrder = orders.any { it.isRequestRider }
+        val hasTaxiOrder = orders.any { it.isTaxi }
         val waveDelaySeconds = if (hasInstantOrder) {
             if (isPriorityRider) 0 else dispatchSettings.priorityHeadStartSeconds + (km * dispatchSettings.waveSeconds)
         } else if (isPriorityRider) {
@@ -352,10 +437,10 @@ class RiderRepository(
             else -> firstOrder.badge
         }
 
-        val timerSeconds = if (hasInstantOrder) {
-            com.example.data.constants.InstantDispatchEvaluator.INSTANT_TIMER_SECONDS
-        } else {
-            com.example.data.constants.InstantDispatchEvaluator.DEFAULT_TIMER_SECONDS
+        val timerSeconds = when {
+            hasInstantOrder -> com.example.data.constants.InstantDispatchEvaluator.INSTANT_TIMER_SECONDS
+            hasTaxiOrder -> com.example.data.constants.TaxiDispatchEvaluator.TAXI_TIMER_SECONDS
+            else -> com.example.data.constants.InstantDispatchEvaluator.DEFAULT_TIMER_SECONDS
         }
 
         return OfferBundle(
@@ -423,7 +508,9 @@ class RiderRepository(
 
     fun startListeningForRider(uid: String, userPrefs: UserPreferencesRepository) {
         stopListening()
+        activeSessionUid = uid
         activeUserPrefs = userPrefs
+        _onlineSinceMillis.value = userPrefs.getOnlineSinceMillis()
 
         // 1. Listen to riders/{uid}
         riderListener = db.collection("riders").document(uid)
@@ -461,14 +548,37 @@ class RiderRepository(
 
                 val locMap = snapshot.get("location") as? Map<*, *>
                 val rawLocUpdated = locMap?.get("updatedAt") ?: snapshot.get("locationUpdatedAt") ?: snapshot.get("lastSeenAt")
-                riderDocLocationUpdatedAtMs = when (rawLocUpdated) {
-                    is com.google.firebase.Timestamp -> rawLocUpdated.toDate().time
-                    is Date -> rawLocUpdated.time
-                    is Number -> {
-                        val n = rawLocUpdated.toLong()
-                        if (n < 1000000000000L) n * 1000L else n
+                _riderDocLocationUpdatedAtMs.value = OrderDocumentParser.parseTolerantTimeMillisOrZero(rawLocUpdated)
+                val docLat = OrderDocumentParser.safeDouble(locMap?.get("lat"))
+                    ?: OrderDocumentParser.safeDouble(locMap?.get("latitude"))
+                    ?: OrderDocumentParser.safeDouble(snapshot.get("lat"))
+                    ?: 0.0
+                val docLng = OrderDocumentParser.safeDouble(locMap?.get("lng"))
+                    ?: OrderDocumentParser.safeDouble(locMap?.get("longitude"))
+                    ?: OrderDocumentParser.safeDouble(snapshot.get("lng"))
+                    ?: 0.0
+                if (RiderLocationTracker.currentLocation.value == null && docLat != 0.0 && docLng != 0.0) {
+                    RiderLocationTracker.updateLocation(docLat, docLng)
+                }
+
+                val isOnlineNow = snapshot.getBoolean("isOnline") ?: false
+                if (isOnlineNow) {
+                    val serverOnlineSince = OrderDocumentParser.parseTolerantTimeMillisOrZero(snapshot.get("onlineSince"))
+                    val resolvedSince = when {
+                        serverOnlineSince > 0L -> serverOnlineSince
+                        _onlineSinceMillis.value > 0L -> _onlineSinceMillis.value
+                        userPrefs.getOnlineSinceMillis() > 0L -> userPrefs.getOnlineSinceMillis()
+                        else -> OrderDocumentParser.parseTolerantTimeMillisOrZero(
+                            snapshot.get("lastOnlineAt") ?: snapshot.get("lastSeenAt")
+                        ).takeIf { it > 0L } ?: System.currentTimeMillis()
                     }
-                    else -> 0L
+                    _onlineSinceMillis.value = resolvedSince
+                    userPrefs.setOnlineSinceMillis(resolvedSince)
+                } else {
+                    if (_onlineSinceMillis.value != 0L) {
+                        _onlineSinceMillis.value = 0L
+                        userPrefs.setOnlineSinceMillis(0L)
+                    }
                 }
 
                 val r = Rider(
@@ -482,7 +592,7 @@ class RiderRepository(
                     cityId = snapshot.getString("cityId") ?: "puerto_princesa",
                     rating = snapshot.getDouble("rating") ?: 5.0,
                     memberSince = snapshot.getString("memberSince") ?: "Active Member",
-                    isOnline = snapshot.getBoolean("isOnline") ?: false,
+                    isOnline = isOnlineNow,
                     status = snapshot.getString("status") ?: "active",
                     allowedServices = allowed,
                     activeServices = active,
@@ -523,75 +633,21 @@ class RiderRepository(
                                 _cityServices.value = svcs
                                 val name = cSnap.getString("name") ?: cSnap.getString("cityName") ?: r.cityId
                                 _currentCityName.value = name
+                                evaluateOffers(activeUserPrefs)
                             }
                         }
                 }
-            }
-
-        // 2. Listen to active orders assigned to rider (find active order by rider, not by status in query)
-        activeOrdersListener = db.collection("orders")
-            .whereEqualTo("riderId", uid)
-            .addSnapshotListener { snapshots, error ->
-                if (error != null) {
-                    _listenerError.value = "Active orders listener: ${error.localizedMessage}"
-                    return@addSnapshotListener
-                }
-                if (snapshots == null) return@addSnapshotListener
-                val activeList = snapshots.documents.mapNotNull { parseOrder(it) }.filter { order ->
-                    val s = order.status.trim().lowercase()
-                    val step = order.riderStep.trim().lowercase()
-                    s != "delivered" && s != "cancelled" && s != "canceled" && s != "rejected" && step != "completed"
-                }
-                _activeOrders.value = activeList
-                val activeIds = activeList.map { it.id }.toSet()
-                RiderLocationTracker.setActiveOrderIds(activeIds)
                 evaluateOffers(activeUserPrefs)
             }
 
-        // 3. Listen to incoming offers: riderId == null and status in ["Placed Order", "Preparing", "Ready"]
-        offersListener = db.collection("orders")
-            .whereEqualTo("riderId", null)
-            .whereIn("status", listOf(
-                OrderStepConstants.STATUS_PLACED_ORDER,
-                OrderStepConstants.STATUS_PREPARING,
-                OrderStepConstants.STATUS_READY
-            ))
-            .addSnapshotListener { snapshots, error ->
-                if (error != null || snapshots == null) return@addSnapshotListener
-                val rawCandidates = snapshots.documents.mapNotNull { parseOrder(it) }
-                _candidateOrders.value = rawCandidates
-                evaluateOffers(userPrefs)
-            }
+        // 2. Listen to active orders assigned to rider (with automatic backoff restart)
+        attachActiveOrdersListener(uid, attempt = 0)
 
-        // 4. Delivered orders for earnings & wallet
-        deliveredOrdersListener = db.collection("orders")
-            .whereEqualTo("riderId", uid)
-            .whereIn("status", listOf(OrderStepConstants.STATUS_DELIVERED, OrderStepConstants.STATUS_COMPLETED, "Delivered", "Completed").distinct())
-            .addSnapshotListener { snapshots, error ->
-                if (error != null || snapshots == null) return@addSnapshotListener
-                val orders = snapshots.documents.mapNotNull { parseOrder(it) }
-                _deliveredOrders.value = orders
+        // 3. Listen to incoming offers (with automatic backoff restart)
+        attachOffersListener(uid, attempt = 0)
 
-                // Check for late tip updates arriving while app is open
-                for (order in orders) {
-                    val prev = knownLateTips[order.id] ?: 0.0
-                    if (deliveredListenerInitialized && order.lateTipAmount > prev) {
-                        val added = order.lateTipAmount - prev
-                        _lateTipBanner.value = LateTipBannerInfo(
-                            orderId = order.id,
-                            orderNumber = order.orderNumber,
-                            amount = added
-                        )
-                    }
-                    if (order.lateTipAmount > 0.0) {
-                        knownLateTips[order.id] = order.lateTipAmount
-                    }
-                }
-                deliveredListenerInitialized = true
-
-                // Check monthly tier progress
-                checkTierProgression(uid, _rider.value?.name ?: "Rider", orders, userPrefs)
-            }
+        // 4. Delivered orders for earnings & wallet (with automatic backoff restart)
+        attachDeliveredOrdersListener(uid, attempt = 0)
 
         // 5. Tier configs
         tierConfigListener = db.collection("tierConfig")
@@ -674,6 +730,7 @@ class RiderRepository(
                         key to bool
                     }?.toMap() ?: emptyMap()
                     _platformServices.value = svcs
+                    evaluateOffers(activeUserPrefs)
                 }
             }
 
@@ -692,6 +749,11 @@ class RiderRepository(
                     val pMaxBatch = (doc.get("priorityMaxBatch") as? Number)?.toInt() ?: 4
                     val pHeadStart = (doc.get("priorityHeadStartSeconds") as? Number)?.toInt() ?: 15
                     val martBatching = doc.getBoolean("martBatching") ?: false
+                    val taxiMap = doc.get("taxi") as? Map<*, *>
+                    val taxiRadius = (doc.get("taxiSearchRadiusKm") as? Number)?.toDouble()
+                        ?: (doc.get("taxiRadiusKm") as? Number)?.toDouble()
+                        ?: (taxiMap?.get("searchRadiusKm") as? Number)?.toDouble()
+                        ?: 5.0
                     _dispatchSettings.value = DispatchSettings(
                         holdMinutes = holdMin,
                         maxBatch = maxB,
@@ -702,7 +764,8 @@ class RiderRepository(
                         specialRadiusRiderExtra = riderExtra,
                         priorityMaxBatch = pMaxBatch,
                         priorityHeadStartSeconds = pHeadStart,
-                        martBatching = martBatching
+                        martBatching = martBatching,
+                        taxiSearchRadiusKm = taxiRadius
                     )
                     evaluateOffers(activeUserPrefs)
                 } else if (doc != null && !doc.exists()) {
@@ -853,58 +916,197 @@ class RiderRepository(
             }
     }
 
+    private fun attachActiveOrdersListener(uid: String, attempt: Int) {
+        if (activeSessionUid != uid) return
+        activeOrdersRetryJob?.cancel()
+        activeOrdersListener?.remove()
+        activeOrdersListener = db.collection("orders")
+            .whereEqualTo("riderId", uid)
+            .addSnapshotListener { snapshots, error ->
+                if (error != null) {
+                    android.util.Log.e(
+                        OrderDocumentParser.TAG,
+                        "Active orders listener error (attempt=$attempt): ${error.message}",
+                        error
+                    )
+                    _listenerError.value = "Active orders listener: ${error.localizedMessage}"
+                    val delaySec = LISTENER_BACKOFF_SECONDS.getOrElse(attempt) { LISTENER_BACKOFF_SECONDS.last() }
+                    _dispatchListenerStatus.value = _dispatchListenerStatus.value.copy(
+                        state = ListenerConnectionState.RESTARTING,
+                        restartAttempt = attempt + 1,
+                        nextRetrySeconds = delaySec,
+                        lastError = error.localizedMessage
+                    )
+                    activeOrdersListener?.remove()
+                    activeOrdersListener = null
+                    activeOrdersRetryJob?.cancel()
+                    activeOrdersRetryJob = scope.launch {
+                        kotlinx.coroutines.delay(delaySec * 1000L)
+                        if (activeSessionUid == uid) {
+                            attachActiveOrdersListener(uid, attempt + 1)
+                        }
+                    }
+                    return@addSnapshotListener
+                }
+                if (snapshots == null) return@addSnapshotListener
+                _dispatchListenerStatus.value = DispatchListenerStatus(
+                    state = ListenerConnectionState.CONNECTED,
+                    lastUpdateMillis = System.currentTimeMillis(),
+                    restartAttempt = 0,
+                    nextRetrySeconds = 0,
+                    lastError = null
+                )
+                val activeList = snapshots.documents.mapNotNull { parseOrderSafely(it, "activeOrders") }.filter { order ->
+                    val s = order.status.trim().lowercase()
+                    val step = order.riderStep.trim().lowercase()
+                    s != "delivered" && s != "cancelled" && s != "canceled" && s != "rejected" && step != "completed"
+                }
+                _activeOrders.value = activeList
+                val activeIds = activeList.map { it.id }.toSet()
+                RiderLocationTracker.setActiveOrderIds(activeIds)
+                evaluateOffers(activeUserPrefs)
+            }
+    }
+
+    private fun attachOffersListener(uid: String, attempt: Int) {
+        if (activeSessionUid != uid) return
+        offersRetryJob?.cancel()
+        offersListener?.remove()
+        offersListener = db.collection("orders")
+            .whereEqualTo("riderId", null)
+            .whereIn(
+                "status",
+                listOf(
+                    OrderStepConstants.STATUS_PLACED_ORDER,
+                    OrderStepConstants.STATUS_PREPARING,
+                    OrderStepConstants.STATUS_READY,
+                    OrderStepConstants.REQ_SEARCHING
+                )
+            )
+            .addSnapshotListener { snapshots, error ->
+                if (error != null) {
+                    android.util.Log.e(
+                        OrderDocumentParser.TAG,
+                        "Offers listener error (attempt=$attempt): ${error.message}",
+                        error
+                    )
+                    val delaySec = LISTENER_BACKOFF_SECONDS.getOrElse(attempt) { LISTENER_BACKOFF_SECONDS.last() }
+                    _dispatchListenerStatus.value = _dispatchListenerStatus.value.copy(
+                        state = ListenerConnectionState.RESTARTING,
+                        restartAttempt = attempt + 1,
+                        nextRetrySeconds = delaySec,
+                        lastError = error.localizedMessage
+                    )
+                    offersListener?.remove()
+                    offersListener = null
+                    offersRetryJob?.cancel()
+                    offersRetryJob = scope.launch {
+                        kotlinx.coroutines.delay(delaySec * 1000L)
+                        if (activeSessionUid == uid) {
+                            attachOffersListener(uid, attempt + 1)
+                        }
+                    }
+                    return@addSnapshotListener
+                }
+                if (snapshots == null) return@addSnapshotListener
+                _dispatchListenerStatus.value = DispatchListenerStatus(
+                    state = ListenerConnectionState.CONNECTED,
+                    lastUpdateMillis = System.currentTimeMillis(),
+                    restartAttempt = 0,
+                    nextRetrySeconds = 0,
+                    lastError = null
+                )
+                val rawCandidates = snapshots.documents.mapNotNull { parseOrderSafely(it, "offers") }
+                _candidateOrders.value = rawCandidates
+                evaluateOffers(activeUserPrefs)
+            }
+    }
+
+    private fun attachDeliveredOrdersListener(uid: String, attempt: Int) {
+        if (activeSessionUid != uid) return
+        deliveredOrdersRetryJob?.cancel()
+        deliveredOrdersListener?.remove()
+        deliveredOrdersListener = db.collection("orders")
+            .whereEqualTo("riderId", uid)
+            .whereIn(
+                "status",
+                listOf(
+                    OrderStepConstants.STATUS_DELIVERED,
+                    OrderStepConstants.STATUS_COMPLETED,
+                    "Delivered",
+                    "Completed"
+                ).distinct()
+            )
+            .addSnapshotListener { snapshots, error ->
+                if (error != null) {
+                    android.util.Log.e(
+                        OrderDocumentParser.TAG,
+                        "Delivered orders listener error (attempt=$attempt): ${error.message}",
+                        error
+                    )
+                    val delaySec = LISTENER_BACKOFF_SECONDS.getOrElse(attempt) { LISTENER_BACKOFF_SECONDS.last() }
+                    _dispatchListenerStatus.value = _dispatchListenerStatus.value.copy(
+                        state = ListenerConnectionState.RESTARTING,
+                        restartAttempt = attempt + 1,
+                        nextRetrySeconds = delaySec,
+                        lastError = error.localizedMessage
+                    )
+                    deliveredOrdersListener?.remove()
+                    deliveredOrdersListener = null
+                    deliveredOrdersRetryJob?.cancel()
+                    deliveredOrdersRetryJob = scope.launch {
+                        kotlinx.coroutines.delay(delaySec * 1000L)
+                        if (activeSessionUid == uid) {
+                            attachDeliveredOrdersListener(uid, attempt + 1)
+                        }
+                    }
+                    return@addSnapshotListener
+                }
+                if (snapshots == null) return@addSnapshotListener
+                _dispatchListenerStatus.value = DispatchListenerStatus(
+                    state = ListenerConnectionState.CONNECTED,
+                    lastUpdateMillis = System.currentTimeMillis(),
+                    restartAttempt = 0,
+                    nextRetrySeconds = 0,
+                    lastError = null
+                )
+                val orders = snapshots.documents.mapNotNull { parseOrderSafely(it, "deliveredOrders") }
+                _deliveredOrders.value = orders
+
+                for (order in orders) {
+                    val prev = knownLateTips[order.id] ?: 0.0
+                    if (deliveredListenerInitialized && order.lateTipAmount > prev) {
+                        val added = order.lateTipAmount - prev
+                        _lateTipBanner.value = LateTipBannerInfo(
+                            orderId = order.id,
+                            orderNumber = order.orderNumber,
+                            amount = added
+                        )
+                    }
+                    if (order.lateTipAmount > 0.0) {
+                        knownLateTips[order.id] = order.lateTipAmount
+                    }
+                }
+                deliveredListenerInitialized = true
+
+                checkTierProgression(uid, _rider.value?.name ?: "Rider", orders, activeUserPrefs ?: return@addSnapshotListener)
+            }
+    }
+
     private fun evaluateOffers(userPrefs: UserPreferencesRepository?) {
+        waveDelayJob?.cancel()
         val rawCandidates = _candidateOrders.value
         val currentRider = _rider.value
         val activeList = _activeOrders.value
         val riderLoc = RiderLocationTracker.currentLocation.value
-        val lastLocMs = maxOf(RiderLocationTracker.lastLocationTimeMillis.value, riderDocLocationUpdatedAtMs)
+        val lastLocMs = maxOf(RiderLocationTracker.lastLocationTimeMillis.value, _riderDocLocationUpdatedAtMs.value)
         val dispatch = _dispatchSettings.value
         val rates = _riderPaySettings.value
         val nowMs = System.currentTimeMillis()
         val declinedIds = userPrefs?.declinedOrderIds?.value ?: emptySet()
         val releasedIds = _releasedOrderIds.value
+        val leadMinutes = _scheduledReleaseLeadMinutes.value
 
-        // Log skip reasons under DISPATCH tag for every request_rider (Delivio Instant) order seen
-        rawCandidates.filter { it.isRequestRider }.forEach { order ->
-            val checkCity = if (order.cityId.isNotBlank()) order.cityId else (currentRider?.cityId ?: "")
-            val eval = com.example.data.constants.InstantDispatchEvaluator.evaluateSkipReason(
-                order = order,
-                rider = currentRider,
-                activeOrders = activeList,
-                riderLoc = riderLoc,
-                lastLocationTimeMs = lastLocMs,
-                nowMs = nowMs,
-                isPlatformServiceEnabled = isPlatformServiceOn(OrderStepConstants.SERVICE_REQUEST),
-                isCityServiceEnabled = isCityServiceOn(OrderStepConstants.SERVICE_REQUEST, checkCity),
-                dispatch = dispatch,
-                declinedIds = declinedIds,
-                releasedIds = releasedIds
-            )
-            if (!eval.isEligible && !eval.skipReason.isNullOrBlank()) {
-                android.util.Log.d(
-                    com.example.data.constants.InstantDispatchEvaluator.TAG,
-                    "Order ${order.id} skipped: ${eval.skipReason}"
-                )
-            }
-        }
-
-        if (currentRider == null || !currentRider.isOnline) {
-            _incomingOfferBundle.value = null
-            _incomingOffer.value = null
-            return
-        }
-
-        // Check active order exclusivity, pickup phase, and batch capacity
-        // (When martBatching is false, Mart active order allows no further offers,
-        //  and priorityMaxBatch applies to Food batches only.)
-        if (!BatchConstants.canReceiveMoreOffers(activeList, dispatch, currentRider.priorityRider)) {
-            _incomingOfferBundle.value = null
-            _incomingOffer.value = null
-            return
-        }
-
-        // Family IDs of active orders to prevent sibling split delivery assignment
         val activeSplitFamilyIds = activeList.mapNotNull { active ->
             val parentId = active.splitParentOrderId?.trim()
             if (!parentId.isNullOrEmpty()) {
@@ -914,14 +1116,17 @@ class RiderRepository(
             } else null
         }.toSet()
 
-        val uid = currentRider.uid
-        val leadMinutes = _scheduledReleaseLeadMinutes.value
+        val canAcceptMore = currentRider != null &&
+            currentRider.isOnline &&
+            BatchConstants.canReceiveMoreOffers(activeList, dispatch, currentRider.priorityRider)
 
-        // Filter unassigned candidate orders
-        val candidateOrders = rawCandidates.filter { order ->
-            if (order.isRequestRider) {
-                val checkCity = if (order.cityId.isNotBlank()) order.cityId else currentRider.cityId
-                return@filter com.example.data.constants.InstantDispatchEvaluator.evaluateSkipReason(
+        val evalSkips = mutableListOf<SkippedOrderRecord>()
+        val eligibleWithDist = mutableListOf<Pair<Order, Double>>()
+
+        for (order in rawCandidates) {
+            val checkCity = if (order.cityId.isNotBlank()) order.cityId else (currentRider?.cityId ?: "")
+            val eval = when {
+                order.isRequestRider -> com.example.data.constants.InstantDispatchEvaluator.evaluateSkipReason(
                     order = order,
                     rider = currentRider,
                     activeOrders = activeList,
@@ -933,119 +1138,91 @@ class RiderRepository(
                     dispatch = dispatch,
                     declinedIds = declinedIds,
                     releasedIds = releasedIds
-                ).isEligible
-            }
-
-            // Never offer again an order I released or declined
-            if (declinedIds.contains(order.id) || releasedIds.contains(order.id)) return@filter false
-
-            // Skip any whose excludeRiderIds contains my uid
-            if (order.excludeRiderIds.contains(uid)) return@filter false
-
-            // Never offer orders where fulfillment == "pickup" (filter in code)
-            if (order.isPickup) return@filter false
-
-            // Ignore any order whose scheduledFor is in the future (after release time: scheduledFor - settings/platform.scheduledReleaseLeadMinutes)
-            if (order.isFutureScheduled(leadMinutes)) return@filter false
-
-            // Sibling check: a rider who holds one split order cannot receive another sibling
-            val candidateFamilyId = if (!order.splitParentOrderId.isNullOrBlank()) {
-                order.splitParentOrderId!!.trim()
-            } else if (order.hasSplitOut) {
-                order.id
-            } else null
-
-            if (candidateFamilyId != null && activeSplitFamilyIds.contains(candidateFamilyId)) {
-                return@filter false
-            }
-
-            // Enforce active batch compatibility (when martBatching is false, rider with any active order gets no Mart offers)
-            if (!BatchConstants.isCandidateCompatibleWithActive(activeList, order, dispatch)) {
-                return@filter false
-            }
-
-            // Check if service is switched off in city or platform (missing means on)
-            val checkCity = if (order.cityId.isNotBlank()) order.cityId else currentRider.cityId
-            if (!isServiceOn(order.serviceType, checkCity)) return@filter false
-
-            if (!currentRider.activeServices.contains(order.serviceType)) return@filter false
-            if (!currentRider.allowedServices.contains(order.serviceType)) return@filter false
-            if (order.cityId.isNotEmpty() && currentRider.cityId.isNotEmpty() && order.cityId != currentRider.cityId) {
-                return@filter false
-            }
-
-            val riderVehicleType = OrderStepConstants.normalizeVehicleType(currentRider.vehicle.type)
-            val orderVehicleType = OrderStepConstants.normalizeVehicleType(order.vehicleType)
-
-            // TAXI SPECIFIC CRITERIA:
-            if (order.isTaxi) {
-                if (activeList.isNotEmpty()) return@filter false
-                if (orderVehicleType != riderVehicleType) return@filter false
-
-                val distKm = if (riderLoc != null && order.merchantLat != 0.0 && order.merchantLng != 0.0) {
-                    BatchConstants.distanceKm(riderLoc.first, riderLoc.second, order.merchantLat, order.merchantLng)
-                } else order.pickupDistanceKm
-                if (distKm > 5.0) return@filter false
-
-                return@filter order.status in listOf(
-                    OrderStepConstants.STATUS_PLACED_ORDER,
-                    OrderStepConstants.STATUS_PREPARING,
-                    OrderStepConstants.STATUS_READY
+                )
+                order.isTaxi -> com.example.data.constants.TaxiDispatchEvaluator.evaluateSkipReason(
+                    order = order,
+                    rider = currentRider,
+                    activeOrders = activeList,
+                    riderLoc = riderLoc,
+                    isPlatformServiceEnabled = isPlatformServiceOn(OrderStepConstants.SERVICE_TAXI),
+                    isCityServiceEnabled = isCityServiceOn(OrderStepConstants.SERVICE_TAXI, checkCity),
+                    dispatch = dispatch,
+                    declinedIds = declinedIds,
+                    releasedIds = releasedIds
+                )
+                else -> com.example.data.constants.GeneralDispatchEvaluator.evaluateSkipReason(
+                    order = order,
+                    rider = currentRider,
+                    activeOrders = activeList,
+                    riderLoc = riderLoc,
+                    isPlatformServiceEnabled = isPlatformServiceOn(order.serviceType),
+                    isCityServiceEnabled = isCityServiceOn(order.serviceType, checkCity),
+                    dispatch = dispatch,
+                    activeSplitFamilyIds = activeSplitFamilyIds,
+                    declinedIds = declinedIds,
+                    releasedIds = releasedIds,
+                    scheduledLeadMinutes = leadMinutes,
+                    nowMs = nowMs
                 )
             }
 
-            // Non-taxi orders: check vehicle suitability
-            val allowedForVehicle = OrderStepConstants.getServicesForVehicle(riderVehicleType)
-            if (!allowedForVehicle.contains(order.serviceType)) return@filter false
-
-            // Skip any beyond dispatch.searchRadiusKm from the pickup, UNLESS priority rider for Food/Convenience
-            val isFoodOrConv = order.serviceType.lowercase().trim() in listOf(
-                "food", "convenience", "mart", OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_MART
-            )
-            val skipRadius = currentRider.priorityRider && isFoodOrConv
-            if (!skipRadius) {
-                val distKm = if (riderLoc != null && order.merchantLat != 0.0 && order.merchantLng != 0.0) {
-                    BatchConstants.distanceKm(riderLoc.first, riderLoc.second, order.merchantLat, order.merchantLng)
-                } else order.pickupDistanceKm
-                if (distKm > dispatch.searchRadiusKm) return@filter false
-            }
-
-            // Readiness check:
-            if (order.isScheduled) {
-                order.merchantAccepted ||
-                    order.status == OrderStepConstants.STATUS_PREPARING ||
-                    order.status == OrderStepConstants.STATUS_READY ||
-                    order.status.lowercase() in listOf("preparing", "ready") ||
-                    order.status != OrderStepConstants.STATUS_PLACED_ORDER
+            if (!eval.isEligible) {
+                val reasonText = eval.skipReason ?: "ineligible"
+                android.util.Log.d(
+                    OrderDocumentParser.TAG,
+                    "${SkippedOrderRecord.labelForOrder(order)} skipped: $reasonText"
+                )
+                evalSkips.add(
+                    SkippedOrderRecord(
+                        orderId = order.id,
+                        displayLabel = SkippedOrderRecord.labelForOrder(order),
+                        reason = reasonText,
+                        timestampMillis = nowMs,
+                        isBadData = false
+                    )
+                )
+            } else if (!canAcceptMore) {
+                val reasonText = if (currentRider == null || !currentRider.isOnline) "offline" else "busy with active order"
+                evalSkips.add(
+                    SkippedOrderRecord(
+                        orderId = order.id,
+                        displayLabel = SkippedOrderRecord.labelForOrder(order),
+                        reason = reasonText,
+                        timestampMillis = nowMs,
+                        isBadData = false
+                    )
+                )
             } else {
-                when (order.serviceType.lowercase().trim()) {
-                    OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_MART, "mart" -> {
-                        val s = order.status.trim().lowercase()
-                        s in listOf("preparing", "ready") ||
-                            order.status == OrderStepConstants.STATUS_PREPARING ||
-                            order.status == OrderStepConstants.STATUS_READY ||
-                            (order.merchantAccepted && s != "placed order" && s != "placed_order")
-                    }
-                    OrderStepConstants.SERVICE_PARCEL, OrderStepConstants.SERVICE_PABILI -> {
-                        order.status == OrderStepConstants.STATUS_PLACED_ORDER
-                    }
-                    else -> false
-                }
+                eligibleWithDist.add(order to eval.distanceKm)
             }
         }
+
+        _ordersSeenCount.value = rawCandidates.size
+        _eligibleOrdersCount.value = eligibleWithDist.size
+        latestEvaluationSkips = evalSkips
+        refreshCombinedSkippedOrders()
+
+        val activeRider = currentRider
+        if (activeRider == null || !canAcceptMore) {
+            _incomingOfferBundle.value = null
+            _incomingOffer.value = null
+            return
+        }
+
+        // Nearest rider first / nearest pickup order first
+        val candidateOrders = eligibleWithDist
+            .sortedWith(compareBy<Pair<Order, Double>> { it.second }.thenBy { it.first.acceptedAtMillis })
+            .map { it.first }
 
         var selectedBundle: OfferBundle? = null
         val now = System.currentTimeMillis()
 
         if (activeList.isEmpty()) {
-            // DRIVER IS IDLE:
-            // 1. Priority orders are offered as a single booking
             val priorityCandidate = candidateOrders.firstOrNull { it.isPriority || it.badge.equals("priority", ignoreCase = true) }
             if (priorityCandidate != null) {
                 selectedBundle = buildOfferBundle(OfferType.SINGLE, listOf(priorityCandidate), riderLoc, rates, dispatch, isPriorityRider = currentRider.priorityRider)
             }
 
-            // 2. Poolable orders that are NOT holding (hold ended or Ready) are offered as a single booking
             if (selectedBundle == null) {
                 val nonHoldingPoolable = candidateOrders.firstOrNull { order ->
                     BatchConstants.isPoolable(order, dispatch) && !BatchConstants.isHolding(order, dispatch, now)
@@ -1055,8 +1232,6 @@ class RiderRepository(
                 }
             }
 
-            // 3. Holding poolable orders are offered ONLY as a "Double booking" bundle with a pairable partner
-            // (When martBatching is false, Mart orders are excluded from isPoolable & isHolding)
             if (selectedBundle == null) {
                 val holdingOrders = candidateOrders.filter { order ->
                     BatchConstants.isPoolable(order, dispatch) && BatchConstants.isHolding(order, dispatch, now)
@@ -1085,7 +1260,6 @@ class RiderRepository(
                 }
             }
 
-            // 4. Non-poolable orders (Taxi, Parcel, Pabili, Request, and Mart when martBatching is false) offered at once as single booking
             if (selectedBundle == null) {
                 val nonPoolable = candidateOrders.firstOrNull { !BatchConstants.isPoolable(it, dispatch) && !it.isPriority }
                 if (nonPoolable != null) {
@@ -1093,8 +1267,6 @@ class RiderRepository(
                 }
             }
         } else {
-            // DRIVER HAS ACTIVE BATCH AND PICKUP PHASE IS OPEN:
-            // Offer every order where canJoin(batch, order) is true as "Add to your booking"
             val joinableCandidate = candidateOrders.firstOrNull { candidate ->
                 BatchConstants.canJoin(activeList, candidate, dispatch, isPriorityRider = currentRider.priorityRider)
             }
@@ -1111,7 +1283,6 @@ class RiderRepository(
             }
         }
 
-        // Wave delay: floor(km from my position to the first pickup) * waveSeconds counted from when order/bundle became eligible
         if (selectedBundle != null) {
             val waveDelaySec = selectedBundle.waveDelaySeconds
             val elapsedSec = ((now - selectedBundle.eligibleSince) / 1000).coerceAtLeast(0)
@@ -1121,6 +1292,13 @@ class RiderRepository(
             } else {
                 _incomingOfferBundle.value = null
                 _incomingOffer.value = null
+                val remainingMs = ((waveDelaySec - elapsedSec) * 1000L + 50L).coerceAtMost(120_000L)
+                waveDelayJob = scope.launch {
+                    kotlinx.coroutines.delay(remainingMs)
+                    if (activeSessionUid != null) {
+                        evaluateOffers(activeUserPrefs)
+                    }
+                }
             }
         } else {
             _incomingOfferBundle.value = null
@@ -1150,17 +1328,14 @@ class RiderRepository(
         cal.set(Calendar.MINUTE, 0)
         cal.set(Calendar.SECOND, 0)
         cal.set(Calendar.MILLISECOND, 0)
-        val firstDayOfMonth = cal.time
+        val firstDayMs = cal.timeInMillis
 
         val monthFormat = SimpleDateFormat("yyyy-MM", Locale.US)
         val monthKey = monthFormat.format(Date())
 
         val ridesThisMonth = delivered.count { order ->
-            when (val delAt = order.deliveredAt) {
-                is com.google.firebase.Timestamp -> delAt.toDate().after(firstDayOfMonth)
-                is Date -> delAt.after(firstDayOfMonth)
-                else -> true
-            }
+            val delMs = OrderDocumentParser.parseTolerantTimeMillisOrZero(order.deliveredAt)
+            delMs <= 0L || delMs > firstDayMs
         }
 
         val configs = _tierConfigs.value
@@ -1257,8 +1432,13 @@ class RiderRepository(
             "lastSeenAt", FieldValue.serverTimestamp()
         ).addOnSuccessListener {
             if (online) {
+                val nowMs = System.currentTimeMillis()
+                _onlineSinceMillis.value = nowMs
+                activeUserPrefs?.setOnlineSinceMillis(nowMs)
                 RiderLocationService.start(context)
             } else {
+                _onlineSinceMillis.value = 0L
+                activeUserPrefs?.setOnlineSinceMillis(0L)
                 RiderLocationService.stop(context)
             }
             onSuccess()
@@ -1924,7 +2104,10 @@ class RiderRepository(
     fun logOfferOutcome(orderId: String, serviceType: String, outcome: String) {
         val uid = auth.currentUser?.uid ?: _rider.value?.uid ?: return
         val docRef = db.collection("riders").document(uid).collection("offerLog").document(orderId)
-        val timerSeconds = if (serviceType.equals(OrderStepConstants.SERVICE_REQUEST, ignoreCase = true)) {
+        val timerSeconds = if (
+            serviceType.equals(OrderStepConstants.SERVICE_REQUEST, ignoreCase = true) ||
+            serviceType.equals(OrderStepConstants.SERVICE_TAXI, ignoreCase = true)
+        ) {
             com.example.data.constants.InstantDispatchEvaluator.INSTANT_TIMER_SECONDS
         } else {
             com.example.data.constants.InstantDispatchEvaluator.DEFAULT_TIMER_SECONDS
@@ -2004,6 +2187,15 @@ class RiderRepository(
     }
 
     fun stopListening() {
+        activeSessionUid = null
+        activeOrdersRetryJob?.cancel()
+        activeOrdersRetryJob = null
+        offersRetryJob?.cancel()
+        offersRetryJob = null
+        deliveredOrdersRetryJob?.cancel()
+        deliveredOrdersRetryJob = null
+        waveDelayJob?.cancel()
+        waveDelayJob = null
         riderListener?.remove()
         activeOrdersListener?.remove()
         offersListener?.remove()
@@ -2045,6 +2237,7 @@ class RiderRepository(
         dispatchSettingsListener = null
         currentChatId = null
         activeUserPrefs = null
+        _dispatchListenerStatus.value = DispatchListenerStatus(state = ListenerConnectionState.DISCONNECTED)
     }
 
     // SUBMIT SHOP REVIEW
@@ -2641,542 +2834,38 @@ class RiderRepository(
     }
 
     // Helpers
-    private fun parseOrder(doc: DocumentSnapshot): Order? {
-        try {
-            val id = doc.id
-            val orderNumber = doc.getString("orderNumber") ?: doc.getString("orderId") ?: id.takeLast(6).uppercase()
-            val serviceType = doc.getString("serviceType") ?: OrderStepConstants.SERVICE_FOOD
-            val status = doc.getString("status") ?: OrderStepConstants.STATUS_PLACED_ORDER
-            val riderStep = doc.getString("riderStep") ?: OrderStepConstants.STEP_HEADING_TO_MERCHANT
-            val riderId = doc.getString("riderId")
-            val riderName = doc.getString("riderName")
-            val riderPhone = doc.getString("riderPhone")
-            val riderPhotoUrl = doc.getString("riderPhotoUrl")
-            val cityId = doc.getString("cityId") ?: ""
+    private fun parseOrderSafely(doc: DocumentSnapshot, sourceLabel: String = "orders"): Order? {
+        return try {
+            val data = doc.data ?: return null
+            val mId = OrderDocumentParser.safeString(data["merchantId"])
+            val sType = OrderDocumentParser.safeString(data["serviceType"], OrderStepConstants.SERVICE_FOOD)
+                .lowercase(Locale.US).trim()
+            val isNonMerchant = sType == OrderStepConstants.SERVICE_TAXI ||
+                sType == OrderStepConstants.SERVICE_PARCEL ||
+                sType == OrderStepConstants.SERVICE_PABILI
+            val cachedMerchant = if (!isNonMerchant && mId.isNotBlank()) merchantCache[mId] else null
 
-            val merchantId = doc.getString("merchantId") ?: ""
+            val order = OrderDocumentParser.parseOrderFromMap(
+                id = doc.id,
+                data = data,
+                scheduledReleaseLeadMinutes = _scheduledReleaseLeadMinutes.value,
+                fallbackMerchant = cachedMerchant
+            )
 
-            val fulfillment = doc.getString("fulfillment") ?: doc.getString("fulfillmentType") ?: "delivery"
-            val isScheduled = doc.getBoolean("isScheduled")
-                ?: (doc.getString("deliveryType")?.equals("scheduled", ignoreCase = true) == true
-                    || doc.getString("orderType")?.equals("scheduled", ignoreCase = true) == true
-                    || doc.get("scheduledFor") != null
-                    || doc.get("scheduledDeliveryAt") != null
-                    || doc.getString("scheduleDate") != null)
-            val scheduledForRaw = doc.get("scheduledFor")
-                ?: doc.get("scheduledDeliveryAt")
-                ?: doc.getString("scheduledTime")
-                ?: doc.getString("scheduleDate")
-            val scheduledDateText = formatScheduledDate(scheduledForRaw)
-            val merchantAccepted = doc.getBoolean("merchantAccepted")
-                ?: (status == OrderStepConstants.STATUS_PREPARING || status == OrderStepConstants.STATUS_READY)
-
-            val prepMinutes = doc.getLong("prepMinutes")?.toInt()
-                ?: (doc.get("prepMinutes") as? Number)?.toInt()
-                ?: doc.getLong("preparationMinutes")?.toInt()
-                ?: (doc.get("preparationMinutes") as? Number)?.toInt()
-                ?: doc.getLong("estimatedPrepTime")?.toInt()
-                ?: (doc.get("estimatedPrepTime") as? Number)?.toInt()
-                ?: doc.getLong("prepTime")?.toInt()
-                ?: (doc.get("prepTime") as? Number)?.toInt()
-                ?: 0
-            val editedAt = doc.get("editedAt") ?: doc.get("merchantEditedAt")
-
-            // 1. Pickup location: orders.pickup.lat/lng or merchant.latitude/longitude
-            val pickupMap = (doc.get("pickup") as? Map<*, *>) ?: (doc.get("merchant") as? Map<*, *>)
-            val rawMerchantLat = (pickupMap?.get("lat") as? Number)?.toDouble()
-                ?: (pickupMap?.get("latitude") as? Number)?.toDouble()
-                ?: doc.getDouble("merchantLat") ?: 0.0
-            val rawMerchantLng = (pickupMap?.get("lng") as? Number)?.toDouble()
-                ?: (pickupMap?.get("longitude") as? Number)?.toDouble()
-                ?: doc.getDouble("merchantLng") ?: 0.0
-            val rawMerchantName = sanitizeDisplayName(
-                pickupMap?.get("name")?.toString() ?: doc.getString("merchantName"),
-                ""
-            )
-            val rawSenderName = sanitizeDisplayName(
-                pickupMap?.get("senderName")?.toString() ?: doc.getString("senderName"),
-                ""
-            )
-            val rawBranchName = sanitizeDisplayName(
-                doc.getString("branchName") ?: pickupMap?.get("branchName")?.toString(),
-                ""
-            )
-            val rawBranchCode = sanitizeDisplayName(
-                doc.getString("branchCode") ?: pickupMap?.get("branchCode")?.toString(),
-                ""
-            )
-            val rawChainId = doc.getString("chainId")?.trim()?.takeIf { it.isNotBlank() }
-                ?: pickupMap?.get("chainId")?.toString()?.trim()?.takeIf { it.isNotBlank() }
-                ?: ""
-            val rawMerchantAddress = deduplicateAddress(
-                pickupMap?.get("address")?.toString()
-                    ?: doc.getString("merchantAddress") ?: doc.getString("senderAddress") ?: ""
-            )
-            val rawMerchantPhone = pickupMap?.get("phone")?.toString()
-                ?: doc.getString("merchantPhone") ?: doc.getString("senderPhone") ?: ""
-
-            val isTaxiOrder = serviceType.equals(OrderStepConstants.SERVICE_TAXI, ignoreCase = true)
-            val cachedMerchant = if (merchantId.isNotBlank() && !isTaxiOrder) merchantCache[merchantId] else null
-
-            val merchantLat = if (rawMerchantLat != 0.0) rawMerchantLat else (cachedMerchant?.get("lat") as? Double ?: 0.0)
-            val merchantLng = if (rawMerchantLng != 0.0) rawMerchantLng else (cachedMerchant?.get("lng") as? Double ?: 0.0)
-            val merchantName = when {
-                rawMerchantName.isNotBlank() && !rawMerchantName.equals("Merchant", ignoreCase = true) -> rawMerchantName
-                else -> sanitizeDisplayName(cachedMerchant?.get("name") as? String, "").ifBlank { rawMerchantName }
-            }
-            val branchName = if (rawBranchName.isNotBlank() || rawBranchCode.isNotBlank()) {
-                rawBranchName
-            } else {
-                sanitizeDisplayName(cachedMerchant?.get("branchName") as? String, "")
-            }
-            val branchCode = if (rawBranchName.isNotBlank() || rawBranchCode.isNotBlank()) {
-                rawBranchCode
-            } else {
-                sanitizeDisplayName(cachedMerchant?.get("branchCode") as? String, "")
-            }
-            val chainId = if (rawChainId.isNotBlank()) {
-                rawChainId
-            } else {
-                cachedMerchant?.get("chainId") as? String ?: ""
-            }
-            val merchantAddress = rawMerchantAddress.ifBlank {
-                deduplicateAddress(cachedMerchant?.get("address") as? String ?: "")
-            }
-            val merchantPhone = rawMerchantPhone.ifBlank { cachedMerchant?.get("phone") as? String ?: "" }
-
-            // Asynchronously fall back to merchants/{shopId} when lat/lng or outlet branch snapshots are missing
-            val needsMerchantFallback = !isTaxiOrder && merchantId.isNotBlank() && (
-                merchantLat == 0.0 ||
-                (rawBranchName.isBlank() && rawBranchCode.isBlank()) ||
-                rawMerchantName.isBlank() ||
-                rawMerchantName.equals("Merchant", ignoreCase = true)
-            )
-            if (needsMerchantFallback && cachedMerchant == null) {
-                fetchMerchantInfo(merchantId)
-            }
-
-            // 2. Dropoff location: orders.dropoff.lat/lng or customer.latitude/longitude
-            val dropoffMap = (doc.get("dropoff") as? Map<*, *>)
-                ?: (doc.get("dropOff") as? Map<*, *>)
-                ?: (doc.get("customer") as? Map<*, *>)
-            val customerLat = (dropoffMap?.get("lat") as? Number)?.toDouble()
-                ?: (dropoffMap?.get("latitude") as? Number)?.toDouble()
-                ?: doc.getDouble("customerLat") ?: 0.0
-            val customerLng = (dropoffMap?.get("lng") as? Number)?.toDouble()
-                ?: (dropoffMap?.get("longitude") as? Number)?.toDouble()
-                ?: doc.getDouble("customerLng") ?: 0.0
-            val customerId = dropoffMap?.get("customerId")?.toString()
-                ?: dropoffMap?.get("uid")?.toString()
-                ?: doc.getString("customerId") ?: ""
-            val customerName = sanitizeDisplayName(
-                dropoffMap?.get("name")?.toString()
-                    ?: doc.getString("customerName") ?: doc.getString("recipientName"),
-                "Customer"
-            )
-            val customerAddress = deduplicateAddress(
-                dropoffMap?.get("address")?.toString()
-                    ?: doc.getString("customerAddress") ?: doc.getString("recipientAddress") ?: ""
-            )
-            val customerPhone = dropoffMap?.get("phone")?.toString()
-                ?: doc.getString("customerPhone") ?: doc.getString("recipientPhone") ?: ""
-            val customerArea = deduplicateAddress(
-                dropoffMap?.get("area")?.toString()
-                    ?: doc.getString("customerArea") ?: doc.getString("recipientArea") ?: "Downtown"
-            )
-            val customerNotes = dropoffMap?.get("notes")?.toString()
-                ?: doc.getString("customerNotes") ?: ""
-
-            val itemsRaw = doc.get("items") as? List<*>
-            val items = itemsRaw?.mapNotNull { itemObj ->
-                val m = itemObj as? Map<*, *> ?: return@mapNotNull null
-                val selectionsRaw = m["selections"] ?: m["options"] ?: m["modifiers"]
-                val selectionsList = mutableListOf<String>()
-                when (selectionsRaw) {
-                    is List<*> -> {
-                        selectionsRaw.forEach { sel ->
-                            when (sel) {
-                                is String -> {
-                                    val cleaned = sel.replace("()", "").trim()
-                                    if (cleaned.isNotBlank()) selectionsList.add(cleaned)
-                                }
-                                is Map<*, *> -> {
-                                    val selName = sel["name"]?.toString()
-                                        ?: sel["title"]?.toString()
-                                        ?: sel["optionName"]?.toString()
-                                        ?: sel["value"]?.toString()
-                                        ?: ""
-                                    val cleaned = selName.replace("()", "").trim()
-                                    if (cleaned.isNotBlank()) selectionsList.add(cleaned)
-                                }
-                            }
-                        }
-                    }
-                    is Map<*, *> -> {
-                        selectionsRaw.values.forEach { v ->
-                            when (v) {
-                                is String -> {
-                                    val cleaned = v.replace("()", "").trim()
-                                    if (cleaned.isNotBlank()) selectionsList.add(cleaned)
-                                }
-                                is List<*> -> {
-                                    v.forEach { sub ->
-                                        val subStr = when (sub) {
-                                            is String -> sub
-                                            is Map<*, *> -> sub["name"]?.toString() ?: sub["title"]?.toString() ?: ""
-                                            else -> sub?.toString() ?: ""
-                                        }
-                                        val cleaned = subStr.replace("()", "").trim()
-                                        if (cleaned.isNotBlank()) selectionsList.add(cleaned)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    is String -> {
-                        if (selectionsRaw.isNotBlank()) {
-                            selectionsRaw.split(",", ";").forEach { s ->
-                                val cleaned = s.replace("()", "").trim()
-                                if (cleaned.isNotBlank()) selectionsList.add(cleaned)
-                            }
-                        }
-                    }
+            // Only fetch merchant fallback for merchant-backed services (food/convenience), never for taxi/parcel/pabili
+            if (!order.isNonMerchantService && order.merchantId.isNotBlank() && cachedMerchant == null) {
+                val needsMerchantFallback = order.merchantLat == 0.0 ||
+                    (order.branchName.isBlank() && order.branchCode.isBlank()) ||
+                    order.merchantName.isBlank() ||
+                    order.merchantName.equals("Merchant", ignoreCase = true)
+                if (needsMerchantFallback) {
+                    fetchMerchantInfo(order.merchantId)
                 }
-
-                val unitPrice = (m["unitPrice"] as? Number)?.toDouble()
-                val regularUnitPrice = (m["regularUnitPrice"] as? Number)?.toDouble()
-                val parsedPrice = unitPrice ?: (m["price"] as? Number)?.toDouble() ?: 0.0
-
-                OrderItem(
-                    name = m["name"]?.toString() ?: m["title"]?.toString() ?: "",
-                    quantity = (m["quantity"] as? Number)?.toInt() ?: 1,
-                    price = parsedPrice,
-                    specialInstructions = m["specialInstructions"]?.toString() ?: "",
-                    selections = selectionsList,
-                    variantKey = m["variantKey"]?.toString()?.trim() ?: "",
-                    variantLabel = m["variantLabel"]?.toString()?.trim() ?: "",
-                    variantImageUrl = m["variantImageUrl"]?.toString()?.trim() ?: "",
-                    unitPrice = unitPrice,
-                    regularUnitPrice = regularUnitPrice
-                )
-            } ?: emptyList()
-
-            val baseFare = doc.getDouble("baseFare") ?: 50.0
-            val distanceFare = doc.getDouble("distanceFare") ?: 30.0
-            val feesMap = doc.get("fees") as? Map<*, *>
-            val feesTip = (feesMap?.get("tip") as? Number)?.toDouble() ?: doc.getDouble("tip") ?: 0.0
-            val tip = feesTip
-            val surgeBonus = doc.getDouble("surgeBonus") ?: 0.0
-            val feesDeliveryFee = (feesMap?.get("deliveryFee") as? Number)?.toDouble() ?: doc.getDouble("deliveryFee") ?: (baseFare + distanceFare + surgeBonus)
-            val feesServiceFee = (feesMap?.get("serviceFee") as? Number)?.toDouble() ?: doc.getDouble("serviceFee") ?: 0.0
-            val feesTotal = (feesMap?.get("total") as? Number)?.toDouble()
-                ?: doc.getDouble("totalAmount")
-                ?: doc.getDouble("totalFee")
-                ?: (feesDeliveryFee + feesServiceFee + tip)
-
-            // 1. READ PAYMENT FROM THE ORDER (never default to "Paid Online")
-            // Read orders.paymentMethod, trimmed and lower-cased. "cod", "cash", "cash on delivery" = COD. "wallet" or "online" = Paid Online. If missing or unknown, show "Payment unknown - contact support"
-            val paymentMethod = doc.getString("paymentMethod")
-                ?: doc.getString("paymentType")
-                ?: ""
-            val paymentProvider = doc.getString("paymentProvider") ?: ""
-            val cashToCollect = doc.getDouble("cashToCollect")
-                ?: doc.getDouble("totalAmountToCollect")
-                ?: 0.0
-            val cashCollectAt = doc.getString("cashCollectAt") ?: ""
-            val codAmount = doc.getDouble("codAmount") ?: 0.0
-            val codCollected = doc.getDouble("codCollected") ?: 0.0
-
-            val parcelMap = doc.get("parcel") as? Map<*, *>
-            val parcelSize = parcelMap?.get("size")?.toString() ?: doc.getString("parcelSize") ?: "M"
-            val parcelWeightKg = (parcelMap?.get("weightKg") as? Number)?.toDouble() ?: doc.getDouble("parcelWeightKg") ?: 1.0
-            val parcelItemDesc = parcelMap?.get("itemDescription")?.toString() ?: doc.getString("parcelItemDescription") ?: ""
-            val parcelFragile = parcelMap?.get("fragile") as? Boolean ?: doc.getBoolean("parcelFragile") ?: false
-            val parcelFeePayer = parcelMap?.get("feePayer")?.toString() ?: doc.getString("parcelFeePayer") ?: "SENDER"
-
-            val pabiliMap = doc.get("pabili") as? Map<*, *>
-            val pabiliItemsRaw = pabiliMap?.get("items") as? List<*> ?: doc.get("pabiliItems") as? List<*>
-            val pabiliItems = pabiliItemsRaw?.mapNotNull { itm ->
-                val m = itm as? Map<*, *> ?: return@mapNotNull null
-                PabiliItem(
-                    product = m["product"]?.toString() ?: m["name"]?.toString() ?: "",
-                    quantity = (m["quantity"] as? Number)?.toInt() ?: 1,
-                    estimatedPrice = (m["estimatedPrice"] as? Number)?.toDouble() ?: 0.0
-                )
-            } ?: emptyList()
-            val pabiliEstimatedTotal = (pabiliMap?.get("estimatedTotal") as? Number)?.toDouble() ?: doc.getDouble("pabiliEstimatedTotal") ?: 0.0
-            val pabiliBudget = (pabiliMap?.get("budget") as? Number)?.toDouble() ?: doc.getDouble("pabiliBudget") ?: 0.0
-            val finalReceiptTotal = doc.getDouble("finalReceiptTotal") ?: 0.0
-
-            val riderReqStatus = (doc.get("riderRequest") as? Map<*, *>)?.get("status")?.toString() ?: doc.getString("riderRequestStatus") ?: ""
-
-            val vehicleType = doc.getString("vehicleType") ?: "motorcycle"
-            val stopsRaw = doc.get("stops") as? List<*>
-            val taxiStops = stopsRaw?.mapIndexedNotNull { index, obj ->
-                val m = obj as? Map<*, *> ?: return@mapIndexedNotNull null
-                TaxiStop(
-                    stopNumber = (m["stopNumber"] as? Number)?.toInt() ?: (index + 3),
-                    address = deduplicateAddress(m["address"]?.toString() ?: ""),
-                    area = deduplicateAddress(m["area"]?.toString() ?: ""),
-                    lat = (m["lat"] as? Number)?.toDouble() ?: 0.0,
-                    lng = (m["lng"] as? Number)?.toDouble() ?: 0.0
-                )
-            } ?: emptyList()
-            val completedStopsRaw = (doc.get("completedStops") as? List<*>)?.mapNotNull { (it as? Number)?.toInt() } ?: emptyList()
-
-            val lateTipMap = doc.get("lateTip") as? Map<*, *>
-            val lateTipAmount = (lateTipMap?.get("amount") as? Number)?.toDouble()
-                ?: doc.getDouble("lateTip.amount")
-                ?: doc.getDouble("lateTipAmount")
-                ?: 0.0
-            val lateTipAt = lateTipMap?.get("createdAt") ?: lateTipMap?.get("at") ?: doc.get("lateTipAt")
-
-            val badge = doc.getString("badge") ?: "Standard"
-            val splitParentOrderId = doc.getString("splitParentOrderId")
-            val isSplitChild = doc.getBoolean("isSplitChild")
-                ?: (badge.equals("split", ignoreCase = true) || !splitParentOrderId.isNullOrBlank())
-            val finalBadge = if (isSplitChild) "SPLIT" else badge
-            val splitOutRaw = doc.get("splitOut") ?: doc.get("splitItems")
-            val splitOutInfo = when (splitOutRaw) {
-                is Map<*, *> -> {
-                    val count = (splitOutRaw["count"] as? Number)?.toInt() ?: 0
-                    val rawChildren = (splitOutRaw["children"] as? List<*>) ?: emptyList<Any>()
-                    val children = rawChildren.mapNotNull { child ->
-                        val childMap = child as? Map<*, *> ?: return@mapNotNull null
-                        val ordId = childMap["orderId"]?.toString() ?: ""
-                        val rawItems = (childMap["items"] as? List<*>)?.mapNotNull { it?.toString() } ?: emptyList()
-                        val seq = (childMap["seq"] as? Number)?.toInt() ?: 1
-                        SplitChildItem(orderId = ordId, items = rawItems, seq = seq)
-                    }
-                    SplitOutInfo(
-                        count = count,
-                        children = children,
-                        at = splitOutRaw["at"],
-                        by = splitOutRaw["by"]?.toString() ?: ""
-                    )
-                }
-                else -> null
             }
-            val splitOut = when (splitOutRaw) {
-                is Map<*, *> -> splitOutInfo?.children?.flatMap { it.items } ?: emptyList()
-                is List<*> -> splitOutRaw.mapNotNull { it?.toString() }
-                is String -> if (splitOutRaw.isNotBlank()) listOf(splitOutRaw) else emptyList()
-                else -> emptyList()
-            }
-            val isPriority = doc.getBoolean("isPriority")
-                ?: (badge.equals("priority", ignoreCase = true) || doc.getString("priority")?.equals("high", ignoreCase = true) == true)
-            val dispatchDocMap = doc.get("dispatch") as? Map<*, *>
-            val isPoolable = !isSplitChild && ((dispatchDocMap?.get("poolable") as? Boolean)
-                ?: doc.getBoolean("poolable")
-                ?: doc.getBoolean("dispatch.poolable")
-                ?: (!isPriority && serviceType.lowercase() in listOf("food", "convenience", OrderStepConstants.SERVICE_FOOD)))
-            val targetRiderId = (dispatchDocMap?.get("targetRiderId")
-                ?: dispatchDocMap?.get("offeredRiderId")
-                ?: doc.getString("targetRiderId")
-                ?: doc.getString("offeredRiderId"))?.toString()?.trim() ?: ""
-            val maxBatch = (dispatchDocMap?.get("maxBatch") as? Number)?.toInt()
-                ?: doc.getLong("maxBatch")?.toInt()
-                ?: 2
-            val holdMinutesOrder = (dispatchDocMap?.get("holdMinutes") as? Number)?.toDouble()
-                ?: doc.getDouble("holdMinutes")
-                ?: (doc.get("holdMinutes") as? Number)?.toDouble()
-                ?: (if (finalBadge.equals("saver", ignoreCase = true) || finalBadge.equals("standard", ignoreCase = true)) 5.0 else 0.0)
-            val endsWhenReadyOrder = (dispatchDocMap?.get("endsWhenReady") as? Boolean)
-                ?: doc.getBoolean("endsWhenReady")
-                ?: doc.getBoolean("dispatch.endsWhenReady")
-            val specialExtra = ((dispatchDocMap?.get("specialRadius") as? Map<*, *>)?.get("riderExtra") as? Number)?.toDouble()
-                ?: doc.getDouble("specialRadiusExtra")
-                ?: 0.0
-
-            val acceptedAtRaw = doc.get("acceptedAt") ?: doc.get("placedAt") ?: doc.get("createdAt")
-            val acceptedAtMillis = when (acceptedAtRaw) {
-                is com.google.firebase.Timestamp -> acceptedAtRaw.toDate().time
-                is Date -> acceptedAtRaw.time
-                is Number -> acceptedAtRaw.toLong()
-                else -> System.currentTimeMillis()
-            }
-
-            val leadMinutes = _scheduledReleaseLeadMinutes.value
-            val schedMillis = when (scheduledForRaw) {
-                is com.google.firebase.Timestamp -> scheduledForRaw.toDate().time
-                is Date -> scheduledForRaw.time
-                is Number -> {
-                    val num = scheduledForRaw.toLong()
-                    if (num < 1000000000000L) num * 1000L else num
-                }
-                is String -> {
-                    val trimmed = scheduledForRaw.trim()
-                    val num = trimmed.toLongOrNull()
-                    if (num != null) {
-                        if (num < 1000000000000L) num * 1000L else num
-                    } else {
-                        val patterns = listOf(
-                            "yyyy-MM-dd'T'HH:mm:ss",
-                            "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
-                            "yyyy-MM-dd HH:mm:ss",
-                            "yyyy-MM-dd",
-                            "MMM d, yyyy h:mm a",
-                            "MMM d, h:mm a"
-                        )
-                        var parsed = 0L
-                        for (pat in patterns) {
-                            try {
-                                val sdf = SimpleDateFormat(pat, Locale.US)
-                                val d = sdf.parse(trimmed)
-                                if (d != null) {
-                                    parsed = d.time
-                                    break
-                                }
-                            } catch (_: Exception) {}
-                        }
-                        parsed
-                    }
-                }
-                else -> 0L
-            }
-            val releaseTimeMillis = if (isScheduled && schedMillis > 0L) {
-                (schedMillis - (leadMinutes * 60 * 1000).toLong()).coerceAtLeast(0L)
-            } else 0L
-
-            val baseHoldStartMillis = if (isScheduled && releaseTimeMillis > 0L) {
-                releaseTimeMillis
-            } else {
-                acceptedAtMillis
-            }
-
-            val explicitHoldUntil = doc.get("holdUntil") ?: doc.get("holdUntilMillis")
-            val explicitHoldUntilMillis = when (explicitHoldUntil) {
-                is com.google.firebase.Timestamp -> explicitHoldUntil.toDate().time
-                is Date -> explicitHoldUntil.time
-                is Number -> explicitHoldUntil.toLong()
-                else -> 0L
-            }
-            val holdUntilMillis = when {
-                explicitHoldUntilMillis > 0L && !isScheduled -> explicitHoldUntilMillis
-                holdMinutesOrder > 0.0 && baseHoldStartMillis > 0L -> baseHoldStartMillis + (holdMinutesOrder * 60 * 1000).toLong()
-                holdMinutesOrder > 0.0 -> System.currentTimeMillis() + (holdMinutesOrder * 60 * 1000).toLong()
-                else -> 0L
-            }
-
-            val excludeRiderIds = (doc.get("excludeRiderIds") as? List<*>)?.mapNotNull { it?.toString() } ?: emptyList()
-            val riderFeeFixed = doc.getDouble("riderFeeFixed") ?: (doc.get("riderFeeFixed") as? Number)?.toDouble()
-            val riderFeeEstimate = doc.getDouble("riderFeeEstimate") ?: 0.0
-            val batchId = doc.getString("batchId")
-            val batchIndex = doc.getLong("batchIndex")?.toInt() ?: 1
-
-            val earningMap = doc.get("riderEarning") as? Map<*, *>
-            val riderEarning = if (earningMap != null) {
-                RiderEarning(
-                    bookingFee = (earningMap["bookingFee"] as? Number)?.toDouble() ?: 0.0,
-                    pickupFee = (earningMap["pickupFee"] as? Number)?.toDouble() ?: 0.0,
-                    extra = (earningMap["extra"] as? Number)?.toDouble() ?: 0.0,
-                    tip = (earningMap["tip"] as? Number)?.toDouble() ?: 0.0,
-                    total = (earningMap["total"] as? Number)?.toDouble() ?: 0.0,
-                    rank = (earningMap["rank"] as? Number)?.toInt() ?: 1,
-                    batchId = earningMap["batchId"]?.toString() ?: ""
-                )
-            } else null
-
-            return Order(
-                id = id,
-                orderNumber = orderNumber,
-                serviceType = serviceType,
-                status = status,
-                riderStep = riderStep,
-                riderId = riderId,
-                riderName = riderName,
-                riderPhone = riderPhone,
-                riderPhotoUrl = riderPhotoUrl,
-                cityId = cityId,
-                merchantId = merchantId,
-                vehicleType = vehicleType,
-                stops = taxiStops,
-                completedStops = completedStopsRaw,
-                fulfillment = fulfillment,
-                isScheduled = isScheduled,
-                scheduledFor = scheduledForRaw,
-                scheduledDateText = scheduledDateText,
-                merchantAccepted = merchantAccepted,
-                prepMinutes = prepMinutes,
-                editedAt = editedAt,
-                merchantName = merchantName,
-                senderName = rawSenderName,
-                branchName = branchName,
-                branchCode = branchCode,
-                chainId = chainId,
-                merchantAddress = merchantAddress,
-                merchantPhone = merchantPhone,
-                merchantLat = merchantLat,
-                merchantLng = merchantLng,
-                customerId = customerId,
-                customerName = customerName,
-                customerPhone = customerPhone,
-                customerAddress = customerAddress,
-                customerArea = customerArea,
-                customerLat = customerLat,
-                customerLng = customerLng,
-                customerNotes = customerNotes,
-                items = items,
-                baseFare = baseFare,
-                distanceFare = distanceFare,
-                tip = tip,
-                surgeBonus = surgeBonus,
-                deliveryFee = feesDeliveryFee,
-                paymentMethod = paymentMethod,
-                paymentProvider = paymentProvider,
-                cashToCollect = if (isSplitChild) 0.0 else cashToCollect,
-                cashCollectAt = cashCollectAt,
-                codAmount = if (isSplitChild) 0.0 else codAmount,
-                feesTotal = feesTotal,
-                feesDeliveryFee = feesDeliveryFee,
-                feesServiceFee = feesServiceFee,
-                codCollected = codCollected,
-                parcelSize = parcelSize,
-                parcelWeightKg = parcelWeightKg,
-                parcelItemDescription = parcelItemDesc,
-                parcelFragile = parcelFragile,
-                parcelFeePayer = parcelFeePayer,
-                pabiliItems = pabiliItems,
-                pabiliEstimatedTotal = pabiliEstimatedTotal,
-                pabiliBudget = pabiliBudget,
-                finalReceiptTotal = finalReceiptTotal,
-                riderRequestStatus = riderReqStatus,
-                pickupDistanceKm = doc.getDouble("pickupDistanceKm") ?: 1.5,
-                deliveryDistanceKm = doc.getDouble("deliveryDistanceKm") ?: 3.2,
-                placedAt = doc.getString("placedAt") ?: "Recently",
-                pickedUpAt = doc.get("pickedUpAt"),
-                arrivedMerchantAt = doc.get("arrivedMerchantAt"),
-                arrivedCustomerAt = doc.get("arrivedCustomerAt"),
-                deliveredAt = doc.get("deliveredAt"),
-                updatedAt = doc.get("updatedAt") ?: doc.get("statusUpdatedAt"),
-                statusHistory = (doc.get("statusHistory") as? List<*>)?.mapNotNull { it as? Map<String, Any?> } ?: emptyList(),
-                releaseReason = doc.getString("releaseReason"),
-                lateTipAmount = lateTipAmount,
-                lateTipAt = lateTipAt,
-                batchId = batchId,
-                batchIndex = batchIndex,
-                riderFeeEstimate = riderFeeEstimate,
-                riderFeeFixed = riderFeeFixed,
-                badge = finalBadge,
-                isPriority = isPriority,
-                isPoolable = isPoolable,
-                maxBatch = maxBatch,
-                holdMinutes = holdMinutesOrder,
-                acceptedAtMillis = baseHoldStartMillis,
-                holdUntilMillis = holdUntilMillis,
-                endsWhenReady = endsWhenReadyOrder,
-                specialRadiusExtra = specialExtra,
-                excludeRiderIds = excludeRiderIds,
-                targetRiderId = targetRiderId,
-                riderEarning = riderEarning,
-                splitOut = splitOut,
-                splitOutInfo = splitOutInfo,
-                splitParentOrderId = splitParentOrderId,
-                isSplitChild = isSplitChild
-            )
-        } catch (e: Exception) {
-            com.example.util.CrashReportStore.logNonFatalParseError(appContext, doc.reference.path, e)
-            return null
+            order
+        } catch (t: Throwable) {
+            recordBadOrderDocument(doc, sourceLabel, t)
+            null
         }
     }
 
@@ -3276,7 +2965,7 @@ class RiderRepository(
         val mPhone = (data["phone"] as? String).orEmpty()
 
         fun mergeOrder(o: Order): Order {
-            if (o.merchantId != merchantId || o.isTaxi) return o
+            if (o.merchantId != merchantId || o.isNonMerchantService) return o
             val useFallbackBranch = o.branchName.isBlank() && o.branchCode.isBlank()
             return o.copy(
                 merchantLat = if (o.merchantLat == 0.0 && mLat != 0.0) mLat else o.merchantLat,
@@ -3291,24 +2980,24 @@ class RiderRepository(
         }
 
         val currentActive = _activeOrders.value
-        if (currentActive.any { it.merchantId == merchantId && !it.isTaxi }) {
+        if (currentActive.any { it.merchantId == merchantId && !it.isNonMerchantService }) {
             _activeOrders.value = currentActive.map { mergeOrder(it) }
         }
 
         val currentDelivered = _deliveredOrders.value
-        if (currentDelivered.any { it.merchantId == merchantId && !it.isTaxi }) {
+        if (currentDelivered.any { it.merchantId == merchantId && !it.isNonMerchantService }) {
             _deliveredOrders.value = currentDelivered.map { mergeOrder(it) }
         }
 
         _incomingOfferBundle.value?.let { bundle ->
-            if (bundle.orders.any { it.merchantId == merchantId && !it.isTaxi }) {
+            if (bundle.orders.any { it.merchantId == merchantId && !it.isNonMerchantService }) {
                 val updatedOrders = bundle.orders.map { mergeOrder(it) }
                 _incomingOfferBundle.value = bundle.copy(orders = updatedOrders)
                 _incomingOffer.value = updatedOrders.firstOrNull()
             }
         }
         _incomingOffer.value?.let { offer ->
-            if (offer.merchantId == merchantId && !offer.isTaxi && _incomingOfferBundle.value == null) {
+            if (offer.merchantId == merchantId && !offer.isNonMerchantService && _incomingOfferBundle.value == null) {
                 _incomingOffer.value = mergeOrder(offer)
             }
         }

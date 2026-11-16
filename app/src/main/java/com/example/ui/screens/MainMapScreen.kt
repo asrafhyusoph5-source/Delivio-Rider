@@ -94,7 +94,22 @@ fun MainMapScreen(
     val documentExpiryAlerts by viewModel.documentExpiryAlerts.collectAsState()
     val activeChatOrder by viewModel.activeChatOrder.collectAsState()
     val activeChatMessages by viewModel.activeChatMessages.collectAsState()
+    val onlineSinceMillis by viewModel.onlineSinceMillis.collectAsState()
+    val lastLocationMillis by viewModel.lastLocationTimeMillis.collectAsState()
+    val enabledDispatchServices by viewModel.enabledDispatchServices.collectAsState()
+    val dispatchListenerStatus by viewModel.dispatchListenerStatus.collectAsState()
+    val ordersSeenCount by viewModel.ordersSeenCount.collectAsState()
+    val badDataSkippedCount by viewModel.badDataSkippedCount.collectAsState()
+    val eligibleOrdersCount by viewModel.eligibleOrdersCount.collectAsState()
+    val skippedOrderRecords by viewModel.skippedOrderRecords.collectAsState()
     var showHeadsetMenuDialog by remember { mutableStateOf(false) }
+    var showDispatchStatusSheet by remember { mutableStateOf(false) }
+
+    LaunchedEffect(isOnline) {
+        if (!isOnline) {
+            showDispatchStatusSheet = false
+        }
+    }
 
     val riderLat = liveLoc?.first ?: 9.7392
     val riderLng = liveLoc?.second ?: 118.7353
@@ -354,7 +369,13 @@ fun MainMapScreen(
 
                         OnlineOfflinePill(
                             isOnline = isOnline,
-                            onClick = { viewModel.toggleOnline(context) }
+                            onClick = {
+                                if (isOnline) {
+                                    showDispatchStatusSheet = true
+                                } else {
+                                    viewModel.toggleOnline(context)
+                                }
+                            }
                         )
 
                         Box(contentAlignment = Alignment.TopEnd) {
@@ -583,7 +604,10 @@ fun MainMapScreen(
             } else if (incomingOffer != null) {
                 val offer = incomingOffer!!
                 val fallbackBundle = remember(offer.id) {
-                    val timerSecs = if (offer.serviceType.equals(OrderStepConstants.SERVICE_REQUEST, ignoreCase = true)) 20 else 30
+                    val timerSecs = if (
+                        offer.serviceType.equals(OrderStepConstants.SERVICE_REQUEST, ignoreCase = true) ||
+                        offer.isTaxi
+                    ) 20 else 30
                     OfferBundle(
                         id = offer.id,
                         type = OfferType.SINGLE,
@@ -741,6 +765,27 @@ fun MainMapScreen(
                         }
                     },
                     onDismiss = { showHeadsetMenuDialog = false }
+                )
+            }
+
+            // Dispatch Status Bottom Sheet (when tapping Online pill)
+            if (showDispatchStatusSheet && isOnline) {
+                DispatchStatusSheet(
+                    onlineSinceMillis = onlineSinceMillis,
+                    lastLocationMillis = lastLocationMillis,
+                    enabledServices = enabledDispatchServices,
+                    vehicleType = rider?.vehicle?.type ?: OrderStepConstants.VEHICLE_MOTORCYCLE,
+                    listenerStatus = dispatchListenerStatus,
+                    ordersSeenCount = ordersSeenCount,
+                    badDataSkippedCount = badDataSkippedCount,
+                    eligibleOrdersCount = eligibleOrdersCount,
+                    skippedOrders = skippedOrderRecords,
+                    hasActiveOrders = activeOrders.isNotEmpty(),
+                    onGoOffline = {
+                        showDispatchStatusSheet = false
+                        viewModel.toggleOnline(context)
+                    },
+                    onDismiss = { showDispatchStatusSheet = false }
                 )
             }
         }

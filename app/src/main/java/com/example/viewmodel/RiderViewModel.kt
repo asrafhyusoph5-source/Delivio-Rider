@@ -103,8 +103,48 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     val newlyReachedTier = riderRepository.newlyReachedTier
     val listenerError = riderRepository.listenerError
     val currentLocation = RiderLocationTracker.currentLocation
+    val lastLocationTimeMillis: StateFlow<Long> = combine(
+        RiderLocationTracker.lastLocationTimeMillis,
+        riderRepository.riderDocLocationUpdatedAtMs
+    ) { trackerMs, docMs ->
+        maxOf(trackerMs, docMs)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, 0L)
     val heading: StateFlow<Float> = RiderLocationTracker.heading
     val speedKmh: StateFlow<Int> = RiderLocationTracker.speedKmh
+
+    // Dispatch Status Sheet flows
+    val onlineSinceMillis: StateFlow<Long> = riderRepository.onlineSinceMillis
+    val dispatchListenerStatus: StateFlow<DispatchListenerStatus> = riderRepository.dispatchListenerStatus
+    val ordersSeenCount: StateFlow<Int> = riderRepository.ordersSeenCount
+    val badDataSkippedCount: StateFlow<Int> = riderRepository.badDataSkippedCount
+    val eligibleOrdersCount: StateFlow<Int> = riderRepository.eligibleOrdersCount
+    val skippedOrderRecords: StateFlow<List<SkippedOrderRecord>> = riderRepository.skippedOrderRecords
+
+    val enabledDispatchServices: StateFlow<List<String>> = combine(
+        rider,
+        riderRepository.platformServices,
+        riderRepository.cityServices
+    ) { currentRider, platformSvcs, citySvcs ->
+        if (currentRider == null) {
+            emptyList()
+        } else {
+            val riderVeh = OrderStepConstants.normalizeVehicleType(currentRider.vehicle.type)
+            val vehicleAllowed = OrderStepConstants.getServicesForVehicle(riderVeh)
+                .map { it.lowercase().trim() }
+                .toSet()
+            OrderStepConstants.SERVICE_DEFINITIONS.mapNotNull { def ->
+                val key = def.key.lowercase().trim()
+                val riderAllowed = currentRider.allowedServices.any { it.lowercase().trim() == key }
+                val riderActive = currentRider.activeServices.any { it.lowercase().trim() == key }
+                val platformOn = platformSvcs[key] != false
+                val cityOn = citySvcs[key] != false
+                val vehicleOk = key in vehicleAllowed
+                if (riderAllowed && riderActive && platformOn && cityOn && vehicleOk) {
+                    def.displayName
+                } else null
+            }
+        }
+    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     // Customer Order Chat
     val chatThreads = riderRepository.chatThreads
@@ -265,14 +305,11 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         cal.set(java.util.Calendar.MINUTE, 0)
         cal.set(java.util.Calendar.SECOND, 0)
         cal.set(java.util.Calendar.MILLISECOND, 0)
-        val firstDayOfMonth = cal.time
+        val firstDayMs = cal.timeInMillis
 
         val ridesThisMonth = delivered.count { order ->
-            when (val delAt = order.deliveredAt) {
-                is com.google.firebase.Timestamp -> delAt.toDate().after(firstDayOfMonth)
-                is java.util.Date -> delAt.after(firstDayOfMonth)
-                else -> true
-            }
+            val delMs = OrderDocumentParser.parseTolerantTimeMillisOrZero(order.deliveredAt)
+            delMs <= 0L || delMs > firstDayMs
         }
 
         val currentTier = when {
