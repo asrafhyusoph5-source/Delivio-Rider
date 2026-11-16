@@ -318,7 +318,93 @@ class OrderDispatchRobolectricTest {
     }
 
     @Test
-    fun `dispatch status sheet renders all telemetry counts and skip reasons cleanly`() {
+    fun `taxi visibility trims and lowercases vehicleType and checks allowedServices contains taxi`() {
+        val dispatch = DispatchSettings(taxiSearchRadiusKm = 5.0)
+        val riderLoc = Pair(9.7392, 118.7353)
+        // Rider has mixed-case/whitespace allowedServices and vehicleType, and activeServices does NOT include taxi
+        val rider = Rider(
+            uid = "r_taxi_1",
+            isOnline = true,
+            status = "active",
+            cityId = "ppc",
+            vehicle = Vehicle(type = "  Car4  "),
+            allowedServices = listOf("food", " Taxi "),
+            activeServices = listOf("food")
+        )
+        val matchingTaxi = Order(
+            id = "tx_case",
+            orderNumber = "TX77",
+            serviceType = " Taxi ",
+            status = OrderStepConstants.REQ_SEARCHING,
+            vehicleType = "CAR4 ",
+            cityId = "ppc",
+            pickupDistanceKm = 2.0
+        )
+
+        val result = TaxiDispatchEvaluator.evaluateSkipReason(
+            order = matchingTaxi,
+            rider = rider,
+            activeOrders = emptyList(),
+            riderLoc = riderLoc,
+            isPlatformServiceEnabled = true,
+            isCityServiceEnabled = true,
+            dispatch = dispatch
+        )
+        assertTrue("Expected trimmed/lowercased vehicleType and allowedServices taxi to match: ${result.skipReason}", result.isEligible)
+
+        // Custom / non-canonical vehicle type like "sedan" vs "motorcycle" must NOT match
+        val motoRider = rider.copy(vehicle = Vehicle(type = "motorcycle"))
+        val sedanOrder = matchingTaxi.copy(vehicleType = "sedan")
+        val sedanSkip = TaxiDispatchEvaluator.evaluateSkipReason(
+            order = sedanOrder,
+            rider = motoRider,
+            activeOrders = emptyList(),
+            riderLoc = riderLoc,
+            isPlatformServiceEnabled = true,
+            isCityServiceEnabled = true,
+            dispatch = dispatch
+        )
+        assertFalse(sedanSkip.isEligible)
+        assertEquals("vehicle mismatch (order wants sedan)", sedanSkip.skipReason)
+
+        // Diagnostics checks all 7 required conditions with PASS / FAIL accurately
+        val diag = TaxiDispatchEvaluator.diagnoseTaxiOrder(
+            order = sedanOrder.copy(
+                cityId = "ppc",
+                pickupDistanceKm = 6.2,
+                excludeRiderIds = listOf("r_taxi_1")
+            ),
+            rider = motoRider.copy(
+                isOnline = false,
+                allowedServices = listOf("food")
+            ),
+            activeOrders = listOf(Order(id = "active_1")),
+            riderLoc = null,
+            isPlatformServiceEnabled = true,
+            isCityServiceEnabled = false,
+            dispatch = dispatch
+        )
+        assertEquals(
+            listOf("allowedServices", "vehicle match", "city service", "online", "busy", "distance", "excluded list"),
+            diag.conditions.map { it.label }
+        )
+        assertTrue(diag.conditions.all { !it.passed })
+
+        val passingDiag = TaxiDispatchEvaluator.diagnoseTaxiOrder(
+            order = matchingTaxi,
+            rider = rider,
+            activeOrders = emptyList(),
+            riderLoc = riderLoc,
+            isPlatformServiceEnabled = true,
+            isCityServiceEnabled = true,
+            dispatch = dispatch
+        )
+        assertEquals(7, passingDiag.conditions.size)
+        assertTrue(passingDiag.conditions.all { it.passed })
+    }
+
+    @Test
+    fun `dispatch status sheet renders all telemetry counts, last taxi 7 conditions with PASS or FAIL, and skip reasons`() {
         var offlineClicked = false
         var closedClicked = false
         val now = 1_710_000_600_000L
@@ -328,6 +414,30 @@ class OrderDispatchRobolectricTest {
             SkippedOrderRecord("ord_2", "Taxi", "vehicle mismatch (order wants motorcycle)"),
             SkippedOrderRecord("ord_3", "Taxi", "service off in city"),
             SkippedOrderRecord("ord_bad", "Order #B99", "bad data (Wrong date type)", isBadData = true)
+        )
+
+        val taxiDiag = TaxiDispatchEvaluator.diagnoseTaxiOrder(
+            order = Order(
+                id = "tx_diag_1",
+                orderNumber = "TX88",
+                serviceType = OrderStepConstants.SERVICE_TAXI,
+                vehicleType = "car4",
+                cityId = "ppc",
+                pickupDistanceKm = 6.4
+            ),
+            rider = Rider(
+                uid = "r_car",
+                isOnline = true,
+                status = "active",
+                cityId = "ppc",
+                vehicle = Vehicle(type = "motorcycle"),
+                allowedServices = listOf("food", "taxi")
+            ),
+            activeOrders = emptyList(),
+            riderLoc = null,
+            isPlatformServiceEnabled = true,
+            isCityServiceEnabled = true,
+            dispatch = DispatchSettings(taxiSearchRadiusKm = 5.0)
         )
 
         composeRule.setContent {
@@ -345,12 +455,14 @@ class OrderDispatchRobolectricTest {
                     badDataSkippedCount = 1,
                     eligibleOrdersCount = 2,
                     skippedOrders = skips,
+                    lastTaxiDiagnostics = taxiDiag,
                     hasActiveOrders = false,
                     onGoOffline = { offlineClicked = true },
                     onDismiss = { closedClicked = true }
                 )
             }
         }
+        composeRule.waitForIdle()
 
         composeRule.onNodeWithText("Dispatch status").assertIsDisplayed()
         composeRule.onNodeWithText("4 Seater Car").assertIsDisplayed()
@@ -358,6 +470,16 @@ class OrderDispatchRobolectricTest {
         composeRule.onNodeWithTag("dispatch_count_seen").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag("dispatch_count_bad_data").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag("dispatch_count_eligible").performScrollTo().assertIsDisplayed()
+
+        composeRule.onNodeWithText("Last taxi order seen").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("taxi_cond_allowedServices").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("taxi_cond_vehicle match").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("taxi_cond_city service").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("taxi_cond_online").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("taxi_cond_busy").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("taxi_cond_distance").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("taxi_cond_excluded list").performScrollTo().assertIsDisplayed()
+
         composeRule.onNodeWithText("Order #R2504: outside radius (6.1 km, limit 5)").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Taxi: vehicle mismatch (order wants motorcycle)").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Taxi: service off in city").performScrollTo().assertIsDisplayed()

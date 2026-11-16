@@ -102,6 +102,7 @@ fun MainMapScreen(
     val badDataSkippedCount by viewModel.badDataSkippedCount.collectAsState()
     val eligibleOrdersCount by viewModel.eligibleOrdersCount.collectAsState()
     val skippedOrderRecords by viewModel.skippedOrderRecords.collectAsState()
+    val lastTaxiDiagnostics by viewModel.lastTaxiDiagnostics.collectAsState()
     var showHeadsetMenuDialog by remember { mutableStateOf(false) }
     var showDispatchStatusSheet by remember { mutableStateOf(false) }
 
@@ -780,6 +781,7 @@ fun MainMapScreen(
                     badDataSkippedCount = badDataSkippedCount,
                     eligibleOrdersCount = eligibleOrdersCount,
                     skippedOrders = skippedOrderRecords,
+                    lastTaxiDiagnostics = lastTaxiDiagnostics,
                     hasActiveOrders = activeOrders.isNotEmpty(),
                     onGoOffline = {
                         showDispatchStatusSheet = false

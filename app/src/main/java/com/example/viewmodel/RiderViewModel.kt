@@ -119,6 +119,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     val badDataSkippedCount: StateFlow<Int> = riderRepository.badDataSkippedCount
     val eligibleOrdersCount: StateFlow<Int> = riderRepository.eligibleOrdersCount
     val skippedOrderRecords: StateFlow<List<SkippedOrderRecord>> = riderRepository.skippedOrderRecords
+    val lastTaxiDiagnostics: StateFlow<TaxiOrderDiagnostics?> = riderRepository.lastTaxiDiagnostics
 
     val enabledDispatchServices: StateFlow<List<String>> = combine(
         rider,
@@ -557,7 +558,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
     fun getServiceLockReason(serviceType: String): String? {
         val currentRider = rider.value
-        val isAllowed = currentRider?.allowedServices?.contains(serviceType) ?: true
+        val normService = serviceType.trim().lowercase(java.util.Locale.US)
+        val isAllowed = currentRider?.allowedServices?.any { it.trim().lowercase(java.util.Locale.US) == normService } ?: true
         val isPlatformOn = isPlatformServiceOn(serviceType)
         val isCityOn = isCityServiceOn(serviceType)
         return OrderStepConstants.getServiceLockReason(

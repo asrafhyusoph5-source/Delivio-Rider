@@ -115,6 +115,7 @@ fun DispatchStatusSheet(
     badDataSkippedCount: Int,
     eligibleOrdersCount: Int,
     skippedOrders: List<SkippedOrderRecord>,
+    lastTaxiDiagnostics: com.example.data.models.TaxiOrderDiagnostics? = null,
     hasActiveOrders: Boolean,
     onGoOffline: () -> Unit,
     onDismiss: () -> Unit
@@ -134,6 +135,7 @@ fun DispatchStatusSheet(
             badDataSkippedCount = badDataSkippedCount,
             eligibleOrdersCount = eligibleOrdersCount,
             skippedOrders = skippedOrders,
+            lastTaxiDiagnostics = lastTaxiDiagnostics,
             hasActiveOrders = hasActiveOrders,
             onGoOffline = onGoOffline,
             onDismiss = onDismiss
@@ -152,6 +154,7 @@ fun DispatchStatusSheetContent(
     badDataSkippedCount: Int,
     eligibleOrdersCount: Int,
     skippedOrders: List<SkippedOrderRecord>,
+    lastTaxiDiagnostics: com.example.data.models.TaxiOrderDiagnostics? = null,
     hasActiveOrders: Boolean,
     onGoOffline: () -> Unit,
     onDismiss: () -> Unit,
@@ -314,6 +317,119 @@ fun DispatchStatusSheetContent(
                     .weight(1f)
                     .testTag("dispatch_count_eligible")
             )
+        }
+
+        // Last Taxi Order Seen Diagnostics
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Last taxi order seen",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                if (lastTaxiDiagnostics != null) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = DelivioYellow.copy(alpha = 0.16f)
+                    ) {
+                        Text(
+                            text = lastTaxiDiagnostics.orderLabel,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = DelivioYellow,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
+                    }
+                }
+            }
+
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("dispatch_last_taxi_card")
+            ) {
+                if (lastTaxiDiagnostics == null) {
+                    Row(
+                        modifier = Modifier.padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.LocalTaxi,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = "No taxi order seen yet.",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                } else {
+                    Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                        lastTaxiDiagnostics.conditions.forEachIndexed { idx, cond ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 6.dp)
+                                    .testTag("taxi_cond_${cond.label}"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(end = 10.dp)
+                                ) {
+                                    Text(
+                                        text = cond.label,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    if (cond.detail.isNotBlank()) {
+                                        Text(
+                                            text = cond.detail,
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (cond.passed) {
+                                        DelivioGreen.copy(alpha = 0.18f)
+                                    } else {
+                                        DelivioRed.copy(alpha = 0.18f)
+                                    }
+                                ) {
+                                    Text(
+                                        text = if (cond.passed) "PASS" else "FAIL",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = if (cond.passed) DelivioGreen else DelivioRed,
+                                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+                            if (idx < lastTaxiDiagnostics.conditions.lastIndex) {
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f))
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Last 10 Skipped Orders

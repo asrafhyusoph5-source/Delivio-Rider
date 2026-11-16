@@ -53,6 +53,9 @@ class RiderRepository(
     private val _skippedOrderRecords = MutableStateFlow<List<SkippedOrderRecord>>(emptyList())
     val skippedOrderRecords: StateFlow<List<SkippedOrderRecord>> = _skippedOrderRecords.asStateFlow()
 
+    private val _lastTaxiDiagnostics = MutableStateFlow<TaxiOrderDiagnostics?>(null)
+    val lastTaxiDiagnostics: StateFlow<TaxiOrderDiagnostics?> = _lastTaxiDiagnostics.asStateFlow()
+
     private val badDocRecords = ArrayDeque<SkippedOrderRecord>()
     @Volatile
     private var latestEvaluationSkips: List<SkippedOrderRecord> = emptyList()
@@ -520,14 +523,19 @@ class RiderRepository(
                     return@addSnapshotListener
                 }
                 if (snapshot == null || !snapshot.exists()) return@addSnapshotListener
-                val allowed = (snapshot.get("allowedServices") as? List<*>)?.mapNotNull { it?.toString() }
+                val allowed = (snapshot.get("allowedServices") as? List<*>)
+                    ?.mapNotNull { it?.toString()?.trim()?.lowercase(Locale.US)?.takeIf { s -> s.isNotEmpty() } }
                     ?: OrderStepConstants.ALL_SERVICES
-                val active = (snapshot.get("activeServices") as? List<*>)?.mapNotNull { it?.toString() }
+                val active = (snapshot.get("activeServices") as? List<*>)
+                    ?.mapNotNull { it?.toString()?.trim()?.lowercase(Locale.US)?.takeIf { s -> s.isNotEmpty() } }
                     ?: allowed
 
                 val vehicleMap = snapshot.get("vehicle") as? Map<*, *>
+                val vehicleTypeVal = vehicleMap?.get("type")?.toString()?.takeIf { it.isNotBlank() }
+                    ?: snapshot.getString("vehicleType")?.takeIf { it.isNotBlank() }
+                    ?: OrderStepConstants.VEHICLE_MOTORCYCLE
                 val vehicle = Vehicle(
-                    type = vehicleMap?.get("type")?.toString() ?: snapshot.getString("vehicleType") ?: "Motorcycle",
+                    type = vehicleTypeVal,
                     model = vehicleMap?.get("model")?.toString() ?: snapshot.getString("vehicleModel") ?: "",
                     plateNumber = vehicleMap?.get("plateNumber")?.toString() ?: snapshot.getString("plate") ?: "",
                     color = vehicleMap?.get("color")?.toString() ?: ""
@@ -1122,9 +1130,28 @@ class RiderRepository(
 
         val evalSkips = mutableListOf<SkippedOrderRecord>()
         val eligibleWithDist = mutableListOf<Pair<Order, Double>>()
+        var latestTaxiCandidate: Pair<Order, TaxiOrderDiagnostics>? = null
 
         for (order in rawCandidates) {
             val checkCity = if (order.cityId.isNotBlank()) order.cityId else (currentRider?.cityId ?: "")
+            if (order.isTaxi) {
+                val diag = com.example.data.constants.TaxiDispatchEvaluator.diagnoseTaxiOrder(
+                    order = order,
+                    rider = currentRider,
+                    activeOrders = activeList,
+                    riderLoc = riderLoc,
+                    isPlatformServiceEnabled = isPlatformServiceOn(OrderStepConstants.SERVICE_TAXI),
+                    isCityServiceEnabled = isCityServiceOn(OrderStepConstants.SERVICE_TAXI, checkCity),
+                    dispatch = dispatch,
+                    declinedIds = declinedIds,
+                    releasedIds = releasedIds,
+                    evaluatedAtMillis = nowMs
+                )
+                val prev = latestTaxiCandidate?.first
+                if (prev == null || order.acceptedAtMillis >= prev.acceptedAtMillis) {
+                    latestTaxiCandidate = order to diag
+                }
+            }
             val eval = when {
                 order.isRequestRider -> com.example.data.constants.InstantDispatchEvaluator.evaluateSkipReason(
                     order = order,
@@ -1200,6 +1227,9 @@ class RiderRepository(
         _ordersSeenCount.value = rawCandidates.size
         _eligibleOrdersCount.value = eligibleWithDist.size
         latestEvaluationSkips = evalSkips
+        latestTaxiCandidate?.second?.let { diag ->
+            _lastTaxiDiagnostics.value = diag
+        }
         refreshCombinedSkippedOrders()
 
         val activeRider = currentRider
@@ -1394,7 +1424,8 @@ class RiderRepository(
     // SERVICE TYPE TOGGLE
     fun toggleServiceType(serviceKey: String, enabled: Boolean, onSuccess: () -> Unit, onError: (String) -> Unit) {
         val currentRider = _rider.value ?: run { onError("Rider data not loaded"); return }
-        if (!currentRider.allowedServices.contains(serviceKey)) {
+        val normKey = serviceKey.trim().lowercase(Locale.US)
+        if (!currentRider.allowedServices.any { it.trim().lowercase(Locale.US) == normKey }) {
             onError("This service is disabled by admin")
             return
         }
@@ -2237,6 +2268,7 @@ class RiderRepository(
         dispatchSettingsListener = null
         currentChatId = null
         activeUserPrefs = null
+        _lastTaxiDiagnostics.value = null
         _dispatchListenerStatus.value = DispatchListenerStatus(state = ListenerConnectionState.DISCONNECTED)
     }
 

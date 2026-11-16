@@ -550,7 +550,7 @@ data class Order(
         }
 
     val isTaxi: Boolean
-        get() = serviceType.lowercase() == OrderStepConstants.SERVICE_TAXI
+        get() = serviceType.trim().lowercase(Locale.US) == OrderStepConstants.SERVICE_TAXI
 
     val isNonMerchantService: Boolean
         get() = isTaxi || serviceType.trim().lowercase() in listOf(
@@ -1425,6 +1425,19 @@ data class SkippedOrderRecord(
         }
     }
 }
+
+data class TaxiConditionCheck(
+    val label: String,
+    val passed: Boolean,
+    val detail: String = ""
+)
+
+data class TaxiOrderDiagnostics(
+    val orderId: String,
+    val orderLabel: String,
+    val evaluatedAtMillis: Long = System.currentTimeMillis(),
+    val conditions: List<TaxiConditionCheck> = emptyList()
+)
 
 
 

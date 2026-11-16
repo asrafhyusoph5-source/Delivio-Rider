@@ -486,6 +486,123 @@ object TaxiDispatchEvaluator {
     }
 
     /**
+     * Evaluates all 7 visibility conditions for a taxi order so the Dispatch status sheet can
+     * display PASS / FAIL for each one consistently with dispatch decisions.
+     */
+    fun diagnoseTaxiOrder(
+        order: Order,
+        rider: com.example.data.models.Rider?,
+        activeOrders: List<Order>,
+        riderLoc: Pair<Double, Double>?,
+        isPlatformServiceEnabled: Boolean,
+        isCityServiceEnabled: Boolean,
+        dispatch: DispatchSettings,
+        declinedIds: Set<String> = emptySet(),
+        releasedIds: Set<String> = emptySet(),
+        evaluatedAtMillis: Long = System.currentTimeMillis()
+    ): com.example.data.models.TaxiOrderDiagnostics {
+        val locale = java.util.Locale.US
+
+        // 1. allowedServices
+        val hasAllowedTaxi = rider != null && rider.allowedServices.any {
+            it.trim().lowercase(locale) == OrderStepConstants.SERVICE_TAXI
+        }
+        val allowedDetail = when {
+            rider == null -> "rider not loaded"
+            hasAllowedTaxi -> "contains \"taxi\""
+            else -> "missing \"taxi\" (${rider.allowedServices.joinToString(", ").ifBlank { "none" }})"
+        }
+
+        // 2. vehicle match (trim + lowercase both)
+        val riderVehicleNorm = rider?.vehicle?.type?.trim()?.lowercase(locale) ?: ""
+        val orderVehicleNorm = order.vehicleType.trim().lowercase(locale)
+        val vehicleMatched = rider != null && orderVehicleNorm.isNotEmpty() && orderVehicleNorm == riderVehicleNorm
+        val vehicleDetail = if (vehicleMatched) {
+            "order=$orderVehicleNorm, rider=$riderVehicleNorm"
+        } else {
+            "order=${orderVehicleNorm.ifBlank { "none" }} vs rider=${riderVehicleNorm.ifBlank { "none" }}"
+        }
+
+        // 3. city service
+        val checkCity = order.cityId.ifBlank { rider?.cityId ?: "" }
+        val sameCity = rider == null || order.cityId.isBlank() || rider.cityId.isBlank() ||
+            order.cityId.trim().equals(rider.cityId.trim(), ignoreCase = true)
+        val cityPassed = isPlatformServiceEnabled && isCityServiceEnabled && sameCity
+        val cityDetail = when {
+            !isPlatformServiceEnabled -> "taxi off on platform"
+            !isCityServiceEnabled -> "taxi off in city${if (checkCity.isNotBlank()) " ($checkCity)" else ""}"
+            !sameCity -> "city mismatch (order=${order.cityId}, rider=${rider?.cityId ?: ""})"
+            else -> "taxi on in ${checkCity.ifBlank { "city" }}"
+        }
+
+        // 4. online
+        val onlinePassed = rider != null && rider.isOnline && rider.status.trim().equals("active", ignoreCase = true)
+        val onlineDetail = when {
+            rider == null -> "rider not loaded"
+            !rider.isOnline -> "rider is offline"
+            !rider.status.trim().equals("active", ignoreCase = true) -> "account ${rider.status}"
+            else -> "online & active"
+        }
+
+        // 5. busy
+        val notBusy = activeOrders.isEmpty()
+        val busyDetail = if (notBusy) {
+            "0 active orders"
+        } else {
+            "${activeOrders.size} active order${if (activeOrders.size == 1) "" else "s"}"
+        }
+
+        // 6. distance
+        val distKm = computePickupDistanceKm(order, riderLoc)
+        val maxRadius = dispatch.taxiSearchRadiusKm.coerceAtLeast(0.5)
+        val distancePassed = distKm <= maxRadius
+        val formattedKm = String.format(locale, "%.1f", distKm)
+        val limitText = formatKmLimit(maxRadius)
+        val distanceDetail = if (distancePassed) {
+            "$formattedKm km <= $limitText km limit"
+        } else {
+            "$formattedKm km > $limitText km limit"
+        }
+
+        // 7. excluded list
+        val inExcludeField = rider != null && order.excludeRiderIds.any { it.trim() == rider.uid }
+        val inDeclined = declinedIds.contains(order.id)
+        val inReleased = releasedIds.contains(order.id)
+        val offeredOther = rider != null && order.targetRiderId.isNotBlank() && order.targetRiderId.trim() != rider.uid
+        val notExcluded = !inExcludeField && !inDeclined && !inReleased && !offeredOther
+        val excludedDetail = when {
+            inExcludeField -> "in order excludeRiderIds"
+            inDeclined -> "declined by rider"
+            inReleased -> "released by rider"
+            offeredOther -> "offered to another rider"
+            else -> "not excluded"
+        }
+
+        val orderLabel = if (order.orderNumber.isNotBlank()) {
+            "Taxi ${order.displayOrderNumber}"
+        } else if (order.id.isNotBlank()) {
+            "Taxi #${order.id.takeLast(6).uppercase(locale)}"
+        } else {
+            "Taxi"
+        }
+
+        return com.example.data.models.TaxiOrderDiagnostics(
+            orderId = order.id,
+            orderLabel = orderLabel,
+            evaluatedAtMillis = evaluatedAtMillis,
+            conditions = listOf(
+                com.example.data.models.TaxiConditionCheck("allowedServices", hasAllowedTaxi, allowedDetail),
+                com.example.data.models.TaxiConditionCheck("vehicle match", vehicleMatched, vehicleDetail),
+                com.example.data.models.TaxiConditionCheck("city service", cityPassed, cityDetail),
+                com.example.data.models.TaxiConditionCheck("online", onlinePassed, onlineDetail),
+                com.example.data.models.TaxiConditionCheck("busy", notBusy, busyDetail),
+                com.example.data.models.TaxiConditionCheck("distance", distancePassed, distanceDetail),
+                com.example.data.models.TaxiConditionCheck("excluded list", notExcluded, excludedDetail)
+            )
+        )
+    }
+
+    /**
      * Evaluates Delivio Taxi order eligibility without ANY merchant-based condition
      * (no merchant location, merchant radius, or merchant status).
      */
@@ -500,16 +617,17 @@ object TaxiDispatchEvaluator {
         declinedIds: Set<String> = emptySet(),
         releasedIds: Set<String> = emptySet()
     ): InstantDispatchResult {
+        val locale = java.util.Locale.US
         if (rider == null || !rider.isOnline) {
             return InstantDispatchResult(false, "offline")
         }
-        if (!rider.status.equals("active", ignoreCase = true)) {
+        if (!rider.status.trim().equals("active", ignoreCase = true)) {
             return InstantDispatchResult(false, "account ${rider.status}")
         }
-        if (declinedIds.contains(order.id) || releasedIds.contains(order.id) || order.excludeRiderIds.contains(rider.uid)) {
+        if (declinedIds.contains(order.id) || releasedIds.contains(order.id) || order.excludeRiderIds.any { it.trim() == rider.uid }) {
             return InstantDispatchResult(false, "declined or excluded")
         }
-        if (order.targetRiderId.isNotBlank() && order.targetRiderId != rider.uid) {
+        if (order.targetRiderId.isNotBlank() && order.targetRiderId.trim() != rider.uid) {
             return InstantDispatchResult(false, "offered to another rider")
         }
         if (!isPlatformServiceEnabled) {
@@ -518,17 +636,18 @@ object TaxiDispatchEvaluator {
         if (!isCityServiceEnabled) {
             return InstantDispatchResult(false, "service off in city")
         }
-        if (order.cityId.isNotBlank() && rider.cityId.isNotBlank() && order.cityId != rider.cityId) {
+        if (order.cityId.isNotBlank() && rider.cityId.isNotBlank() && !order.cityId.trim().equals(rider.cityId.trim(), ignoreCase = true)) {
             return InstantDispatchResult(false, "service off in city")
         }
-        if (!rider.allowedServices.contains(OrderStepConstants.SERVICE_TAXI) ||
-            !rider.activeServices.contains(OrderStepConstants.SERVICE_TAXI)
-        ) {
+        val riderHasTaxiAllowed = rider.allowedServices.any {
+            it.trim().lowercase(locale) == OrderStepConstants.SERVICE_TAXI
+        }
+        if (!riderHasTaxiAllowed) {
             return InstantDispatchResult(false, "service off for rider")
         }
-        val riderVehicleType = OrderStepConstants.normalizeVehicleType(rider.vehicle.type)
-        val orderVehicleType = OrderStepConstants.normalizeVehicleType(order.vehicleType)
-        if (orderVehicleType != riderVehicleType) {
+        val riderVehicleType = rider.vehicle.type.trim().lowercase(locale)
+        val orderVehicleType = order.vehicleType.trim().lowercase(locale)
+        if (orderVehicleType.isEmpty() || orderVehicleType != riderVehicleType) {
             return InstantDispatchResult(false, "vehicle mismatch (order wants $orderVehicleType)")
         }
         if (activeOrders.isNotEmpty()) {
@@ -547,7 +666,7 @@ object TaxiDispatchEvaluator {
         val distKm = computePickupDistanceKm(order, riderLoc)
         val maxRadius = dispatch.taxiSearchRadiusKm.coerceAtLeast(0.5)
         if (distKm > maxRadius) {
-            val formattedKm = String.format(java.util.Locale.US, "%.1f", distKm)
+            val formattedKm = String.format(locale, "%.1f", distKm)
             return InstantDispatchResult(
                 false,
                 "outside radius ($formattedKm km, limit ${formatKmLimit(maxRadius)})",
