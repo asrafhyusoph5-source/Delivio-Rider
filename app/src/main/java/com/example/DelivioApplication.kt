@@ -4,9 +4,9 @@ import android.app.Application
 import android.content.Context
 import android.content.Intent
 import android.os.Process
+import android.util.Log
 import com.example.util.CrashReportStore
 import com.google.firebase.FirebaseApp
-import com.google.firebase.FirebaseOptions
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.system.exitProcess
 
@@ -84,23 +84,15 @@ class DelivioApplication : Application() {
 
         fun ensureFirebase(context: Context) {
             try {
-                if (FirebaseApp.getApps(context).isEmpty()) {
-                    val app = try {
-                        FirebaseApp.initializeApp(context)
-                    } catch (_: Throwable) {
-                        null
-                    }
-                    if (app == null || FirebaseApp.getApps(context).isEmpty()) {
-                        val options = FirebaseOptions.Builder()
-                            .setApplicationId("com.deliviorider.app")
-                            .setProjectId("delivio-driver")
-                            .setApiKey("AIzaSyFallbackKeyForDelivioDriverApp")
-                            .build()
-                        FirebaseApp.initializeApp(context.applicationContext, options)
+                val appCtx = context.applicationContext ?: context
+                if (FirebaseApp.getApps(appCtx).isEmpty()) {
+                    val app = FirebaseApp.initializeApp(appCtx)
+                    if (app == null && FirebaseApp.getApps(appCtx).isEmpty()) {
+                        Log.e("DelivioApplication", "FirebaseApp.initializeApp returned null; check app/google-services.json configuration")
                     }
                 }
-            } catch (_: Throwable) {
-                // Safety guard to never crash application startup
+            } catch (t: Throwable) {
+                Log.e("DelivioApplication", "Firebase initialization failed", t)
             }
         }
     }

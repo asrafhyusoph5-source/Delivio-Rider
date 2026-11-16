@@ -15,7 +15,10 @@ import com.example.data.models.*
 import com.example.data.repository.RiderRepository
 import com.example.data.repository.UserPreferencesRepository
 import com.example.data.service.RiderLocationTracker
+import android.util.Log
+import com.example.data.firebase.FirebaseClientProvider
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.flow.*
@@ -26,20 +29,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     val prefsRepository = UserPreferencesRepository(application.applicationContext)
     val riderRepository = RiderRepository(application.applicationContext)
     private val auth: FirebaseAuth by lazy {
-        try {
-            FirebaseAuth.getInstance()
-        } catch (_: Throwable) {
-            com.example.DelivioApplication.ensureFirebase(application)
-            FirebaseAuth.getInstance()
-        }
+        FirebaseClientProvider.getAuth(application)
     }
     private val db: FirebaseFirestore by lazy {
-        try {
-            FirebaseFirestore.getInstance()
-        } catch (_: Throwable) {
-            com.example.DelivioApplication.ensureFirebase(application)
-            FirebaseFirestore.getInstance()
-        }
+        FirebaseClientProvider.getFirestore(application)
     }
 
     // Theme & preferences
@@ -262,8 +255,20 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     // Auth & Application State
-    private val _isLoggedIn = MutableStateFlow(try { auth.currentUser != null } catch (_: Throwable) { false })
+    private val _isLoggedIn = MutableStateFlow(false)
     val isLoggedIn: StateFlow<Boolean> = _isLoggedIn.asStateFlow()
+
+    private val _isAuthLoading = MutableStateFlow(false)
+    val isAuthLoading: StateFlow<Boolean> = _isAuthLoading.asStateFlow()
+
+    private val _needsRegistration = MutableStateFlow(false)
+    val needsRegistration: StateFlow<Boolean> = _needsRegistration.asStateFlow()
+
+    private val _signedInUserEmail = MutableStateFlow(try { auth.currentUser?.email ?: "" } catch (_: Throwable) { "" })
+    val signedInUserEmail: StateFlow<String> = _signedInUserEmail.asStateFlow()
+
+    private val _signedInUserName = MutableStateFlow(try { auth.currentUser?.displayName ?: "" } catch (_: Throwable) { "" })
+    val signedInUserName: StateFlow<String> = _signedInUserName.asStateFlow()
 
     private val _applicationState = MutableStateFlow<RiderApplication?>(null)
     val applicationState: StateFlow<RiderApplication?> = _applicationState.asStateFlow()
@@ -594,6 +599,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     init {
         try {
             auth.currentUser?.let { user ->
+                _signedInUserEmail.value = user.email ?: ""
+                _signedInUserName.value = user.displayName ?: ""
                 checkUserRoleAndListen(user.uid)
             }
         } catch (_: Throwable) {
@@ -685,6 +692,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     fun performLogout(onComplete: () -> Unit) {
         auth.signOut()
         _isLoggedIn.value = false
+        _isAuthLoading.value = false
+        _needsRegistration.value = false
+        _applicationState.value = null
+        _isBlocked.value = null
+        _signedInUserEmail.value = ""
+        _signedInUserName.value = ""
         riderRepository.stopListening()
         onComplete()
     }
@@ -706,8 +719,13 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         _supportChatMessages.value = _supportChatMessages.value + userMsg
     }
 
+    fun setAuthLoading(loading: Boolean) {
+        _isAuthLoading.value = loading
+    }
+
     // CHECK USER ROLE & STATUS
     fun checkUserRoleAndListen(uid: String) {
+        _isAuthLoading.value = true
         db.collection("users").document(uid).get()
             .addOnSuccessListener { userDoc ->
                 val role = userDoc.getString("role")
@@ -715,26 +733,32 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     // Check riders/{uid}.status
                     db.collection("riders").document(uid).get()
                         .addOnSuccessListener { riderDoc ->
+                            _isAuthLoading.value = false
                             val status = riderDoc.getString("status") ?: "active"
                             if (status != "active") {
                                 _isBlocked.value = "Your rider account is currently $status. Please contact support."
                                 _applicationState.value = null
+                                _needsRegistration.value = false
                                 _isLoggedIn.value = false
                             } else {
                                 _isBlocked.value = null
                                 _applicationState.value = null
+                                _needsRegistration.value = false
                                 _isLoggedIn.value = true
                                 riderRepository.startListeningForRider(uid, prefsRepository)
                             }
                         }
                         .addOnFailureListener {
+                            _isAuthLoading.value = false
                             _isBlocked.value = "Failed to load rider status: ${it.localizedMessage}"
+                            _needsRegistration.value = false
                             _isLoggedIn.value = false
                         }
                 } else {
                     // Check riderApplications/{uid}
                     db.collection("riderApplications").document(uid).get()
                         .addOnSuccessListener { appDoc ->
+                            _isAuthLoading.value = false
                             if (appDoc.exists()) {
                                 val emergencyMap = appDoc.get("emergencyContact") as? Map<*, *>
                                 val docsMap = appDoc.get("documents") as? Map<*, *>
@@ -756,64 +780,64 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                                     needsInfoReason = appDoc.getString("needsInfoReason") ?: ""
                                 )
                                 _applicationState.value = app
+                                _needsRegistration.value = false
+                                _isBlocked.value = null
                                 _isLoggedIn.value = false
                             } else {
-                                _isBlocked.value = "No driver account found for this user. Please register as a driver."
+                                _applicationState.value = null
+                                _isBlocked.value = null
+                                _needsRegistration.value = true
                                 _isLoggedIn.value = false
                             }
                         }
                         .addOnFailureListener {
+                            _isAuthLoading.value = false
                             _isBlocked.value = "Failed to check application: ${it.localizedMessage}"
+                            _needsRegistration.value = false
                             _isLoggedIn.value = false
                         }
                 }
             }
             .addOnFailureListener {
+                _isAuthLoading.value = false
                 _isBlocked.value = "Login verification failed: ${it.localizedMessage}"
+                _needsRegistration.value = false
                 _isLoggedIn.value = false
             }
     }
 
-    // LOGIN
-    fun login(email: String, pass: String, onSuccess: () -> Unit) {
-        if (email.isBlank() || pass.isBlank()) {
-            showSnackbar("Please enter your email and password")
-            return
+    // GOOGLE SIGN-IN
+    fun signInWithGoogle(idToken: String, onSuccess: () -> Unit = {}) {
+        if (auth.currentUser == null) {
+            _isAuthLoading.value = true
         }
-
-        auth.signInWithEmailAndPassword(email.trim(), pass.trim())
+        val credential = GoogleAuthProvider.getCredential(idToken, null)
+        auth.signInWithCredential(credential)
             .addOnSuccessListener { authResult ->
-                val uid = authResult.user?.uid ?: return@addOnSuccessListener
+                val user = authResult.user
+                val uid = user?.uid
+                if (uid == null) {
+                    _isAuthLoading.value = false
+                    showSnackbar("Google Sign-In failed: missing user ID")
+                    return@addOnSuccessListener
+                }
+                _signedInUserEmail.value = user.email ?: ""
+                _signedInUserName.value = user.displayName ?: ""
                 checkUserRoleAndListen(uid)
                 onSuccess()
             }
-            .addOnFailureListener {
-                showSnackbar(it.localizedMessage ?: "Login failed")
+            .addOnFailureListener { e ->
+                _isAuthLoading.value = false
+                Log.e("Auth", "Firebase Google auth failed", e)
+                showSnackbar(e.localizedMessage ?: "Google Sign-In failed")
             }
     }
 
-    // FORGOT PASSWORD
-    fun forgotPassword(email: String, onSuccess: () -> Unit) {
-        if (email.isBlank()) {
-            showSnackbar("Please enter your email to reset password")
-            return
-        }
-        auth.sendPasswordResetEmail(email.trim())
-            .addOnSuccessListener {
-                showSnackbar("Password reset email sent to $email")
-                onSuccess()
-            }
-            .addOnFailureListener {
-                showSnackbar(it.localizedMessage ?: "Failed to send reset email")
-            }
-    }
-
-    // REGISTER AS A DRIVER
-    fun registerAsDriver(
+    // SUBMIT DRIVER APPLICATION (for Google-authenticated users)
+    fun submitDriverApplication(
         name: String,
         phone: String,
         email: String,
-        pass: String,
         cityId: String,
         vehicleType: String,
         plate: String,
@@ -831,94 +855,54 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         selfieUrl: String,
         onSuccess: () -> Unit
     ) {
-        auth.createUserWithEmailAndPassword(email.trim(), pass.trim())
-            .addOnSuccessListener { authResult ->
-                val uid = authResult.user?.uid ?: return@addOnSuccessListener
-                val docsMap = mutableMapOf(
-                    "licenseUrl" to licenseUrl.trim(),
-                    "orcrUrl" to orcrUrl.trim(),
-                    "nbiUrl" to nbiUrl.trim(),
-                    "validIdUrl" to validIdUrl.trim(),
-                    "selfieUrl" to selfieUrl.trim(),
-                    "vehiclePhotoUrl" to vehiclePhotoUrl.trim()
-                )
-                if (!franchiseUrl.isNullOrBlank()) {
-                    docsMap["franchiseUrl"] = franchiseUrl.trim()
-                }
+        val currentUser = auth.currentUser
+        if (currentUser == null) {
+            showSnackbar("Please sign in with Google first")
+            return
+        }
+        val uid = currentUser.uid
+        val resolvedEmail = email.trim().ifBlank { currentUser.email.orEmpty() }
+        val docsMap = mutableMapOf(
+            "licenseUrl" to licenseUrl.trim(),
+            "orcrUrl" to orcrUrl.trim(),
+            "nbiUrl" to nbiUrl.trim(),
+            "validIdUrl" to validIdUrl.trim(),
+            "selfieUrl" to selfieUrl.trim(),
+            "vehiclePhotoUrl" to vehiclePhotoUrl.trim()
+        )
+        if (!franchiseUrl.isNullOrBlank()) {
+            docsMap["franchiseUrl"] = franchiseUrl.trim()
+        }
 
-                val applicationData = mapOf(
-                    "ownerUid" to uid,
-                    "name" to name.trim(),
-                    "phone" to phone.trim(),
-                    "email" to email.trim(),
-                    "cityId" to cityId.trim(),
-                    "vehicleType" to vehicleType,
-                    "plate" to plate.trim().uppercase(),
-                    "vehicleModel" to vehicleModel.trim(),
-                    "vehicleColor" to vehicleColor.trim(),
-                    "seats" to seats,
-                    "emergencyContact" to mapOf("name" to emergencyName.trim(), "phone" to emergencyPhone.trim()),
-                    "documents" to docsMap,
-                    "status" to "Pending",
-                    "submittedAt" to FieldValue.serverTimestamp()
-                )
+        val applicationData = mapOf(
+            "ownerUid" to uid,
+            "name" to name.trim(),
+            "phone" to phone.trim(),
+            "email" to resolvedEmail,
+            "cityId" to cityId.trim(),
+            "vehicleType" to vehicleType,
+            "plate" to plate.trim().uppercase(),
+            "vehicleModel" to vehicleModel.trim(),
+            "vehicleColor" to vehicleColor.trim(),
+            "seats" to seats,
+            "emergencyContact" to mapOf("name" to emergencyName.trim(), "phone" to emergencyPhone.trim()),
+            "documents" to docsMap,
+            "status" to "Pending",
+            "submittedAt" to FieldValue.serverTimestamp()
+        )
 
-                db.collection("riderApplications").document(uid).set(applicationData)
-                    .addOnSuccessListener {
-                        showSnackbar("Application submitted. Wait for admin approval.")
-                        checkUserRoleAndListen(uid)
-                        onSuccess()
-                    }
-                    .addOnFailureListener {
-                        showSnackbar("Application saved with error: ${it.localizedMessage}")
-                    }
+        _isAuthLoading.value = true
+        db.collection("riderApplications").document(uid).set(applicationData)
+            .addOnSuccessListener {
+                _isAuthLoading.value = false
+                showSnackbar("Application submitted. Wait for admin approval.")
+                checkUserRoleAndListen(uid)
+                onSuccess()
             }
             .addOnFailureListener {
-                showSnackbar(it.localizedMessage ?: "Registration failed")
+                _isAuthLoading.value = false
+                showSnackbar("Application saved with error: ${it.localizedMessage}")
             }
-    }
-
-    // Legacy alias
-    fun registerAsRider(
-        name: String,
-        phone: String,
-        email: String,
-        pass: String,
-        cityId: String,
-        vehicleType: String,
-        plate: String,
-        vehicleModel: String,
-        emergencyName: String,
-        emergencyPhone: String,
-        licenseUrl: String,
-        orcrUrl: String,
-        nbiUrl: String,
-        validIdUrl: String,
-        selfieUrl: String,
-        onSuccess: () -> Unit
-    ) {
-        registerAsDriver(
-            name = name,
-            phone = phone,
-            email = email,
-            pass = pass,
-            cityId = cityId,
-            vehicleType = vehicleType,
-            plate = plate,
-            vehicleModel = vehicleModel,
-            vehicleColor = "",
-            seats = if (vehicleType == OrderStepConstants.VEHICLE_CAR8) 8 else 4,
-            vehiclePhotoUrl = "",
-            franchiseUrl = null,
-            emergencyName = emergencyName,
-            emergencyPhone = emergencyPhone,
-            licenseUrl = licenseUrl,
-            orcrUrl = orcrUrl,
-            nbiUrl = nbiUrl,
-            validIdUrl = validIdUrl,
-            selfieUrl = selfieUrl,
-            onSuccess = onSuccess
-        )
     }
 
     // RESUBMIT APPLICATION (when status is Needs Info)
@@ -964,8 +948,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         riderRepository.stopListening()
         auth.signOut()
         _isLoggedIn.value = false
+        _isAuthLoading.value = false
+        _needsRegistration.value = false
         _applicationState.value = null
         _isBlocked.value = null
+        _signedInUserEmail.value = ""
+        _signedInUserName.value = ""
         onSuccess()
     }
 

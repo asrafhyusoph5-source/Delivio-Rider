@@ -102,7 +102,7 @@ class RiderLocationService : Service() {
         // Write to Firestore riders/{uid}.location
         val uid = try { FirebaseAuth.getInstance().currentUser?.uid } catch (_: Exception) { null }
         if (uid != null) {
-            val db = FirebaseFirestore.getInstance()
+            val db = com.example.data.firebase.FirebaseClientProvider.getFirestore(this)
             val locData = mapOf(
                 "lat" to loc.latitude,
                 "lng" to loc.longitude,

@@ -29,8 +29,16 @@ class RiderRepository(
     private val appContext: Context? = com.example.DelivioApplication.appContextOrNull
 ) {
 
-    private val auth: FirebaseAuth by lazy { FirebaseAuth.getInstance() }
-    private val db: FirebaseFirestore by lazy { FirebaseFirestore.getInstance() }
+    private val auth: FirebaseAuth by lazy {
+        val ctx = appContext ?: com.example.DelivioApplication.appContextOrNull
+        if (ctx != null) com.example.data.firebase.FirebaseClientProvider.getAuth(ctx) else FirebaseAuth.getInstance()
+    }
+    private val db: FirebaseFirestore by lazy {
+        val ctx = checkNotNull(appContext ?: com.example.DelivioApplication.appContextOrNull) {
+            "Application Context is required to initialize FirebaseFirestore with R.string.firestore_database_id"
+        }
+        com.example.data.firebase.FirebaseClientProvider.getFirestore(ctx)
+    }
     private val scope = CoroutineScope(Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
     private val _riderDocLocationUpdatedAtMs = MutableStateFlow(0L)
     val riderDocLocationUpdatedAtMs: StateFlow<Long> = _riderDocLocationUpdatedAtMs.asStateFlow()
