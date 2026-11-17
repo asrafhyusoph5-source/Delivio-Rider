@@ -1,9 +1,5 @@
 package com.example.ui.screens
 
-import android.app.Activity
-import android.content.Context
-import android.content.ContextWrapper
-import android.util.Log
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -21,57 +17,37 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.credentials.CredentialManager
-import androidx.credentials.CustomCredential
-import androidx.credentials.GetCredentialRequest
-import androidx.credentials.exceptions.GetCredentialCancellationException
-import androidx.credentials.exceptions.GetCredentialException
-import androidx.credentials.exceptions.NoCredentialException
 import com.example.R
 import com.example.data.models.RiderApplication
 import com.example.ui.theme.DelivioRed
 import com.example.ui.theme.DelivioYellow
 import com.example.ui.theme.TextOnYellow
 import com.example.viewmodel.RiderViewModel
-import com.google.android.libraries.identity.googleid.GetGoogleIdOption
-import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
-import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
-import com.google.android.libraries.identity.googleid.GoogleIdTokenParsingException
-import com.google.firebase.auth.FirebaseAuth
-import kotlinx.coroutines.launch
-
-private tailrec fun Context.findActivity(): Activity? = when (this) {
-    is Activity -> this
-    is ContextWrapper -> baseContext.findActivity()
-    else -> null
-}
 
 @Composable
 fun LoginScreen(
     viewModel: RiderViewModel,
     onLoginSuccess: () -> Unit
 ) {
-    val context = LocalContext.current
-    val activityContext = remember(context) { context.findActivity() ?: context }
-    val coroutineScope = rememberCoroutineScope()
-    val credentialManager = remember(activityContext) { CredentialManager.create(activityContext) }
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var passwordVisible by remember { mutableStateOf(false) }
 
     var isRegistering by remember { mutableStateOf(false) }
+    var showForgotPasswordDialog by remember { mutableStateOf(false) }
+    var forgotEmail by remember { mutableStateOf("") }
 
     val applicationState by viewModel.applicationState.collectAsState()
     val isBlockedMsg by viewModel.isBlocked.collectAsState()
-    val needsRegistration by viewModel.needsRegistration.collectAsState()
     val isAuthLoading by viewModel.isAuthLoading.collectAsState()
-    val signedInEmail by viewModel.signedInUserEmail.collectAsState()
-    val signedInName by viewModel.signedInUserName.collectAsState()
     val snackbarMsg by viewModel.snackbarMessage.collectAsState()
     val isLoggedIn by viewModel.isLoggedIn.collectAsState()
 
@@ -90,96 +66,6 @@ fun LoginScreen(
         }
     }
 
-    LaunchedEffect(needsRegistration) {
-        if (needsRegistration) {
-            isRegistering = true
-        }
-    }
-
-    // One-shot silent auto sign-in attempt if no Firebase session is currently active
-    LaunchedEffect(Unit) {
-        val hasCurrentUser = try { FirebaseAuth.getInstance().currentUser != null } catch (_: Throwable) { false }
-        if (!hasCurrentUser) {
-            try {
-                val serverClientId = activityContext.getString(R.string.default_web_client_id)
-                val googleIdOption = GetGoogleIdOption.Builder()
-                    .setFilterByAuthorizedAccounts(true)
-                    .setServerClientId(serverClientId)
-                    .setAutoSelectEnabled(true)
-                    .build()
-                val request = GetCredentialRequest.Builder()
-                    .addCredentialOption(googleIdOption)
-                    .build()
-                val result = credentialManager.getCredential(activityContext, request)
-                val credential = result.credential
-                if (credential is CustomCredential &&
-                    credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
-                ) {
-                    val googleCredential = GoogleIdTokenCredential.createFrom(credential.data)
-                    viewModel.signInWithGoogle(googleCredential.idToken)
-                }
-            } catch (_: NoCredentialException) {
-                // No previously authorized Google account available; user can tap Sign in with Google
-            } catch (_: GetCredentialCancellationException) {
-                // Silent attempt dismissed
-            } catch (e: GetCredentialException) {
-                Log.d("Auth", "Silent Google Sign-In skipped: ${e.message}")
-            } catch (t: Throwable) {
-                Log.d("Auth", "Silent Google Sign-In unavailable: ${t.message}")
-            }
-        }
-    }
-
-    fun launchInteractiveGoogleSignIn(openRegistrationIfNew: Boolean = false) {
-        if (isAuthLoading) return
-        viewModel.setAuthLoading(true)
-        coroutineScope.launch {
-            try {
-                val serverClientId = activityContext.getString(R.string.default_web_client_id)
-                val signInWithGoogleOption = GetSignInWithGoogleOption.Builder(serverClientId)
-                    .build()
-                val request = GetCredentialRequest.Builder()
-                    .addCredentialOption(signInWithGoogleOption)
-                    .build()
-                val result = credentialManager.getCredential(activityContext, request)
-                val credential = result.credential
-                if (credential is CustomCredential &&
-                    credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
-                ) {
-                    val googleCredential = GoogleIdTokenCredential.createFrom(credential.data)
-                    viewModel.signInWithGoogle(googleCredential.idToken) {
-                        if (openRegistrationIfNew) {
-                            isRegistering = true
-                        }
-                    }
-                } else {
-                    viewModel.setAuthLoading(false)
-                    viewModel.showSnackbar("Unexpected credential type received from Google Sign-In")
-                }
-            } catch (e: GetCredentialCancellationException) {
-                Log.w("Auth", "Google Sign-In cancelled or dismissed: ${e.message}", e)
-                viewModel.setAuthLoading(false)
-                viewModel.showSnackbar("Google Sign-In was cancelled. Please select an account to continue.")
-            } catch (e: NoCredentialException) {
-                Log.w("Auth", "No Google credentials found on device: ${e.message}", e)
-                viewModel.setAuthLoading(false)
-                viewModel.showSnackbar("No Google account found on this device. Please add a Google account and try again.")
-            } catch (e: GoogleIdTokenParsingException) {
-                Log.e("Auth", "Invalid Google ID token response", e)
-                viewModel.setAuthLoading(false)
-                viewModel.showSnackbar("Could not verify Google account token.")
-            } catch (e: GetCredentialException) {
-                Log.e("Auth", "Google Sign-In failed: ${e.message}", e)
-                viewModel.setAuthLoading(false)
-                viewModel.showSnackbar(e.localizedMessage ?: "Google Sign-In failed. Please try again.")
-            } catch (t: Throwable) {
-                Log.e("Auth", "Unexpected Google Sign-In error", t)
-                viewModel.setAuthLoading(false)
-                viewModel.showSnackbar(t.localizedMessage ?: "Sign-In failed")
-            }
-        }
-    }
-
     Scaffold(
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
         containerColor = MaterialTheme.colorScheme.background,
@@ -194,31 +80,21 @@ fun LoginScreen(
                 isBlockedMsg != null -> {
                     BlockedStatusView(
                         message = isBlockedMsg ?: "",
-                        onLogout = {
-                            isRegistering = false
-                            viewModel.logout {}
-                        }
+                        onLogout = { viewModel.logout {} }
                     )
                 }
                 applicationState != null -> {
                     ApplicationStatusView(
                         application = applicationState!!,
                         viewModel = viewModel,
-                        onLogout = {
-                            isRegistering = false
-                            viewModel.logout {}
-                        }
+                        onLogout = { viewModel.logout {} }
                     )
                 }
-                isRegistering || needsRegistration -> {
+                isRegistering -> {
                     RegistrationFormView(
                         viewModel = viewModel,
-                        initialName = signedInName,
-                        initialEmail = signedInEmail,
-                        onBackToLogin = {
-                            isRegistering = false
-                            viewModel.logout {}
-                        }
+                        isLoading = isAuthLoading,
+                        onBackToLogin = { isRegistering = false }
                     )
                 }
                 else -> {
@@ -261,53 +137,75 @@ fun LoginScreen(
 
                         Spacer(modifier = Modifier.height(28.dp))
 
-                        Card(
-                            colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-                            ),
-                            shape = RoundedCornerShape(16.dp),
-                            modifier = Modifier.fillMaxWidth()
+                        OutlinedTextField(
+                            value = email,
+                            onValueChange = { email = it },
+                            label = { Text("Email address") },
+                            placeholder = { Text("driver@example.com") },
+                            leadingIcon = { Icon(Icons.Default.Email, contentDescription = "Email") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("email_input")
+                        )
+
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        OutlinedTextField(
+                            value = password,
+                            onValueChange = { password = it },
+                            label = { Text("Password") },
+                            leadingIcon = { Icon(Icons.Default.Lock, contentDescription = "Password") },
+                            trailingIcon = {
+                                IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                                    Icon(
+                                        imageVector = if (passwordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                        contentDescription = "Toggle password"
+                                    )
+                                }
+                            },
+                            singleLine = true,
+                            visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("password_input")
+                        )
+
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 8.dp),
+                            contentAlignment = Alignment.CenterEnd
                         ) {
-                            Column(
-                                modifier = Modifier.padding(20.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.VerifiedUser,
-                                    contentDescription = "Secure Driver Access",
-                                    tint = DelivioYellow,
-                                    modifier = Modifier.size(32.dp)
-                                )
-                                Text(
-                                    text = "Sign in with your Google Account",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 16.sp,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                                Text(
-                                    text = "Access live dispatch offers, earnings, and rider tools securely.",
-                                    fontSize = 13.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    textAlign = TextAlign.Center
-                                )
-                            }
+                            Text(
+                                text = "Forgot password?",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier
+                                    .clickable {
+                                        forgotEmail = email
+                                        showForgotPasswordDialog = true
+                                    }
+                                    .padding(vertical = 8.dp)
+                            )
                         }
 
                         Spacer(modifier = Modifier.height(24.dp))
 
                         Button(
-                            onClick = { launchInteractiveGoogleSignIn(openRegistrationIfNew = false) },
+                            onClick = {
+                                viewModel.login(email, password) {}
+                            },
                             enabled = !isAuthLoading,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = DelivioYellow,
-                                contentColor = TextOnYellow
-                            ),
+                            colors = ButtonDefaults.buttonColors(containerColor = DelivioYellow, contentColor = TextOnYellow),
                             shape = RoundedCornerShape(14.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(52.dp)
-                                .testTag("google_sign_in_button")
+                                .testTag("sign_in_button")
                         ) {
                             if (isAuthLoading) {
                                 CircularProgressIndicator(
@@ -318,13 +216,7 @@ fun LoginScreen(
                                 Spacer(modifier = Modifier.width(10.dp))
                                 Text("Signing in...", fontWeight = FontWeight.Bold, fontSize = 16.sp)
                             } else {
-                                Icon(
-                                    imageVector = Icons.Default.AccountCircle,
-                                    contentDescription = "Google Account",
-                                    modifier = Modifier.size(22.dp)
-                                )
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Text("Continue with Google", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                Text("Sign In", fontWeight = FontWeight.Bold, fontSize = 16.sp)
                             }
                         }
 
@@ -342,9 +234,7 @@ fun LoginScreen(
                                 fontWeight = FontWeight.Bold,
                                 color = DelivioYellow,
                                 modifier = Modifier
-                                    .clickable(enabled = !isAuthLoading) {
-                                        launchInteractiveGoogleSignIn(openRegistrationIfNew = true)
-                                    }
+                                    .clickable(enabled = !isAuthLoading) { isRegistering = true }
                                     .padding(vertical = 8.dp)
                                     .testTag("register_driver_link")
                             )
@@ -354,6 +244,41 @@ fun LoginScreen(
             }
         }
     }
+
+    if (showForgotPasswordDialog) {
+        AlertDialog(
+            onDismissRequest = { showForgotPasswordDialog = false },
+            title = { Text("Reset Password", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Enter your email address to receive a secure password reset link:", fontSize = 13.sp)
+                    OutlinedTextField(
+                        value = forgotEmail,
+                        onValueChange = { forgotEmail = it },
+                        label = { Text("Email") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.forgotPassword(forgotEmail) {
+                            showForgotPasswordDialog = false
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = DelivioYellow, contentColor = TextOnYellow)
+                ) {
+                    Text("Send Reset Link", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showForgotPasswordDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
 }
 
 // ================= REGISTRATION FORM VIEW =================
@@ -361,13 +286,14 @@ fun LoginScreen(
 @Composable
 private fun RegistrationFormView(
     viewModel: RiderViewModel,
-    initialName: String,
-    initialEmail: String,
+    isLoading: Boolean,
     onBackToLogin: () -> Unit
 ) {
-    var fullName by remember(initialName) { mutableStateOf(initialName) }
+    var fullName by remember { mutableStateOf("") }
     var phone by remember { mutableStateOf("") }
-    var email by remember(initialEmail) { mutableStateOf(initialEmail) }
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var confirmPassword by remember { mutableStateOf("") }
     var cityId by remember { mutableStateOf("puerto_princesa") }
     var vehicleType by remember { mutableStateOf(com.example.data.constants.OrderStepConstants.VEHICLE_MOTORCYCLE) }
     var plate by remember { mutableStateOf("") }
@@ -397,40 +323,20 @@ private fun RegistrationFormView(
             .padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
-        ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBackToLogin) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Sign Out and Go Back")
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
             }
-            Text(
-                text = "Register as a Driver",
-                fontWeight = FontWeight.ExtraBold,
-                fontSize = 20.sp,
-                modifier = Modifier.weight(1f)
-            )
-            TextButton(onClick = onBackToLogin) {
-                Text("Sign Out", color = DelivioYellow)
-            }
+            Text("Register as a Driver", fontWeight = FontWeight.ExtraBold, fontSize = 20.sp)
         }
 
-        Text(
-            text = "Fill out the application below. Once approved by admin, you will receive full dispatch access.",
-            fontSize = 12.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        Text("Fill out the application below. Once approved by admin, you will receive full dispatch access.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
         OutlinedTextField(value = fullName, onValueChange = { fullName = it }, label = { Text("Full Name") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(value = phone, onValueChange = { phone = it }, label = { Text("Phone Number") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone), modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(
-            value = email,
-            onValueChange = { email = it },
-            label = { Text("Email Address") },
-            enabled = initialEmail.isBlank(),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-            modifier = Modifier.fillMaxWidth()
-        )
+        OutlinedTextField(value = email, onValueChange = { email = it }, label = { Text("Email Address") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email), modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text("Password") }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(value = confirmPassword, onValueChange = { confirmPassword = it }, label = { Text("Confirm Password") }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
 
         Text("Vehicle Details", fontWeight = FontWeight.Bold, fontSize = 14.sp)
         Row(
@@ -507,21 +413,26 @@ private fun RegistrationFormView(
 
         Button(
             onClick = {
+                if (password != confirmPassword) {
+                    viewModel.showSnackbar("Passwords do not match")
+                    return@Button
+                }
                 if (!termsAccepted) {
                     viewModel.showSnackbar("Please accept the terms to proceed")
                     return@Button
                 }
-                if (fullName.isBlank() || phone.isBlank() || email.isBlank()) {
+                if (fullName.isBlank() || phone.isBlank() || email.isBlank() || password.isBlank()) {
                     viewModel.showSnackbar("Please fill in all required personal information")
                     return@Button
                 }
 
                 val seats = seatsText.toIntOrNull() ?: if (vehicleType == com.example.data.constants.OrderStepConstants.VEHICLE_CAR8) 8 else if (vehicleType == com.example.data.constants.OrderStepConstants.VEHICLE_CAR4) 4 else 1
 
-                viewModel.submitDriverApplication(
+                viewModel.registerAsDriver(
                     name = fullName,
                     phone = phone,
                     email = email,
+                    pass = password,
                     cityId = cityId,
                     vehicleType = vehicleType,
                     plate = plate,
@@ -537,9 +448,10 @@ private fun RegistrationFormView(
                     nbiUrl = nbiUrl,
                     validIdUrl = validIdUrl,
                     selfieUrl = selfieUrl,
-                    onSuccess = { }
+                    onSuccess = { onBackToLogin() }
                 )
             },
+            enabled = !isLoading,
             colors = ButtonDefaults.buttonColors(containerColor = DelivioYellow, contentColor = TextOnYellow),
             shape = RoundedCornerShape(14.dp),
             modifier = Modifier
@@ -547,7 +459,7 @@ private fun RegistrationFormView(
                 .height(52.dp)
                 .testTag("submit_application_button")
         ) {
-            Text("Submit Application", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            Text(if (isLoading) "Submitting..." else "Submit Application", fontWeight = FontWeight.Bold, fontSize = 16.sp)
         }
 
         Spacer(modifier = Modifier.height(16.dp))

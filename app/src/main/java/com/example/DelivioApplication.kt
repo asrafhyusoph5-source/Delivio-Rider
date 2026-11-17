@@ -16,6 +16,10 @@ class DelivioApplication : Application() {
         installCrashHandler(this)
         super.onCreate()
         appContextOrNull = applicationContext
+        try {
+            org.osmdroid.config.Configuration.getInstance().userAgentValue = packageName
+        } catch (_: Throwable) {
+        }
         ensureFirebase(this)
     }
 

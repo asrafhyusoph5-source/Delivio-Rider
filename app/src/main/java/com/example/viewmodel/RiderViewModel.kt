@@ -15,10 +15,8 @@ import com.example.data.models.*
 import com.example.data.repository.RiderRepository
 import com.example.data.repository.UserPreferencesRepository
 import com.example.data.service.RiderLocationTracker
-import android.util.Log
 import com.example.data.firebase.FirebaseClientProvider
 import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.flow.*
@@ -785,8 +783,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                                 _isLoggedIn.value = false
                             } else {
                                 _applicationState.value = null
-                                _isBlocked.value = null
-                                _needsRegistration.value = true
+                                _needsRegistration.value = false
+                                _isBlocked.value = "No driver account found for this user. Please register as a driver."
                                 _isLoggedIn.value = false
                             }
                         }
@@ -806,19 +804,21 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             }
     }
 
-    // GOOGLE SIGN-IN
-    fun signInWithGoogle(idToken: String, onSuccess: () -> Unit = {}) {
-        if (auth.currentUser == null) {
-            _isAuthLoading.value = true
+    // LOGIN (Email/Password Auth)
+    fun login(email: String, pass: String, onSuccess: () -> Unit) {
+        if (email.isBlank() || pass.isBlank()) {
+            showSnackbar("Please enter your email and password")
+            return
         }
-        val credential = GoogleAuthProvider.getCredential(idToken, null)
-        auth.signInWithCredential(credential)
+
+        _isAuthLoading.value = true
+        auth.signInWithEmailAndPassword(email.trim(), pass.trim())
             .addOnSuccessListener { authResult ->
                 val user = authResult.user
                 val uid = user?.uid
                 if (uid == null) {
                     _isAuthLoading.value = false
-                    showSnackbar("Google Sign-In failed: missing user ID")
+                    showSnackbar("Login failed: missing user ID")
                     return@addOnSuccessListener
                 }
                 _signedInUserEmail.value = user.email ?: ""
@@ -826,18 +826,34 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 checkUserRoleAndListen(uid)
                 onSuccess()
             }
-            .addOnFailureListener { e ->
+            .addOnFailureListener {
                 _isAuthLoading.value = false
-                Log.e("Auth", "Firebase Google auth failed", e)
-                showSnackbar(e.localizedMessage ?: "Google Sign-In failed")
+                showSnackbar(it.localizedMessage ?: "Login failed")
             }
     }
 
-    // SUBMIT DRIVER APPLICATION (for Google-authenticated users)
-    fun submitDriverApplication(
+    // FORGOT PASSWORD
+    fun forgotPassword(email: String, onSuccess: () -> Unit) {
+        if (email.isBlank()) {
+            showSnackbar("Please enter your email to reset password")
+            return
+        }
+        auth.sendPasswordResetEmail(email.trim())
+            .addOnSuccessListener {
+                showSnackbar("Password reset email sent to $email")
+                onSuccess()
+            }
+            .addOnFailureListener {
+                showSnackbar(it.localizedMessage ?: "Failed to send reset email")
+            }
+    }
+
+    // REGISTER AS A DRIVER
+    fun registerAsDriver(
         name: String,
         phone: String,
         email: String,
+        pass: String,
         cityId: String,
         vehicleType: String,
         plate: String,
@@ -855,54 +871,103 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         selfieUrl: String,
         onSuccess: () -> Unit
     ) {
-        val currentUser = auth.currentUser
-        if (currentUser == null) {
-            showSnackbar("Please sign in with Google first")
-            return
-        }
-        val uid = currentUser.uid
-        val resolvedEmail = email.trim().ifBlank { currentUser.email.orEmpty() }
-        val docsMap = mutableMapOf(
-            "licenseUrl" to licenseUrl.trim(),
-            "orcrUrl" to orcrUrl.trim(),
-            "nbiUrl" to nbiUrl.trim(),
-            "validIdUrl" to validIdUrl.trim(),
-            "selfieUrl" to selfieUrl.trim(),
-            "vehiclePhotoUrl" to vehiclePhotoUrl.trim()
-        )
-        if (!franchiseUrl.isNullOrBlank()) {
-            docsMap["franchiseUrl"] = franchiseUrl.trim()
-        }
-
-        val applicationData = mapOf(
-            "ownerUid" to uid,
-            "name" to name.trim(),
-            "phone" to phone.trim(),
-            "email" to resolvedEmail,
-            "cityId" to cityId.trim(),
-            "vehicleType" to vehicleType,
-            "plate" to plate.trim().uppercase(),
-            "vehicleModel" to vehicleModel.trim(),
-            "vehicleColor" to vehicleColor.trim(),
-            "seats" to seats,
-            "emergencyContact" to mapOf("name" to emergencyName.trim(), "phone" to emergencyPhone.trim()),
-            "documents" to docsMap,
-            "status" to "Pending",
-            "submittedAt" to FieldValue.serverTimestamp()
-        )
-
         _isAuthLoading.value = true
-        db.collection("riderApplications").document(uid).set(applicationData)
-            .addOnSuccessListener {
-                _isAuthLoading.value = false
-                showSnackbar("Application submitted. Wait for admin approval.")
-                checkUserRoleAndListen(uid)
-                onSuccess()
+        auth.createUserWithEmailAndPassword(email.trim(), pass.trim())
+            .addOnSuccessListener { authResult ->
+                val uid = authResult.user?.uid
+                if (uid == null) {
+                    _isAuthLoading.value = false
+                    showSnackbar("Registration failed: missing user ID")
+                    return@addOnSuccessListener
+                }
+                val docsMap = mutableMapOf(
+                    "licenseUrl" to licenseUrl.trim(),
+                    "orcrUrl" to orcrUrl.trim(),
+                    "nbiUrl" to nbiUrl.trim(),
+                    "validIdUrl" to validIdUrl.trim(),
+                    "selfieUrl" to selfieUrl.trim(),
+                    "vehiclePhotoUrl" to vehiclePhotoUrl.trim()
+                )
+                if (!franchiseUrl.isNullOrBlank()) {
+                    docsMap["franchiseUrl"] = franchiseUrl.trim()
+                }
+
+                val applicationData = mapOf(
+                    "ownerUid" to uid,
+                    "name" to name.trim(),
+                    "phone" to phone.trim(),
+                    "email" to email.trim(),
+                    "cityId" to cityId.trim(),
+                    "vehicleType" to vehicleType,
+                    "plate" to plate.trim().uppercase(),
+                    "vehicleModel" to vehicleModel.trim(),
+                    "vehicleColor" to vehicleColor.trim(),
+                    "seats" to seats,
+                    "emergencyContact" to mapOf("name" to emergencyName.trim(), "phone" to emergencyPhone.trim()),
+                    "documents" to docsMap,
+                    "status" to "Pending",
+                    "submittedAt" to FieldValue.serverTimestamp()
+                )
+
+                db.collection("riderApplications").document(uid).set(applicationData)
+                    .addOnSuccessListener {
+                        _isAuthLoading.value = false
+                        showSnackbar("Application submitted. Wait for admin approval.")
+                        checkUserRoleAndListen(uid)
+                        onSuccess()
+                    }
+                    .addOnFailureListener {
+                        _isAuthLoading.value = false
+                        showSnackbar("Application saved with error: ${it.localizedMessage}")
+                    }
             }
             .addOnFailureListener {
                 _isAuthLoading.value = false
-                showSnackbar("Application saved with error: ${it.localizedMessage}")
+                showSnackbar(it.localizedMessage ?: "Registration failed")
             }
+    }
+
+    // Legacy alias
+    fun registerAsRider(
+        name: String,
+        phone: String,
+        email: String,
+        pass: String,
+        cityId: String,
+        vehicleType: String,
+        plate: String,
+        vehicleModel: String,
+        emergencyName: String,
+        emergencyPhone: String,
+        licenseUrl: String,
+        orcrUrl: String,
+        nbiUrl: String,
+        validIdUrl: String,
+        selfieUrl: String,
+        onSuccess: () -> Unit
+    ) {
+        registerAsDriver(
+            name = name,
+            phone = phone,
+            email = email,
+            pass = pass,
+            cityId = cityId,
+            vehicleType = vehicleType,
+            plate = plate,
+            vehicleModel = vehicleModel,
+            vehicleColor = "",
+            seats = if (vehicleType == OrderStepConstants.VEHICLE_CAR8) 8 else 4,
+            vehiclePhotoUrl = "",
+            franchiseUrl = null,
+            emergencyName = emergencyName,
+            emergencyPhone = emergencyPhone,
+            licenseUrl = licenseUrl,
+            orcrUrl = orcrUrl,
+            nbiUrl = nbiUrl,
+            validIdUrl = validIdUrl,
+            selfieUrl = selfieUrl,
+            onSuccess = onSuccess
+        )
     }
 
     // RESUBMIT APPLICATION (when status is Needs Info)

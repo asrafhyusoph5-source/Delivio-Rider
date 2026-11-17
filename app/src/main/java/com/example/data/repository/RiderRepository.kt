@@ -995,8 +995,7 @@ class RiderRepository(
                 listOf(
                     OrderStepConstants.STATUS_PLACED_ORDER,
                     OrderStepConstants.STATUS_PREPARING,
-                    OrderStepConstants.STATUS_READY,
-                    OrderStepConstants.REQ_SEARCHING
+                    OrderStepConstants.STATUS_READY
                 )
             )
             .addSnapshotListener { snapshots, error ->

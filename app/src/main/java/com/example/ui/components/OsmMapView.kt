@@ -66,9 +66,12 @@ fun OsmMapView(
     var lastFetchTime by remember { mutableLongStateOf(0L) }
     var lastOffRouteRerouteTime by remember { mutableLongStateOf(0L) }
 
-    // Init osmdroid config
-    LaunchedEffect(Unit) {
-        Configuration.getInstance().userAgentValue = context.packageName
+    // Init osmdroid config before MapView construction
+    val resolvedUserAgent = remember(context) { context.packageName.ifBlank { "com.deliviorider.app" } }
+    SideEffect {
+        if (Configuration.getInstance().userAgentValue != resolvedUserAgent) {
+            Configuration.getInstance().userAgentValue = resolvedUserAgent
+        }
     }
 
     // Auto-dismiss tapped pin label after 3 seconds
@@ -198,6 +201,7 @@ fun OsmMapView(
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
+                Configuration.getInstance().userAgentValue = ctx.packageName.ifBlank { resolvedUserAgent }
                 MapView(ctx).apply {
                     setTileSource(TileSourceFactory.MAPNIK)
                     setMultiTouchControls(true)

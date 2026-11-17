@@ -10,9 +10,16 @@ object FirebaseClientProvider {
     fun getFirestore(context: Context): FirebaseFirestore {
         val appCtx = context.applicationContext ?: context
         DelivioApplication.ensureFirebase(appCtx)
-        val databaseId = appCtx.getString(R.string.firestore_database_id).trim()
-        require(databaseId.isNotEmpty()) { "firestore_database_id must not be empty" }
-        return FirebaseFirestore.getInstance(databaseId)
+        val databaseId = try {
+            appCtx.getString(R.string.firestore_database_id).trim()
+        } catch (_: Throwable) {
+            ""
+        }
+        return if (databaseId.isEmpty() || databaseId == "(default)") {
+            FirebaseFirestore.getInstance()
+        } else {
+            FirebaseFirestore.getInstance(databaseId)
+        }
     }
 
     fun getAuth(context: Context): FirebaseAuth {
