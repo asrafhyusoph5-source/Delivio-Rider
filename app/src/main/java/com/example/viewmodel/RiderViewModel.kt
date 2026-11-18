@@ -1119,17 +1119,25 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // ADVANCE STEP
-    fun advanceCurrentOrderStep(finalReceiptTotal: Double? = null, targetOrderId: String? = null) {
+    fun advanceCurrentOrderStep(
+        finalReceiptTotal: Double? = null,
+        targetOrderId: String? = null,
+        overBudgetApproved: Boolean = false
+    ) {
         val targetId = targetOrderId ?: currentRouteStop.value?.orderId ?: currentActiveOrder.value?.id ?: return
         val order = activeOrders.value.firstOrNull { it.id == targetId } ?: currentActiveOrder.value ?: return
         triggerVibration()
         val step = order.riderStep.lowercase()
         val isFinal = when (order.serviceType.lowercase()) {
             OrderStepConstants.SERVICE_PARCEL -> step in listOf(OrderStepConstants.STEP_AT_RECIPIENT, OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER)
-            OrderStepConstants.SERVICE_TAXI -> order.isAtLastTaxiStop && step.startsWith(OrderStepConstants.STEP_TO_STOP_PREFIX)
+            OrderStepConstants.SERVICE_PABILI -> order.pabiliStepStage == com.example.data.models.PabiliStepStage.AT_RECIPIENT
+            OrderStepConstants.SERVICE_TAXI -> order.taxiStepStage == com.example.data.models.TaxiStepStage.AT_DROPOFF
             else -> step in listOf(OrderStepConstants.STEP_AT_CUSTOMER, OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER)
         }
-        riderRepository.advanceOrderStep(order, finalReceiptTotal,
+        riderRepository.advanceOrderStep(
+            order = order,
+            finalReceiptTotal = finalReceiptTotal,
+            overBudgetApproved = overBudgetApproved,
             onSuccess = {
                 if (isFinal) {
                     // Show celebration delivery success dialog with accurate codCollected

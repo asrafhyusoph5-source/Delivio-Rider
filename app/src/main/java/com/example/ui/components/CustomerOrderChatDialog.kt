@@ -195,7 +195,7 @@ fun CustomerOrderChatDialog(
                                     )
                                 }
                             }
-                            val merchantLabel = if (!order.isTaxi) order.displayMerchantName else ""
+                            val merchantLabel = if (!order.isTaxi && !order.isPabili) order.displayMerchantName else ""
                             Text(
                                 text = if (merchantLabel.isNotBlank()) "Order ${order.displayOrderNumber} • $merchantLabel" else "Order ${order.displayOrderNumber}",
                                 fontSize = 12.sp,

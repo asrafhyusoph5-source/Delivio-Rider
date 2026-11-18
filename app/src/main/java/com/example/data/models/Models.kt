@@ -360,6 +360,72 @@ data class SplitOutInfo(
     val by: String = ""
 )
 
+enum class TaxiStepStage {
+    TO_PICKUP,
+    AT_PICKUP,
+    TO_EXTRA_STOP,
+    AT_EXTRA_STOP,
+    TO_DROPOFF,
+    AT_DROPOFF,
+    COMPLETED
+}
+
+enum class PabiliStepStage {
+    TO_VENDOR,
+    AT_VENDOR,
+    TO_RECIPIENT,
+    AT_RECIPIENT,
+    COMPLETED
+}
+
+data class PabiliTransitionSpec(
+    val expectedPrevStatus: String,
+    val nextStep: String,
+    val nextStatus: String
+)
+
+object PabiliFlowRules {
+    fun transitionFor(stage: PabiliStepStage): PabiliTransitionSpec? = when (stage) {
+        PabiliStepStage.TO_VENDOR -> PabiliTransitionSpec(
+            expectedPrevStatus = OrderStepConstants.STATUS_RIDER_ON_WAY_VENDOR,
+            nextStep = OrderStepConstants.STEP_AT_VENDOR,
+            nextStatus = OrderStepConstants.STATUS_ARRIVED_AT_VENDOR
+        )
+        PabiliStepStage.AT_VENDOR -> PabiliTransitionSpec(
+            expectedPrevStatus = OrderStepConstants.STATUS_ARRIVED_AT_VENDOR,
+            nextStep = OrderStepConstants.STEP_TO_RECIPIENT,
+            nextStatus = OrderStepConstants.STATUS_RIDER_ON_WAY_RECIPIENT
+        )
+        PabiliStepStage.TO_RECIPIENT -> PabiliTransitionSpec(
+            expectedPrevStatus = OrderStepConstants.STATUS_RIDER_ON_WAY_RECIPIENT,
+            nextStep = OrderStepConstants.STEP_AT_RECIPIENT,
+            nextStatus = OrderStepConstants.STATUS_ARRIVED_AT_RECIPIENT
+        )
+        PabiliStepStage.AT_RECIPIENT -> PabiliTransitionSpec(
+            expectedPrevStatus = OrderStepConstants.STATUS_ARRIVED_AT_RECIPIENT,
+            nextStep = OrderStepConstants.STEP_COMPLETED,
+            nextStatus = OrderStepConstants.STATUS_DELIVERED
+        )
+        PabiliStepStage.COMPLETED -> null
+    }
+
+    fun isExpectedStatus(actualDbStatus: String?, expectedPrevStatus: String): Boolean {
+        return (actualDbStatus ?: "").trim().equals(expectedPrevStatus.trim(), ignoreCase = true)
+    }
+
+    fun isValidReceiptInput(raw: String): Boolean {
+        val trimmed = raw.trim()
+        if (!Regex("^\\d+(\\.\\d{1,2})?$").matches(trimmed)) return false
+        val parsed = trimmed.toDoubleOrNull() ?: return false
+        return parsed > 0.0
+    }
+
+    fun parseReceiptOrNull(raw: String): Double? {
+        if (!isValidReceiptInput(raw)) return null
+        return raw.trim().toDoubleOrNull()?.takeIf { it > 0.0 }
+    }
+}
+
 data class Order(
     val id: String = "",
     val orderNumber: String = "",
@@ -379,6 +445,8 @@ data class Order(
     // Taxi stops (Stop 1 is pickup; Stop 2 is drop-off; Stop 3, 4... are extra stops)
     val stops: List<TaxiStop> = emptyList(),
     val completedStops: List<Int> = emptyList(),
+    val passengerCount: Int = 1,
+    val pickupNote: String = "",
 
     // Fulfillment & Scheduling
     val fulfillment: String = "delivery",
@@ -449,7 +517,11 @@ data class Order(
     val pabiliItems: List<PabiliItem> = emptyList(),
     val pabiliEstimatedTotal: Double = 0.0,
     val pabiliBudget: Double = 0.0,
+    val budgetLimit: Double = 0.0,
     val finalReceiptTotal: Double = 0.0,
+    val paidOnMerchant: Double = 0.0,
+    val paidOnMerchantAt: Any? = null,
+    val overBudgetApproved: Boolean = false,
 
     // Request a Rider
     val riderRequestStatus: String = "",
@@ -461,6 +533,9 @@ data class Order(
     val pickedUpAt: Any? = null,
     val arrivedMerchantAt: Any? = null,
     val arrivedCustomerAt: Any? = null,
+    val arrivedAtPickupAt: Any? = null,
+    val arrivedAtDropoffAt: Any? = null,
+    val completedAt: Any? = null,
     val deliveredAt: Any? = null,
     val updatedAt: Any? = null,
     val statusHistory: List<Map<String, Any?>> = emptyList(),
@@ -508,18 +583,41 @@ data class Order(
     val displayMerchantName: String
         get() = formatMerchantDisplayName(sanitizeDisplayName(merchantName, ""), branchName, branchCode)
 
+    val resolvedPickupNote: String
+        get() = pickupNote.ifBlank { customerNotes }.trim()
+
     val displayPickupName: String
         get() {
             val s = serviceType.lowercase().trim()
-            if (s == OrderStepConstants.SERVICE_PARCEL || s == OrderStepConstants.SERVICE_PABILI) {
+            if (s == OrderStepConstants.SERVICE_PARCEL) {
                 val sender = sanitizeDisplayName(senderName, "")
-                if (sender.isNotBlank()) return sender
+                    .takeUnless { it.equals("Merchant", ignoreCase = true) || it.equals("Passenger Pickup", ignoreCase = true) }
+                if (!sender.isNullOrBlank()) return sender
                 val merchantClean = sanitizeDisplayName(merchantName, "")
-                return if (merchantClean.isNotBlank()) merchantClean else "Sender"
+                    .takeUnless { it.equals("Merchant", ignoreCase = true) || it.equals("Passenger Pickup", ignoreCase = true) }
+                return if (!merchantClean.isNullOrBlank()) merchantClean else "Sender"
+            }
+            if (s == OrderStepConstants.SERVICE_PABILI) {
+                val merchantDisplay = formatMerchantDisplayName(
+                    sanitizeDisplayName(merchantName, "")
+                        .takeUnless { it.equals("Merchant", ignoreCase = true) || it.equals("Passenger Pickup", ignoreCase = true) }
+                        ?: "",
+                    branchName,
+                    branchCode
+                )
+                if (merchantDisplay.isNotBlank()) return merchantDisplay
+                val sender = sanitizeDisplayName(senderName, "")
+                    .takeUnless { it.equals("Merchant", ignoreCase = true) || it.equals("Passenger Pickup", ignoreCase = true) }
+                return if (!sender.isNullOrBlank()) sender else "Vendor"
             }
             if (s == OrderStepConstants.SERVICE_TAXI) {
-                return stops.firstOrNull()?.address?.let { deduplicateAddress(it) }?.ifBlank { "Passenger Pickup" }
-                    ?: "Passenger Pickup"
+                val cleanCustomer = sanitizeDisplayName(customerName, "")
+                    .takeUnless {
+                        it.equals("Merchant", ignoreCase = true) ||
+                            it.equals("Passenger Pickup", ignoreCase = true) ||
+                            it.equals("Passenger", ignoreCase = true)
+                    }
+                return if (cleanCustomer.isNullOrBlank()) "Passenger" else formatCustomerFirstName(cleanCustomer)
             }
             return displayMerchantName.ifBlank { "Merchant" }
         }
@@ -551,6 +649,46 @@ data class Order(
 
     val isTaxi: Boolean
         get() = serviceType.trim().lowercase(Locale.US) == OrderStepConstants.SERVICE_TAXI
+
+    val isPabili: Boolean
+        get() = serviceType.trim().lowercase(Locale.US) == OrderStepConstants.SERVICE_PABILI
+
+    val resolvedBudgetLimit: Double
+        get() = if (budgetLimit > 0.0) budgetLimit else pabiliBudget
+
+    val resolvedPaidOnMerchant: Double
+        get() = if (paidOnMerchant > 0.0) paidOnMerchant else finalReceiptTotal
+
+    val pabiliStepStage: PabiliStepStage
+        get() {
+            if (!isPabili) return PabiliStepStage.COMPLETED
+            val normStatus = status.trim().lowercase(Locale.US)
+            val normStep = riderStep.trim().lowercase(Locale.US)
+
+            return when {
+                normStatus == OrderStepConstants.STATUS_DELIVERED.lowercase(Locale.US) ||
+                    normStatus == OrderStepConstants.STATUS_COMPLETED.lowercase(Locale.US) ||
+                    normStep == OrderStepConstants.STEP_COMPLETED ||
+                    normStep == OrderStepConstants.STEP_DELIVERED -> PabiliStepStage.COMPLETED
+
+                normStatus == OrderStepConstants.STATUS_ARRIVED_AT_RECIPIENT.lowercase(Locale.US) ||
+                    normStep == OrderStepConstants.STEP_AT_RECIPIENT ||
+                    normStep == OrderStepConstants.STEP_AT_CUSTOMER ||
+                    normStep == OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER -> PabiliStepStage.AT_RECIPIENT
+
+                normStatus == OrderStepConstants.STATUS_RIDER_ON_WAY_RECIPIENT.lowercase(Locale.US) ||
+                    normStep == OrderStepConstants.STEP_TO_RECIPIENT ||
+                    normStep == OrderStepConstants.STEP_TO_CUSTOMER ||
+                    normStep == OrderStepConstants.STEP_HEADING_TO_CUSTOMER ||
+                    normStep == OrderStepConstants.STEP_PICKED_UP -> PabiliStepStage.TO_RECIPIENT
+
+                normStatus == OrderStepConstants.STATUS_ARRIVED_AT_VENDOR.lowercase(Locale.US) ||
+                    normStep == OrderStepConstants.STEP_AT_VENDOR ||
+                    normStep == OrderStepConstants.STEP_ARRIVED_AT_MERCHANT -> PabiliStepStage.AT_VENDOR
+
+                else -> PabiliStepStage.TO_VENDOR
+            }
+        }
 
     val isNonMerchantService: Boolean
         get() = isTaxi || serviceType.trim().lowercase() in listOf(
@@ -586,13 +724,18 @@ data class Order(
     val totalStopsCount: Int
         get() = if (isTaxi) (1 + allTaxiStops.size) else 1
 
+    val hasArrivedAtDropoff: Boolean
+        get() = arrivedAtDropoffAt != null && (arrivedAtDropoffAt !is String || arrivedAtDropoffAt.isNotBlank())
+
     val currentTaxiStopNumber: Int
         get() {
             if (!isTaxi) return 2
             val step = riderStep.lowercase()
             if (step.startsWith(OrderStepConstants.STEP_TO_STOP_PREFIX)) {
-                val numStr = step.removePrefix(OrderStepConstants.STEP_TO_STOP_PREFIX)
-                return numStr.toIntOrNull() ?: 2
+                return step.removePrefix(OrderStepConstants.STEP_TO_STOP_PREFIX).toIntOrNull() ?: 2
+            }
+            if (step.startsWith(OrderStepConstants.STEP_AT_STOP_PREFIX)) {
+                return step.removePrefix(OrderStepConstants.STEP_AT_STOP_PREFIX).toIntOrNull() ?: 2
             }
             return 2
         }
@@ -606,6 +749,49 @@ data class Order(
 
     val currentTargetStop: TaxiStop?
         get() = allTaxiStops.firstOrNull { it.stopNumber == currentTaxiStopNumber }
+
+    val taxiStepStage: TaxiStepStage
+        get() {
+            if (!isTaxi) return TaxiStepStage.COMPLETED
+            val normStatus = status.trim().lowercase(Locale.US)
+            val normStep = riderStep.trim().lowercase(Locale.US)
+
+            if (normStatus == OrderStepConstants.STATUS_COMPLETED.lowercase(Locale.US) ||
+                normStatus == OrderStepConstants.STATUS_DELIVERED.lowercase(Locale.US) ||
+                normStep == OrderStepConstants.STEP_COMPLETED ||
+                normStep == OrderStepConstants.STEP_DELIVERED
+            ) {
+                return TaxiStepStage.COMPLETED
+            }
+
+            if (normStatus == OrderStepConstants.STATUS_DRIVER_ARRIVED.lowercase(Locale.US) ||
+                normStep == OrderStepConstants.STEP_AT_PICKUP
+            ) {
+                return TaxiStepStage.AT_PICKUP
+            }
+
+            if (normStatus == OrderStepConstants.STATUS_ON_TRIP.lowercase(Locale.US) ||
+                normStep.startsWith(OrderStepConstants.STEP_TO_STOP_PREFIX) ||
+                normStep.startsWith(OrderStepConstants.STEP_AT_STOP_PREFIX) ||
+                pickedUpAt != null
+            ) {
+                return if (!isAtLastTaxiStop) {
+                    if (normStep.startsWith(OrderStepConstants.STEP_AT_STOP_PREFIX)) {
+                        TaxiStepStage.AT_EXTRA_STOP
+                    } else {
+                        TaxiStepStage.TO_EXTRA_STOP
+                    }
+                } else {
+                    if (hasArrivedAtDropoff) {
+                        TaxiStepStage.AT_DROPOFF
+                    } else {
+                        TaxiStepStage.TO_DROPOFF
+                    }
+                }
+            }
+
+            return TaxiStepStage.TO_PICKUP
+        }
 
     val estimatedEarnings: Double
         get() {
@@ -663,7 +849,14 @@ data class Order(
         get() = serviceType.lowercase() == OrderStepConstants.SERVICE_PARCEL
 
     val paymentType: PaymentType
-        get() = parsePaymentType(paymentMethod, cashToCollect, codAmount)
+        get() {
+            val effectiveCash = if (isPabili && cashToCollect <= 0.0 && codAmount <= 0.0) {
+                feesDeliveryFee + feesServiceFee
+            } else {
+                cashToCollect
+            }
+            return parsePaymentType(paymentMethod, effectiveCash, codAmount)
+        }
 
     val isCod: Boolean
         get() = !isSplitChild && paymentType == PaymentType.COD
@@ -684,7 +877,7 @@ data class Order(
     // Section 2: CASH TO COLLECT
     // For COD, the cash to collect is fees.total, which already includes the tip.
     // COD, parcel: cashToCollect, from party in cashCollectAt ("sender" at pickup, "recipient" at delivery).
-    // COD, pabili: finalReceiptTotal + fees.deliveryFee + fees.serviceFee + tip, collected at delivery.
+    // COD, pabili: cashToCollect stays delivery fee + service fee only (never add receipt/paidOnMerchant).
     // request_rider: cashToCollect (or codAmount fallback) collected from recipient.
     // Taxi COD: fees.total
     // Paid Online or wallet: no cash to collect.
@@ -697,8 +890,7 @@ data class Order(
                 OrderStepConstants.SERVICE_TAXI -> if (cashToCollect > 0.0) cashToCollect else feesTotal
                 OrderStepConstants.SERVICE_PARCEL -> cashToCollect
                 OrderStepConstants.SERVICE_PABILI -> {
-                    val itemsTotal = if (finalReceiptTotal > 0.0) finalReceiptTotal else pabiliEstimatedTotal
-                    itemsTotal + feesDeliveryFee + feesServiceFee + tip
+                    if (cashToCollect > 0.0) cashToCollect else (feesDeliveryFee + feesServiceFee)
                 }
                 OrderStepConstants.SERVICE_REQUEST -> if (cashToCollect > 0.0) cashToCollect else codAmount
                 else -> {

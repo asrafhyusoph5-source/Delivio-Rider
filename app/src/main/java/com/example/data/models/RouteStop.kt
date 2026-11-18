@@ -62,6 +62,59 @@ data class RouteStop(
         }
 }
 
+fun resolveStopDisplayName(order: Order, type: StopType): String {
+    val service = order.serviceType.lowercase().trim()
+    val cleanCustomer = sanitizeDisplayName(order.customerName, "")
+        .takeUnless { it.equals("Merchant", ignoreCase = true) || it.equals("Passenger Pickup", ignoreCase = true) }
+        .orEmpty()
+    val cleanMerchant = sanitizeDisplayName(order.merchantName, "")
+        .takeUnless { it.equals("Merchant", ignoreCase = true) || it.equals("Passenger Pickup", ignoreCase = true) }
+        .orEmpty()
+    val cleanSender = sanitizeDisplayName(order.senderName, "")
+        .takeUnless { it.equals("Merchant", ignoreCase = true) || it.equals("Passenger Pickup", ignoreCase = true) }
+        .orEmpty()
+
+    return when (service) {
+        OrderStepConstants.SERVICE_TAXI -> {
+            if (cleanCustomer.isBlank() || cleanCustomer.equals("Passenger", ignoreCase = true)) {
+                "Passenger"
+            } else {
+                formatCustomerFirstName(cleanCustomer)
+            }
+        }
+        OrderStepConstants.SERVICE_PARCEL -> {
+            if (type == StopType.MERCHANT) {
+                cleanSender.ifBlank { cleanMerchant }.ifBlank { "Sender" }
+            } else {
+                cleanCustomer.ifBlank { "Customer" }
+            }
+        }
+        OrderStepConstants.SERVICE_PABILI -> {
+            if (type == StopType.MERCHANT) {
+                val formatted = formatMerchantDisplayName(cleanMerchant, order.branchName, order.branchCode)
+                formatted.ifBlank { cleanSender }.ifBlank { "Vendor" }
+            } else {
+                cleanCustomer.ifBlank { "Customer" }
+            }
+        }
+        OrderStepConstants.SERVICE_REQUEST -> {
+            if (type == StopType.MERCHANT) {
+                formatMerchantDisplayName(cleanMerchant, order.branchName, order.branchCode).ifBlank { "Merchant" }
+            } else {
+                cleanCustomer.ifBlank { "Customer" }
+            }
+        }
+        else -> {
+            // Food and Convenience
+            if (type == StopType.MERCHANT) {
+                formatMerchantDisplayName(cleanMerchant, order.branchName, order.branchCode).ifBlank { "Merchant" }
+            } else {
+                if (cleanCustomer.isBlank()) "Customer" else formatCustomerFirstName(cleanCustomer)
+            }
+        }
+    }
+}
+
 object RouteStopCalculator {
 
     /**
@@ -78,11 +131,11 @@ object RouteStopCalculator {
                     OrderStepConstants.STEP_DELIVERED
                 )
             }
+            OrderStepConstants.SERVICE_PABILI -> {
+                order.pabiliStepStage !in setOf(PabiliStepStage.TO_VENDOR, PabiliStepStage.AT_VENDOR)
+            }
             OrderStepConstants.SERVICE_TAXI -> {
-                step !in setOf(
-                    OrderStepConstants.STEP_TAXI_TO_PICKUP,
-                    OrderStepConstants.STEP_TAXI_AT_PICKUP
-                )
+                order.taxiStepStage !in setOf(TaxiStepStage.TO_PICKUP, TaxiStepStage.AT_PICKUP)
             }
             else -> {
                 step in setOf(
@@ -102,6 +155,9 @@ object RouteStopCalculator {
      * Determines whether the customer/drop-off stop for this order is finished.
      */
     fun isCustomerStopFinished(order: Order): Boolean {
+        if (order.isTaxi) {
+            return order.taxiStepStage == TaxiStepStage.COMPLETED
+        }
         val step = order.riderStep.lowercase().trim()
         val status = order.status.lowercase().trim()
         return step in setOf(
@@ -317,14 +373,24 @@ object RouteStopCalculator {
         isFinished: Boolean
     ): RouteStop {
         val isMerchant = type == StopType.MERCHANT
-        val name = if (isMerchant) {
-            order.displayPickupName
-        } else {
-            sanitizeDisplayName(order.customerName, "Customer")
-        }
+        val name = resolveStopDisplayName(order, type)
+
+        val targetTaxiStop = if (order.isTaxi && !isMerchant) order.currentTargetStop else null
 
         val fullAddress = if (isMerchant) {
-            deduplicateAddress(order.merchantAddress).ifBlank { order.displayPickupName }
+            if (order.isTaxi) {
+                deduplicateAddress(order.merchantAddress)
+                    .ifBlank { order.displayPickupName }
+            } else {
+                deduplicateAddress(order.merchantAddress)
+                    .ifBlank { deduplicateAddress(order.stops.firstOrNull()?.address) }
+                    .ifBlank { order.displayPickupName }
+            }
+        } else if (order.isTaxi && targetTaxiStop != null) {
+            deduplicateAddress(targetTaxiStop.address)
+                .ifBlank { deduplicateAddress(order.customerAddress) }
+                .ifBlank { deduplicateAddress(targetTaxiStop.area) }
+                .ifBlank { deduplicateAddress(order.customerArea) }
         } else {
             deduplicateAddress(order.customerAddress).ifBlank { deduplicateAddress(order.customerArea) }
         }
@@ -332,8 +398,23 @@ object RouteStopCalculator {
         // Address according to stage visibility rules
         val address = if (isMerchant) {
             fullAddress
+        } else if (order.isTaxi) {
+            if (order.taxiStepStage !in setOf(TaxiStepStage.TO_PICKUP, TaxiStepStage.AT_PICKUP)) {
+                fullAddress
+            } else {
+                val area = deduplicateAddress(targetTaxiStop?.area ?: order.customerArea)
+                if (area.isNotBlank()) {
+                    "$area (Full address revealed after pickup)"
+                } else {
+                    "Destination hidden until pickup"
+                }
+            }
         } else {
-            val isRevealed = OrderStepConstants.isCustomerAddressRevealed(order.serviceType, order.riderStep)
+            val isRevealed = if (order.isPabili) {
+                order.pabiliStepStage !in setOf(PabiliStepStage.TO_VENDOR, PabiliStepStage.AT_VENDOR)
+            } else {
+                OrderStepConstants.isCustomerAddressRevealed(order.serviceType, order.riderStep)
+            }
             if (isRevealed) {
                 fullAddress
             } else {
@@ -346,7 +427,7 @@ object RouteStopCalculator {
             }
         }
 
-        val phone = if (isMerchant) {
+        val phone = if (isMerchant && !order.isPabili) {
             order.merchantPhone
         } else {
             order.customerPhone
@@ -354,12 +435,16 @@ object RouteStopCalculator {
 
         val lat = if (isMerchant) {
             if (order.merchantLat != 0.0) order.merchantLat else 9.7392
+        } else if (order.isTaxi && targetTaxiStop != null && targetTaxiStop.lat != 0.0) {
+            targetTaxiStop.lat
         } else {
             if (order.customerLat != 0.0) order.customerLat else 9.7400
         }
 
         val lng = if (isMerchant) {
             if (order.merchantLng != 0.0) order.merchantLng else 118.7353
+        } else if (order.isTaxi && targetTaxiStop != null && targetTaxiStop.lng != 0.0) {
+            targetTaxiStop.lng
         } else {
             if (order.customerLng != 0.0) order.customerLng else 118.7360
         }

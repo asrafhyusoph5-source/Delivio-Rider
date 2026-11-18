@@ -23,6 +23,7 @@ object OrderStepConstants {
     const val STEP_TAXI_TO_PICKUP = "to_pickup"
     const val STEP_TAXI_AT_PICKUP = "at_pickup"
     const val STEP_TO_STOP_PREFIX = "to_stop_"
+    const val STEP_AT_STOP_PREFIX = "at_stop_"
 
     // Legacy aliases for backward compatibility
     const val STEP_HEADING_TO_MERCHANT = "heading_to_merchant"
@@ -223,6 +224,17 @@ object OrderStepConstants {
         val step = riderStep.lowercase().trim()
         return when (serviceType.lowercase().trim()) {
             SERVICE_PARCEL -> step in listOf(STEP_TO_RECIPIENT, STEP_AT_RECIPIENT, STEP_HEADING_TO_CUSTOMER, STEP_ARRIVED_AT_CUSTOMER)
+            SERVICE_PABILI -> step in listOf(
+                STEP_PICKED_UP,
+                STEP_TO_RECIPIENT,
+                STEP_AT_RECIPIENT,
+                STEP_TO_CUSTOMER,
+                STEP_AT_CUSTOMER,
+                STEP_HEADING_TO_CUSTOMER,
+                STEP_ARRIVED_AT_CUSTOMER,
+                STEP_COMPLETED,
+                STEP_DELIVERED
+            )
             SERVICE_TAXI -> step != STEP_TO_PICKUP
             else -> step in listOf(STEP_TO_CUSTOMER, STEP_AT_CUSTOMER, STEP_HEADING_TO_CUSTOMER, STEP_ARRIVED_AT_CUSTOMER)
         }
@@ -260,9 +272,9 @@ object OrderStepConstants {
                 STEP_TO_VENDOR, STEP_HEADING_TO_MERCHANT -> "Heading to Vendor"
                 STEP_AT_VENDOR, STEP_ARRIVED_AT_MERCHANT -> "At Vendor"
                 STEP_PICKED_UP -> "Items Picked Up"
-                STEP_TO_CUSTOMER, STEP_HEADING_TO_CUSTOMER -> "Heading to Customer"
-                STEP_AT_CUSTOMER, STEP_ARRIVED_AT_CUSTOMER -> "At Customer"
-                STEP_COMPLETED -> "Delivery Completed"
+                STEP_TO_RECIPIENT, STEP_TO_CUSTOMER, STEP_HEADING_TO_CUSTOMER -> "Heading to Customer"
+                STEP_AT_RECIPIENT, STEP_AT_CUSTOMER, STEP_ARRIVED_AT_CUSTOMER -> "At Customer"
+                STEP_COMPLETED, STEP_DELIVERED -> "Delivery Completed"
                 else -> "On the Way"
             }
             else -> when (step) {
@@ -302,12 +314,11 @@ object OrderStepConstants {
                 else -> "Slide to Complete Delivery"
             }
             SERVICE_PABILI -> when (step) {
-                STEP_TO_VENDOR, STEP_HEADING_TO_MERCHANT -> "Slide to confirm Arrival at Merchant"
+                STEP_TO_VENDOR, STEP_HEADING_TO_MERCHANT -> "Arrived at the Merchant"
                 STEP_AT_VENDOR, STEP_ARRIVED_AT_MERCHANT -> "Slide to confirm Picked Up"
-                STEP_PICKED_UP -> "Slide to start heading to Customer"
-                STEP_TO_CUSTOMER, STEP_HEADING_TO_CUSTOMER -> "Slide to confirm Arrival at Customer"
-                STEP_AT_CUSTOMER, STEP_ARRIVED_AT_CUSTOMER -> "Slide to Complete Delivery"
-                else -> "Slide to Complete Delivery"
+                STEP_PICKED_UP, STEP_TO_RECIPIENT, STEP_TO_CUSTOMER, STEP_HEADING_TO_CUSTOMER -> "Arrived at the Customer"
+                STEP_AT_RECIPIENT, STEP_AT_CUSTOMER, STEP_ARRIVED_AT_CUSTOMER -> "Slide to Confirm Delivery"
+                else -> "Slide to Confirm Delivery"
             }
             else -> when (step) {
                 STEP_TO_MERCHANT, STEP_HEADING_TO_MERCHANT -> "Slide to confirm Arrival at Merchant"

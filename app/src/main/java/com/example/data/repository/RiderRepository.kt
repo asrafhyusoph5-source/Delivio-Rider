@@ -58,6 +58,8 @@ class RiderRepository(
     private val _eligibleOrdersCount = MutableStateFlow(0)
     val eligibleOrdersCount: StateFlow<Int> = _eligibleOrdersCount.asStateFlow()
 
+    private val inFlightAdvanceOrderIds = Collections.synchronizedSet(mutableSetOf<String>())
+
     private val _skippedOrderRecords = MutableStateFlow<List<SkippedOrderRecord>>(emptyList())
     val skippedOrderRecords: StateFlow<List<SkippedOrderRecord>> = _skippedOrderRecords.asStateFlow()
 
@@ -1529,6 +1531,22 @@ class RiderRepository(
                 if (excludes.contains(authUid)) {
                     throw FirebaseFirestoreException("Order not available", FirebaseFirestoreException.Code.ABORTED)
                 }
+                val docServiceType = (snapshot.getString("serviceType") ?: order.serviceType).lowercase().trim()
+                if (docServiceType == OrderStepConstants.SERVICE_PABILI) {
+                    val dbStatus = snapshot.getString("status")?.trim().orEmpty()
+                    val isPlacedOrder = dbStatus.isBlank() ||
+                        dbStatus.equals(OrderStepConstants.STATUS_PLACED_ORDER, ignoreCase = true)
+                    if (!isPlacedOrder) {
+                        android.util.Log.w(
+                            "STATUS",
+                            "Skipped Pabili accept for order=${order.id}: expected='${OrderStepConstants.STATUS_PLACED_ORDER}', actual='$dbStatus'"
+                        )
+                        throw FirebaseFirestoreException(
+                            "Order already accepted (status: $dbStatus)",
+                            FirebaseFirestoreException.Code.ABORTED
+                        )
+                    }
+                }
                 ref to snapshot
             }
 
@@ -1713,6 +1731,7 @@ class RiderRepository(
     fun advanceOrderStep(
         order: Order,
         finalReceiptTotal: Double? = null,
+        overBudgetApproved: Boolean = false,
         onSuccess: () -> Unit,
         onError: (String) -> Unit
     ) {
@@ -1727,38 +1746,44 @@ class RiderRepository(
         val nextStep: String
         val nextStatus: String
         var nextReqStatus: String? = null
+        var pabiliExpectedPrevStatus: String? = null
 
         when (serviceType) {
             OrderStepConstants.SERVICE_TAXI -> {
-                when {
-                    currentStep == OrderStepConstants.STEP_TO_PICKUP -> {
+                val stopNum = order.currentTaxiStopNumber
+                when (order.taxiStepStage) {
+                    TaxiStepStage.TO_PICKUP -> {
                         nextStep = OrderStepConstants.STEP_AT_PICKUP
                         nextStatus = OrderStepConstants.STATUS_DRIVER_ARRIVED
+                        updates["arrivedAtPickupAt"] = FieldValue.serverTimestamp()
                         updates["arrivedMerchantAt"] = FieldValue.serverTimestamp()
                     }
-                    currentStep == OrderStepConstants.STEP_AT_PICKUP -> {
-                        nextStep = "to_stop_2"
+                    TaxiStepStage.AT_PICKUP -> {
+                        nextStep = "${OrderStepConstants.STEP_TO_STOP_PREFIX}2"
                         nextStatus = OrderStepConstants.STATUS_ON_TRIP
                         updates["pickedUpAt"] = FieldValue.serverTimestamp()
                     }
-                    currentStep.startsWith(OrderStepConstants.STEP_TO_STOP_PREFIX) -> {
-                        val stopNum = currentStep.removePrefix(OrderStepConstants.STEP_TO_STOP_PREFIX).toIntOrNull() ?: 2
-                        val isLast = order.isAtLastTaxiStop
-                        if (isLast) {
-                            nextStep = OrderStepConstants.STEP_COMPLETED
-                            nextStatus = OrderStepConstants.STATUS_COMPLETED
-                            updates["deliveredAt"] = FieldValue.serverTimestamp()
-                            updates["completedStops"] = FieldValue.arrayUnion(stopNum)
-                        } else {
-                            nextStep = "to_stop_${stopNum + 1}"
-                            nextStatus = OrderStepConstants.STATUS_ON_TRIP
-                            updates["completedStops"] = FieldValue.arrayUnion(stopNum)
-                        }
+                    TaxiStepStage.TO_EXTRA_STOP -> {
+                        nextStep = "${OrderStepConstants.STEP_AT_STOP_PREFIX}$stopNum"
+                        nextStatus = OrderStepConstants.STATUS_ON_TRIP
                     }
-                    else -> {
+                    TaxiStepStage.AT_EXTRA_STOP -> {
+                        nextStep = "${OrderStepConstants.STEP_TO_STOP_PREFIX}${stopNum + 1}"
+                        nextStatus = OrderStepConstants.STATUS_ON_TRIP
+                        updates["completedStops"] = FieldValue.arrayUnion(stopNum)
+                    }
+                    TaxiStepStage.TO_DROPOFF -> {
+                        nextStep = "${OrderStepConstants.STEP_TO_STOP_PREFIX}$stopNum"
+                        nextStatus = OrderStepConstants.STATUS_ON_TRIP
+                        updates["arrivedAtDropoffAt"] = FieldValue.serverTimestamp()
+                        updates["arrivedCustomerAt"] = FieldValue.serverTimestamp()
+                    }
+                    TaxiStepStage.AT_DROPOFF, TaxiStepStage.COMPLETED -> {
                         nextStep = OrderStepConstants.STEP_COMPLETED
                         nextStatus = OrderStepConstants.STATUS_COMPLETED
+                        updates["completedAt"] = FieldValue.serverTimestamp()
                         updates["deliveredAt"] = FieldValue.serverTimestamp()
+                        updates["completedStops"] = FieldValue.arrayUnion(stopNum)
                     }
                 }
             }
@@ -1787,37 +1812,52 @@ class RiderRepository(
                 }
             }
             OrderStepConstants.SERVICE_PABILI -> {
-                when (currentStep) {
-                    OrderStepConstants.STEP_TO_VENDOR, OrderStepConstants.STEP_HEADING_TO_MERCHANT -> {
-                        nextStep = OrderStepConstants.STEP_AT_VENDOR
-                        nextStatus = OrderStepConstants.STATUS_ARRIVED_AT_VENDOR
+                val stage = order.pabiliStepStage
+                val spec = PabiliFlowRules.transitionFor(stage)
+                if (spec == null) {
+                    android.util.Log.w("STATUS", "Skipped Pabili step update for order=${order.id}: already COMPLETED (status='${order.status}')")
+                    return
+                }
+                pabiliExpectedPrevStatus = spec.expectedPrevStatus
+                nextStep = spec.nextStep
+                nextStatus = spec.nextStatus
+                when (stage) {
+                    PabiliStepStage.TO_VENDOR -> {
                         updates["arrivedMerchantAt"] = FieldValue.serverTimestamp()
                     }
-                    OrderStepConstants.STEP_AT_VENDOR, OrderStepConstants.STEP_ARRIVED_AT_MERCHANT -> {
-                        // Picked up / bought: requires finalReceiptTotal
+                    PabiliStepStage.AT_VENDOR -> {
                         if (finalReceiptTotal == null || finalReceiptTotal <= 0.0) {
                             onError("Receipt total is required for Pabili")
                             return
                         }
-                        nextStep = OrderStepConstants.STEP_PICKED_UP
-                        nextStatus = OrderStepConstants.STATUS_RIDER_ON_THE_WAY
-                        updates["finalReceiptTotal"] = finalReceiptTotal
+                        val roundedReceipt = Math.round(finalReceiptTotal * 100.0) / 100.0
+                        if (kotlin.math.abs(finalReceiptTotal - roundedReceipt) > 1e-6) {
+                            onError("Receipt total can have at most 2 decimal places")
+                            return
+                        }
+                        val budgetLimit = order.resolvedBudgetLimit
+                        val isOverBudget = budgetLimit > 0.0 && roundedReceipt > budgetLimit
+                        if (isOverBudget && !overBudgetApproved) {
+                            onError("Customer approval is required when receipt exceeds budget limit")
+                            return
+                        }
+                        updates["finalReceiptTotal"] = roundedReceipt
+                        updates["paidOnMerchant"] = roundedReceipt
+                        updates["paidOnMerchantAt"] = FieldValue.serverTimestamp()
+                        updates["overBudgetApproved"] = isOverBudget && overBudgetApproved
                         updates["pickedUpAt"] = FieldValue.serverTimestamp()
                     }
-                    OrderStepConstants.STEP_PICKED_UP -> {
-                        nextStep = OrderStepConstants.STEP_TO_CUSTOMER
-                        nextStatus = OrderStepConstants.STATUS_RIDER_ON_THE_WAY
-                    }
-                    OrderStepConstants.STEP_TO_CUSTOMER, OrderStepConstants.STEP_HEADING_TO_CUSTOMER -> {
-                        nextStep = OrderStepConstants.STEP_AT_CUSTOMER
-                        nextStatus = OrderStepConstants.STATUS_RIDER_ON_THE_WAY
+                    PabiliStepStage.TO_RECIPIENT -> {
                         updates["arrivedCustomerAt"] = FieldValue.serverTimestamp()
                     }
-                    else -> { // at_customer -> completed
-                        nextStep = OrderStepConstants.STEP_COMPLETED
-                        nextStatus = OrderStepConstants.STATUS_DELIVERED
+                    PabiliStepStage.AT_RECIPIENT -> {
                         updates["deliveredAt"] = FieldValue.serverTimestamp()
                     }
+                    PabiliStepStage.COMPLETED -> {}
+                }
+                if (!inFlightAdvanceOrderIds.add(order.id)) {
+                    android.util.Log.w("STATUS", "Skipped duplicate in-flight Pabili tap for order=${order.id} (stage=$stage)")
+                    return
                 }
             }
             else -> {
@@ -2022,26 +2062,45 @@ class RiderRepository(
                     }
                 } else null
 
-                val writeBatch = db.batch()
-                writeBatch.update(orderRef, updates)
-
-                if (nextOrderToPromote != null) {
-                    val nextOrderRef = db.collection("orders").document(nextOrderToPromote.id)
-                    val promoteUpdates = mapOf<String, Any>(
-                        "status" to OrderStepConstants.STATUS_RIDER_ON_THE_WAY,
-                        "updatedAt" to FieldValue.serverTimestamp(),
-                        "statusHistory" to FieldValue.arrayUnion(
-                            mapOf(
-                                "status" to OrderStepConstants.STATUS_RIDER_ON_THE_WAY,
-                                "timestamp" to com.google.firebase.Timestamp.now()
+                if (serviceType == OrderStepConstants.SERVICE_PABILI && pabiliExpectedPrevStatus != null) {
+                    val expectedStatus = pabiliExpectedPrevStatus!!
+                    val nextOrderRef = nextOrderToPromote?.let { db.collection("orders").document(it.id) }
+                    val promoteUpdates = if (nextOrderToPromote != null) {
+                        mapOf<String, Any>(
+                            "status" to OrderStepConstants.STATUS_RIDER_ON_THE_WAY,
+                            "updatedAt" to FieldValue.serverTimestamp(),
+                            "statusHistory" to FieldValue.arrayUnion(
+                                mapOf(
+                                    "status" to OrderStepConstants.STATUS_RIDER_ON_THE_WAY,
+                                    "timestamp" to com.google.firebase.Timestamp.now()
+                                )
                             )
                         )
-                    )
-                    writeBatch.update(nextOrderRef, promoteUpdates)
-                }
+                    } else null
 
-                writeBatch.commit()
-                    .addOnSuccessListener {
+                    db.runTransaction { tx ->
+                        val snap = tx.get(orderRef)
+                        val nextSnap = nextOrderRef?.let { tx.get(it) }
+                        val actualDbStatus = snap.getString("status")?.trim().orEmpty()
+                        if (!PabiliFlowRules.isExpectedStatus(actualDbStatus, expectedStatus)) {
+                            android.util.Log.w(
+                                "STATUS",
+                                "Skipped Pabili delivery write for order=${order.id}: expected='$expectedStatus', actual='$actualDbStatus', target='$nextStatus'"
+                            )
+                            throw FirebaseFirestoreException(
+                                "Skipped out-of-order status update (current: $actualDbStatus)",
+                                FirebaseFirestoreException.Code.ABORTED
+                            )
+                        }
+                        tx.update(orderRef, updates)
+                        if (nextOrderRef != null && promoteUpdates != null &&
+                            nextSnap != null && nextSnap.exists() &&
+                            nextSnap.getString("status") == OrderStepConstants.STATUS_ON_ANOTHER_DELIVERY
+                        ) {
+                            tx.update(nextOrderRef, promoteUpdates)
+                        }
+                    }.addOnSuccessListener {
+                        inFlightAdvanceOrderIds.remove(order.id)
                         setOfferFinalOutcome(order.id, "completed")
                         _activeOrders.value = _activeOrders.value
                             .filter { it.id != order.id }
@@ -2052,14 +2111,108 @@ class RiderRepository(
                             }
                         RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
                         onSuccess()
+                    }.addOnFailureListener {
+                        inFlightAdvanceOrderIds.remove(order.id)
+                        onError(it.localizedMessage ?: "Failed to complete delivery")
                     }
-                    .addOnFailureListener { onError(it.localizedMessage ?: "Failed to complete delivery") }
+                } else {
+                    val writeBatch = db.batch()
+                    writeBatch.update(orderRef, updates)
+
+                    if (nextOrderToPromote != null) {
+                        val nextOrderRef = db.collection("orders").document(nextOrderToPromote.id)
+                        val promoteUpdates = mapOf<String, Any>(
+                            "status" to OrderStepConstants.STATUS_RIDER_ON_THE_WAY,
+                            "updatedAt" to FieldValue.serverTimestamp(),
+                            "statusHistory" to FieldValue.arrayUnion(
+                                mapOf(
+                                    "status" to OrderStepConstants.STATUS_RIDER_ON_THE_WAY,
+                                    "timestamp" to com.google.firebase.Timestamp.now()
+                                )
+                            )
+                        )
+                        writeBatch.update(nextOrderRef, promoteUpdates)
+                    }
+
+                    writeBatch.commit()
+                        .addOnSuccessListener {
+                            setOfferFinalOutcome(order.id, "completed")
+                            _activeOrders.value = _activeOrders.value
+                                .filter { it.id != order.id }
+                                .map { rem ->
+                                    if (nextOrderToPromote != null && rem.id == nextOrderToPromote.id) {
+                                        rem.copy(status = OrderStepConstants.STATUS_RIDER_ON_THE_WAY)
+                                    } else rem
+                                }
+                            RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
+                            onSuccess()
+                        }
+                        .addOnFailureListener { onError(it.localizedMessage ?: "Failed to complete delivery") }
+                }
+            }
+        } else if (serviceType == OrderStepConstants.SERVICE_PABILI && pabiliExpectedPrevStatus != null) {
+            val expectedStatus = pabiliExpectedPrevStatus!!
+            db.runTransaction { tx ->
+                val snap = tx.get(orderRef)
+                val actualDbStatus = snap.getString("status")?.trim().orEmpty()
+                if (!PabiliFlowRules.isExpectedStatus(actualDbStatus, expectedStatus)) {
+                    android.util.Log.w(
+                        "STATUS",
+                        "Skipped Pabili step write for order=${order.id}: expected='$expectedStatus', actual='$actualDbStatus', target='$nextStatus'"
+                    )
+                    throw FirebaseFirestoreException(
+                        "Skipped out-of-order status update (current: $actualDbStatus)",
+                        FirebaseFirestoreException.Code.ABORTED
+                    )
+                }
+                tx.update(orderRef, updates)
+            }.addOnSuccessListener {
+                inFlightAdvanceOrderIds.remove(order.id)
+                val nowTs = com.google.firebase.Timestamp.now()
+                _activeOrders.value = _activeOrders.value.map {
+                    if (it.id == order.id) {
+                        it.copy(
+                            riderStep = nextStep,
+                            status = nextStatus,
+                            arrivedMerchantAt = if (updates.containsKey("arrivedMerchantAt")) nowTs else it.arrivedMerchantAt,
+                            pickedUpAt = if (updates.containsKey("pickedUpAt")) nowTs else it.pickedUpAt,
+                            arrivedCustomerAt = if (updates.containsKey("arrivedCustomerAt")) nowTs else it.arrivedCustomerAt,
+                            paidOnMerchant = (updates["paidOnMerchant"] as? Double) ?: it.paidOnMerchant,
+                            finalReceiptTotal = (updates["finalReceiptTotal"] as? Double) ?: it.finalReceiptTotal,
+                            paidOnMerchantAt = if (updates.containsKey("paidOnMerchantAt")) nowTs else it.paidOnMerchantAt,
+                            overBudgetApproved = (updates["overBudgetApproved"] as? Boolean) ?: it.overBudgetApproved
+                        )
+                    } else it
+                }
+                onSuccess()
+            }.addOnFailureListener {
+                inFlightAdvanceOrderIds.remove(order.id)
+                onError(it.localizedMessage ?: "Failed to advance step")
             }
         } else {
             orderRef.update(updates)
                 .addOnSuccessListener {
+                    val nowTs = com.google.firebase.Timestamp.now()
                     _activeOrders.value = _activeOrders.value.map {
-                        if (it.id == order.id) it.copy(riderStep = nextStep, status = nextStatus) else it
+                        if (it.id == order.id) {
+                            val updatedCompletedStops = if (serviceType == OrderStepConstants.SERVICE_TAXI &&
+                                order.taxiStepStage == TaxiStepStage.AT_EXTRA_STOP
+                            ) {
+                                (it.completedStops + order.currentTaxiStopNumber).distinct()
+                            } else {
+                                it.completedStops
+                            }
+                            it.copy(
+                                riderStep = nextStep,
+                                status = nextStatus,
+                                arrivedAtPickupAt = if (updates.containsKey("arrivedAtPickupAt")) nowTs else it.arrivedAtPickupAt,
+                                arrivedMerchantAt = if (updates.containsKey("arrivedMerchantAt")) nowTs else it.arrivedMerchantAt,
+                                pickedUpAt = if (updates.containsKey("pickedUpAt")) nowTs else it.pickedUpAt,
+                                arrivedAtDropoffAt = if (updates.containsKey("arrivedAtDropoffAt")) nowTs else it.arrivedAtDropoffAt,
+                                arrivedCustomerAt = if (updates.containsKey("arrivedCustomerAt")) nowTs else it.arrivedCustomerAt,
+                                completedStops = updatedCompletedStops
+                            )
+                        } else it
                     }
                     onSuccess()
                 }

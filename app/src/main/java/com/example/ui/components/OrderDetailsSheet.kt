@@ -3,11 +3,11 @@ package com.example.ui.components
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.view.HapticFeedbackConstants
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -20,17 +20,25 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.AltRoute
+import androidx.compose.material.icons.automirrored.filled.StickyNote2
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -38,15 +46,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import com.example.data.constants.BatchConstants
 import com.example.data.constants.OrderStepConstants
 import com.example.data.models.*
 import com.example.ui.theme.*
 import java.util.Locale
 
 enum class OrderSheetState {
-    PEEK,
-    HALF,
-    FULL
+    COLLAPSED,
+    EXPANDED
 }
 
 @Composable
@@ -62,10 +71,13 @@ fun OrderDetailsSheet(
     supportPhone: String?,
     routeDistanceKm: Double = 0.0,
     routeEtaMinutes: Int = 0,
-    sheetState: OrderSheetState = OrderSheetState.PEEK,
+    driverLocation: Pair<Double, Double>? = null,
+    isDriverLocationFresh: Boolean = false,
+    sheetState: OrderSheetState = OrderSheetState.EXPANDED,
     onSheetStateChange: (OrderSheetState) -> Unit = {},
     onGoOnlineClick: () -> Unit,
     onAdvanceStep: (Double?, String?) -> Unit,
+    onAdvanceStepWithApproval: ((Double?, Boolean, String?) -> Unit)? = null,
     onReleaseOrder: (String) -> Unit,
     onReportProblem: (String) -> Unit,
     onCallClick: (String, String) -> Unit,
@@ -78,19 +90,39 @@ fun OrderDetailsSheet(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val view = LocalView.current
     val screenHeight = LocalConfiguration.current.screenHeightDp.dp
+
+    fun transitionState(target: OrderSheetState) {
+        if (target == sheetState) return
+        try {
+            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+        } catch (_: Throwable) {
+        }
+        onSheetStateChange(target)
+    }
+
+    fun triggerAdvance(receiptTotal: Double? = null, overBudgetApproved: Boolean = false, orderId: String? = null) {
+        if (onAdvanceStepWithApproval != null) {
+            onAdvanceStepWithApproval(receiptTotal, overBudgetApproved, orderId)
+        } else {
+            onAdvanceStep(receiptTotal, orderId)
+        }
+    }
 
     var showProblemDialog by remember { mutableStateOf(false) }
     var problemReason by remember { mutableStateOf("Merchant delay / waiting") }
 
-    // Dialogs for Slide confirmations
+    // Dialogs for Slide / Press confirmations
     var showItemChecklistDialog by remember { mutableStateOf(false) }
     var showCodConfirmDialog by remember { mutableStateOf(false) }
+    var farArrivalDialogMessage by remember(currentStop?.orderId, currentStop?.order?.riderStep, currentStop?.order?.status) {
+        mutableStateOf<String?>(null)
+    }
     var pabiliReceiptInput by remember(currentStop?.orderId) {
+        val initialPaid = currentStop?.order?.resolvedPaidOnMerchant ?: 0.0
         mutableStateOf(
-            if ((currentStop?.order?.finalReceiptTotal ?: 0.0) > 0.0) {
-                currentStop?.order?.finalReceiptTotal.toString()
-            } else ""
+            if (initialPaid > 0.0) formatPaymentAmount(initialPaid) else ""
         )
     }
 
@@ -101,34 +133,41 @@ fun OrderDetailsSheet(
         batchStops.firstOrNull { "${it.orderId}_${it.type.name}" == selectedStopKey } ?: currentStop
     }
 
-    var showEarningsDetails by remember(activeOrders.size) { mutableStateOf(false) }
+    var showEarningsDetails by remember(currentStop?.orderId, currentStop?.stopNumber) {
+        mutableStateOf(false)
+    }
 
-    // Swipe up/down gesture across PEEK <-> HALF <-> FULL (one step per gesture)
+    // Swipe up/down gesture with velocity between COLLAPSED <-> EXPANDED
     val dragModifier = Modifier.pointerInput(sheetState) {
+        val velocityTracker = VelocityTracker()
         var cumulativeDrag = 0f
         var transitioned = false
         detectVerticalDragGestures(
             onDragStart = {
+                velocityTracker.resetTracking()
                 cumulativeDrag = 0f
                 transitioned = false
             },
             onVerticalDrag = { change, dragAmount ->
                 change.consume()
+                velocityTracker.addPosition(change.uptimeMillis, change.position)
                 if (transitioned) return@detectVerticalDragGestures
                 cumulativeDrag += dragAmount
-                if (cumulativeDrag < -36f) {
+                if (sheetState == OrderSheetState.COLLAPSED && cumulativeDrag < -36f) {
                     transitioned = true
-                    when (sheetState) {
-                        OrderSheetState.PEEK -> onSheetStateChange(OrderSheetState.HALF)
-                        OrderSheetState.HALF -> onSheetStateChange(OrderSheetState.FULL)
-                        OrderSheetState.FULL -> {}
-                    }
-                } else if (cumulativeDrag > 36f) {
+                    transitionState(OrderSheetState.EXPANDED)
+                } else if (sheetState == OrderSheetState.EXPANDED && cumulativeDrag > 36f) {
                     transitioned = true
-                    when (sheetState) {
-                        OrderSheetState.FULL -> onSheetStateChange(OrderSheetState.HALF)
-                        OrderSheetState.HALF -> onSheetStateChange(OrderSheetState.PEEK)
-                        OrderSheetState.PEEK -> {}
+                    transitionState(OrderSheetState.COLLAPSED)
+                }
+            },
+            onDragEnd = {
+                if (!transitioned) {
+                    val velocityY = velocityTracker.calculateVelocity().y
+                    if (sheetState == OrderSheetState.COLLAPSED && (cumulativeDrag < -20f || velocityY < -350f)) {
+                        transitionState(OrderSheetState.EXPANDED)
+                    } else if (sheetState == OrderSheetState.EXPANDED && (cumulativeDrag > 20f || velocityY > 350f)) {
+                        transitionState(OrderSheetState.COLLAPSED)
                     }
                 }
             }
@@ -137,34 +176,29 @@ fun OrderDetailsSheet(
 
     val cardMaxHeight = when {
         activeOrders.isEmpty() || currentStop == null -> (screenHeight * 0.45f).coerceAtLeast(240.dp)
-        sheetState == OrderSheetState.PEEK -> (screenHeight * 0.42f).coerceAtLeast(230.dp)
-        sheetState == OrderSheetState.HALF -> (screenHeight * 0.56f).coerceAtLeast(360.dp)
-        else -> (screenHeight * 0.80f).coerceAtLeast(460.dp)
+        sheetState == OrderSheetState.COLLAPSED -> (screenHeight * 0.25f).coerceAtLeast(160.dp)
+        else -> (screenHeight * 0.85f).coerceAtLeast(360.dp)
     }
 
     Card(
-        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp, bottomStart = 0.dp, bottomEnd = 0.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = 12.dp),
         modifier = modifier
             .fillMaxWidth()
             .wrapContentHeight()
             .heightIn(max = cardMaxHeight)
-            .animateContentSize(
-                animationSpec = spring(
-                    dampingRatio = Spring.DampingRatioNoBouncy,
-                    stiffness = Spring.StiffnessMediumLow
-                )
-            )
+            .animateContentSize(animationSpec = tween(durationMillis = 250))
             .onSizeChanged { onHeightChangedPx(it.height) }
             .testTag("order_details_sheet")
     ) {
         if (activeOrders.isEmpty() || currentStop == null) {
-            // ================= IDLE STATE (WRAPPED HEIGHT) =================
+            // ================= IDLE STATE (WRAPPED HEIGHT, DOCKED FLUSH TO BOTTOM) =================
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .wrapContentHeight()
+                    .navigationBarsPadding()
                     .padding(horizontal = 18.dp, vertical = 14.dp)
             ) {
                 Box(
@@ -271,157 +305,164 @@ fun OrderDetailsSheet(
                 }
             }
         } else {
-            // ================= ACTIVE TRIP / BATCH =================
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .wrapContentHeight()
-            ) {
-                // Drag Handle (supports swipe up/down AND tap to cycle PEEK -> HALF -> FULL -> PEEK)
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .then(dragModifier)
-                        .clickable {
-                            val next = when (sheetState) {
-                                OrderSheetState.PEEK -> OrderSheetState.HALF
-                                OrderSheetState.HALF -> OrderSheetState.FULL
-                                OrderSheetState.FULL -> OrderSheetState.PEEK
-                            }
-                            onSheetStateChange(next)
-                        }
-                        .padding(top = 10.dp, bottom = 6.dp)
-                        .testTag("sheet_drag_handle"),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .width(44.dp)
-                            .height(5.dp)
-                            .clip(RoundedCornerShape(3.dp))
-                            .background(MaterialTheme.colorScheme.outlineVariant)
+            // ================= ACTIVE TRIP / BATCH (COLLAPSED OR EXPANDED) =================
+            when (sheetState) {
+                OrderSheetState.COLLAPSED -> {
+                    CollapsedOrderSheetContent(
+                        stopName = currentStop.name,
+                        dragModifier = dragModifier,
+                        onExpand = { transitionState(OrderSheetState.EXPANDED) }
                     )
                 }
 
-                when (sheetState) {
-                    OrderSheetState.PEEK -> {
-                        PeekOrderSheetContent(
-                            currentStop = currentStop,
-                            totalStops = batchStops.size.coerceAtLeast(1),
-                            routeDistanceKm = routeDistanceKm,
-                            routeEtaMinutes = routeEtaMinutes,
-                            dragModifier = dragModifier,
-                            onExpandToHalf = { onSheetStateChange(OrderSheetState.HALF) },
-                            onNavigateClick = { launchExternalNavigation(context, currentStop) },
-                            onSlideConfirmed = {
-                                handleSlideAction(
-                                    currentStop = currentStop,
-                                    onOpenChecklist = { showItemChecklistDialog = true },
-                                    onOpenCodConfirm = { showCodConfirmDialog = true },
-                                    onAdvanceDirect = { onAdvanceStep(null, currentStop.orderId) }
-                                )
+                OrderSheetState.EXPANDED -> {
+                    ExpandedOrderSheetContent(
+                        batchStops = batchStops,
+                        currentStop = currentStop,
+                        selectedStop = selectedStop ?: currentStop,
+                        activeOrders = activeOrders,
+                        currencySymbol = currencySymbol,
+                        routeDistanceKm = routeDistanceKm,
+                        routeEtaMinutes = routeEtaMinutes,
+                        showEarningsDetails = showEarningsDetails,
+                        dragModifier = dragModifier,
+                        onToggleEarningsDetails = { showEarningsDetails = !showEarningsDetails },
+                        onSelectStop = { stop ->
+                            selectedStopKey = "${stop.orderId}_${stop.type.name}"
+                            onFocusStop(stop)
+                        },
+                        onNavigateClick = { launchExternalNavigation(context, currentStop) },
+                        onCallClick = {
+                            val target = selectedStop ?: currentStop
+                            val isPabiliOrder = target.order.isPabili
+                            val phone = if (isPabiliOrder) {
+                                target.order.customerPhone
+                            } else {
+                                target.phone
+                                    .ifBlank { target.order.customerPhone }
+                                    .ifBlank { target.order.merchantPhone }
                             }
-                        )
-                    }
-
-                    OrderSheetState.HALF -> {
-                        HalfOrderSheetContent(
-                            batchStops = batchStops,
-                            currentStop = currentStop,
-                            currencySymbol = currencySymbol,
-                            routeDistanceKm = routeDistanceKm,
-                            routeEtaMinutes = routeEtaMinutes,
-                            onNavigateClick = { launchExternalNavigation(context, currentStop) },
-                            onCallClick = {
-                                if (currentStop.phone.isNotBlank()) {
-                                    onCallClick(currentStop.name, currentStop.phone)
+                            val callName = if (isPabiliOrder) {
+                                target.order.customerName.ifBlank { "Customer" }
+                            } else {
+                                target.name
+                            }
+                            if (phone.isNotBlank()) {
+                                onCallClick(callName, phone)
+                            } else {
+                                Toast.makeText(context, "No phone number available", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        onChatClick = { order ->
+                            if (OrderChatConstants.isInstantOrder(order.serviceType)) {
+                                Toast.makeText(context, "Chat is not available for instant requests", Toast.LENGTH_SHORT).show()
+                            } else {
+                                onChatClick(order)
+                            }
+                        },
+                        hasUnreadChat = hasUnreadChat,
+                        onHeadsetClick = onHeadsetClick,
+                        onCollapse = { transitionState(OrderSheetState.COLLAPSED) },
+                        onReportProblemClick = { showProblemDialog = true },
+                        onTaxiPressAction = {
+                            val stage = currentStop.order.taxiStepStage
+                            val needsFarCheck = stage == TaxiStepStage.TO_PICKUP ||
+                                stage == TaxiStepStage.TO_DROPOFF ||
+                                stage == TaxiStepStage.TO_EXTRA_STOP
+                            val isFar = needsFarCheck &&
+                                isDriverLocationFresh &&
+                                isDriverFarFromTarget(driverLocation, currentStop.lat, currentStop.lng)
+                            if (isFar) {
+                                farArrivalDialogMessage = if (stage == TaxiStepStage.TO_PICKUP) {
+                                    "You seem far from the pickup point. Mark as arrived anyway?"
+                                } else {
+                                    "You seem far from the drop-off point. Mark as arrived anyway?"
                                 }
-                            },
-                            onChatClick = onChatClick,
-                            hasUnreadChat = hasUnreadChat,
-                            onHeadsetClick = onHeadsetClick,
-                            onSelectStop = { stop ->
-                                selectedStopKey = "${stop.orderId}_${stop.type.name}"
-                                onFocusStop(stop)
-                                onSheetStateChange(OrderSheetState.FULL)
-                            },
-                            onExpandToFull = { onSheetStateChange(OrderSheetState.FULL) },
-                            onSlideConfirmed = {
-                                handleSlideAction(
-                                    currentStop = currentStop,
-                                    onOpenChecklist = { showItemChecklistDialog = true },
-                                    onOpenCodConfirm = { showCodConfirmDialog = true },
-                                    onAdvanceDirect = { onAdvanceStep(null, currentStop.orderId) }
-                                )
+                            } else {
+                                triggerAdvance(null, false, currentStop.orderId)
                             }
-                        )
-                    }
-
-                    OrderSheetState.FULL -> {
-                        FullOrderSheetContent(
-                            batchStops = batchStops,
-                            currentStop = currentStop,
-                            selectedStop = selectedStop ?: currentStop,
-                            activeOrders = activeOrders,
-                            currencySymbol = currencySymbol,
-                            routeDistanceKm = routeDistanceKm,
-                            routeEtaMinutes = routeEtaMinutes,
-                            showEarningsDetails = showEarningsDetails,
-                            onToggleEarningsDetails = { showEarningsDetails = !showEarningsDetails },
-                            onSelectStop = { stop ->
-                                selectedStopKey = "${stop.orderId}_${stop.type.name}"
-                                onFocusStop(stop)
-                            },
-                            onNavigateClick = { launchExternalNavigation(context, currentStop) },
-                            onCallClick = {
-                                val target = selectedStop ?: currentStop
-                                if (target.phone.isNotBlank()) {
-                                    onCallClick(target.name, target.phone)
-                                }
-                            },
-                            onChatClick = onChatClick,
-                            hasUnreadChat = hasUnreadChat,
-                            onHeadsetClick = onHeadsetClick,
-                            onCollapseToHalf = { onSheetStateChange(OrderSheetState.HALF) },
-                            onReportProblemClick = { showProblemDialog = true },
-                            onSlideConfirmed = {
-                                handleSlideAction(
-                                    currentStop = currentStop,
-                                    onOpenChecklist = { showItemChecklistDialog = true },
-                                    onOpenCodConfirm = { showCodConfirmDialog = true },
-                                    onAdvanceDirect = { onAdvanceStep(null, currentStop.orderId) }
-                                )
-                            }
-                        )
-                    }
+                        },
+                        onPabiliPressAction = {
+                            triggerAdvance(null, false, currentStop.orderId)
+                        },
+                        onSlideConfirmed = {
+                            handleSlideAction(
+                                currentStop = currentStop,
+                                onOpenChecklist = { showItemChecklistDialog = true },
+                                onOpenCodConfirm = { showCodConfirmDialog = true },
+                                onAdvanceDirect = { triggerAdvance(null, false, currentStop.orderId) }
+                            )
+                        }
+                    )
                 }
             }
         }
     }
 
-    // Item Checklist Dialog (for Slide to confirm Picked Up at Merchant)
-    if (showItemChecklistDialog && currentStop != null) {
+    // Far arrival confirmation dialog (Taxi only when > 300 m from target point)
+    val pendingFarMessage = farArrivalDialogMessage
+    if (pendingFarMessage != null && currentStop != null) {
+        AlertDialog(
+            onDismissRequest = { farArrivalDialogMessage = null },
+            title = {
+                Text("Confirm Arrival", fontWeight = FontWeight.Bold)
+            },
+            text = {
+                Text(pendingFarMessage, fontSize = 14.sp)
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        farArrivalDialogMessage = null
+                        triggerAdvance(null, false, currentStop.orderId)
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = DelivioYellow,
+                        contentColor = TextOnYellow
+                    ),
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("far_arrival_yes_button")
+                ) {
+                    Text("Yes", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { farArrivalDialogMessage = null },
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("far_arrival_cancel_button")
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Item Checklist Dialog (for Slide to confirm Picked Up at Merchant/Vendor — never shown for Taxi)
+    if (showItemChecklistDialog && currentStop != null && !currentStop.order.isTaxi) {
         ItemChecklistDialog(
             currentStop = currentStop,
+            currencySymbol = currencySymbol,
             pabiliReceiptInput = pabiliReceiptInput,
             onPabiliReceiptChange = { pabiliReceiptInput = it },
-            onConfirmPickedUp = {
-                val receipt = pabiliReceiptInput.toDoubleOrNull()
+            onConfirmPickedUp = { receiptTotal, overBudgetApproved ->
                 showItemChecklistDialog = false
-                onAdvanceStep(receipt, currentStop.orderId)
+                triggerAdvance(receiptTotal, overBudgetApproved, currentStop.orderId)
             },
             onDismiss = { showItemChecklistDialog = false }
         )
     }
 
-    // COD Cash Confirmation Dialog (for Slide to Complete Delivery at Customer)
+    // COD Cash Confirmation Dialog (for Slide to Complete/Confirm Delivery at Customer)
     if (showCodConfirmDialog && currentStop != null) {
         CodCollectionDialog(
             currentStop = currentStop,
             currencySymbol = currencySymbol,
             onConfirmDelivery = {
                 showCodConfirmDialog = false
-                onAdvanceStep(null, currentStop.orderId)
+                triggerAdvance(null, false, currentStop.orderId)
             },
             onDismiss = { showCodConfirmDialog = false }
         )
@@ -526,12 +567,44 @@ private fun formatOnePaymentLine(order: Order, currencySymbol: String): String {
     }
 }
 
+fun isDriverFarFromTarget(
+    driverLocation: Pair<Double, Double>?,
+    targetLat: Double,
+    targetLng: Double,
+    thresholdMeters: Double = 300.0
+): Boolean {
+    if (driverLocation == null) return false
+    val (dLat, dLng) = driverLocation
+    if (dLat == 0.0 || dLng == 0.0 || targetLat == 0.0 || targetLng == 0.0) return false
+    val distanceMeters = BatchConstants.distanceKm(dLat, dLng, targetLat, targetLng) * 1000.0
+    return distanceMeters > thresholdMeters
+}
+
 private fun handleSlideAction(
     currentStop: RouteStop,
     onOpenChecklist: () -> Unit,
     onOpenCodConfirm: () -> Unit,
     onAdvanceDirect: () -> Unit
 ) {
+    if (currentStop.order.isTaxi) {
+        onAdvanceDirect()
+        return
+    }
+    if (currentStop.order.isPabili) {
+        when (currentStop.order.pabiliStepStage) {
+            PabiliStepStage.AT_VENDOR -> onOpenChecklist()
+            PabiliStepStage.AT_RECIPIENT -> {
+                val isSplitChild = currentStop.order.isSplitChild || currentStop.order.badge.equals("split", ignoreCase = true)
+                if (currentStop.isCod && !isSplitChild) {
+                    onOpenCodConfirm()
+                } else {
+                    onAdvanceDirect()
+                }
+            }
+            else -> onAdvanceDirect()
+        }
+        return
+    }
     val step = currentStop.order.riderStep.lowercase().trim()
     if (currentStop.isMerchant) {
         val atMerchantSteps = setOf(
@@ -566,6 +639,21 @@ private fun handleSlideAction(
 }
 
 private fun getSlideButtonLabel(stop: RouteStop): String {
+    if (stop.order.isTaxi) {
+        return when (stop.order.taxiStepStage) {
+            TaxiStepStage.AT_PICKUP -> "Slide to confirm Picked Up"
+            TaxiStepStage.AT_EXTRA_STOP -> "Slide to continue to the next stop"
+            TaxiStepStage.AT_DROPOFF -> "Slide to confirm Drop off"
+            else -> "Slide to confirm Drop off"
+        }
+    }
+    if (stop.order.isPabili) {
+        return when (stop.order.pabiliStepStage) {
+            PabiliStepStage.AT_VENDOR -> "Slide to confirm Picked Up"
+            PabiliStepStage.AT_RECIPIENT, PabiliStepStage.COMPLETED -> "Slide to Confirm Delivery"
+            else -> "Slide to Confirm Delivery"
+        }
+    }
     val step = stop.order.riderStep.lowercase().trim()
     return if (stop.isMerchant) {
         val atMerchantSteps = setOf(
@@ -594,27 +682,65 @@ private fun getSlideButtonLabel(stop: RouteStop): String {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun StepBadgeRow(
     currentStop: RouteStop,
-    totalStops: Int
+    totalStops: Int,
+    currencySymbol: String
 ) {
-    val actionLabel = if (currentStop.isMerchant) "Pick up" else "Drop off"
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    val isTaxi = currentStop.order.isTaxi
+    val taxiStage = currentStop.order.taxiStepStage
+    val badgeText = if (isTaxi) {
+        when (taxiStage) {
+            TaxiStepStage.TO_PICKUP -> "Step 1 of 4 - Go to pickup"
+            TaxiStepStage.AT_PICKUP -> "Step 2 of 4 - Pick up"
+            TaxiStepStage.TO_EXTRA_STOP -> "Step 3 of 4 - Go to Stop ${currentStop.order.currentTaxiStopNumber}"
+            TaxiStepStage.AT_EXTRA_STOP -> "Step 3 of 4 - At Stop ${currentStop.order.currentTaxiStopNumber}"
+            TaxiStepStage.TO_DROPOFF -> "Step 3 of 4 - Go to drop-off"
+            TaxiStepStage.AT_DROPOFF, TaxiStepStage.COMPLETED -> "Step 4 of 4 - Drop off"
+        }
+    } else {
+        val actionLabel = if (currentStop.isMerchant) "Pick up" else "Drop off"
+        "Stop ${currentStop.stopNumber} of $totalStops - $actionLabel"
+    }
+    val isPickupTint = if (isTaxi) {
+        taxiStage == TaxiStepStage.TO_PICKUP || taxiStage == TaxiStepStage.AT_PICKUP
+    } else {
+        currentStop.isMerchant
+    }
+
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         Surface(
             shape = RoundedCornerShape(8.dp),
-            color = if (currentStop.isMerchant) DelivioGreen.copy(alpha = 0.14f) else DelivioRed.copy(alpha = 0.14f)
+            color = if (isPickupTint) DelivioGreen.copy(alpha = 0.14f) else DelivioRed.copy(alpha = 0.14f)
         ) {
             Text(
-                text = "Stop ${currentStop.stopNumber} of $totalStops - $actionLabel",
+                text = badgeText,
                 fontWeight = FontWeight.Bold,
                 fontSize = 11.sp,
-                color = if (currentStop.isMerchant) DelivioGreenDark else DelivioRed,
+                color = if (isPickupTint) DelivioGreenDark else DelivioRed,
                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
             )
+        }
+        if (currentStop.order.isPabili && currentStop.order.resolvedBudgetLimit > 0.0) {
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = DelivioYellow.copy(alpha = 0.22f),
+                border = BorderStroke(0.5.dp, DelivioYellowDark.copy(alpha = 0.45f)),
+                modifier = Modifier.testTag("pabili_budget_limit_chip")
+            ) {
+                Text(
+                    text = "Budget limit $currencySymbol${formatPaymentAmount(currentStop.order.resolvedBudgetLimit)}",
+                    color = TextOnYellow,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                )
+            }
         }
         if (currentStop.order.isSplitChild || currentStop.order.badge.equals("split", ignoreCase = true)) {
             Surface(
@@ -648,229 +774,72 @@ private fun StepBadgeRow(
 }
 
 @Composable
-private fun PeekOrderSheetContent(
-    currentStop: RouteStop,
-    totalStops: Int,
-    routeDistanceKm: Double,
-    routeEtaMinutes: Int,
+private fun CollapsedOrderSheetContent(
+    stopName: String,
     dragModifier: Modifier,
-    onExpandToHalf: () -> Unit,
-    onNavigateClick: () -> Unit,
-    onSlideConfirmed: () -> Unit
+    onExpand: () -> Unit
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .wrapContentHeight()
-            .padding(horizontal = 16.dp)
-            .padding(bottom = 12.dp)
+            .navigationBarsPadding()
+            .height(88.dp)
+            .then(dragModifier)
+            .padding(horizontal = 18.dp, vertical = 10.dp)
+            .testTag("collapsed_trip_bar"),
+        verticalArrangement = Arrangement.SpaceBetween
     ) {
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .then(dragModifier)
-                .clickable { onExpandToHalf() }
+                .clickable(onClick = onExpand)
+                .padding(bottom = 4.dp)
+                .testTag("sheet_drag_handle"),
+            contentAlignment = Alignment.Center
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                StepBadgeRow(currentStop = currentStop, totalStops = totalStops)
-                Icon(
-                    imageVector = Icons.Default.KeyboardArrowUp,
-                    contentDescription = "Expand trip details",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-
-            Spacer(modifier = Modifier.height(6.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = currentStop.name,
-                        fontWeight = FontWeight.ExtraBold,
-                        fontSize = 16.sp,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    val etaPart = if (routeEtaMinutes > 0) "$routeEtaMinutes min" else "Calculating ETA"
-                    val distPart = if (routeDistanceKm > 0.0) " • ${String.format(Locale.US, "%.1f", routeDistanceKm)} km" else ""
-                    Text(
-                        text = "$etaPart$distPart",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1
-                    )
-                }
-
-                Spacer(modifier = Modifier.width(10.dp))
-
-                Button(
-                    onClick = onNavigateClick,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = DelivioYellow,
-                        contentColor = TextOnYellow
-                    ),
-                    shape = RoundedCornerShape(12.dp),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                    modifier = Modifier
-                        .heightIn(min = 48.dp)
-                        .testTag("navigate_stop_button")
-                ) {
-                    Icon(Icons.Default.Navigation, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(5.dp))
-                    Text("Navigate", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(10.dp))
-
-        SlideToConfirmButton(
-            text = getSlideButtonLabel(currentStop),
-            onConfirmed = onSlideConfirmed,
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("sheet_slide_button")
-        )
-    }
-}
-
-@Composable
-private fun HalfOrderSheetContent(
-    batchStops: List<RouteStop>,
-    currentStop: RouteStop,
-    currencySymbol: String,
-    routeDistanceKm: Double,
-    routeEtaMinutes: Int,
-    onNavigateClick: () -> Unit,
-    onCallClick: () -> Unit,
-    onChatClick: (Order) -> Unit,
-    hasUnreadChat: (String) -> Boolean,
-    onHeadsetClick: () -> Unit,
-    onSelectStop: (RouteStop) -> Unit,
-    onExpandToFull: () -> Unit,
-    onSlideConfirmed: () -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .wrapContentHeight()
-            .padding(horizontal = 16.dp)
-            .padding(bottom = 12.dp)
-    ) {
-        // Header row
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                StepBadgeRow(currentStop = currentStop, totalStops = batchStops.size.coerceAtLeast(1))
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = currentStop.name,
-                    fontWeight = FontWeight.ExtraBold,
-                    fontSize = 16.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                val etaText = buildString {
-                    if (routeEtaMinutes > 0) append("$routeEtaMinutes min")
-                    if (routeDistanceKm > 0.0) {
-                        if (isNotEmpty()) append(" • ")
-                        append("${String.format(Locale.US, "%.1f", routeDistanceKm)} km")
-                    }
-                }
-                if (etaText.isNotBlank()) {
-                    Text(
-                        text = etaText,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(
-                    onClick = onNavigateClick,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .testTag("half_navigate_button")
-                ) {
-                    Icon(Icons.Default.Navigation, contentDescription = "Navigate", tint = DelivioYellow)
-                }
-                IconButton(
-                    onClick = onExpandToFull,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .testTag("expand_sheet_button")
-                ) {
-                    Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Full details", tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // Scrollable compact stop timeline + one payment line
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f, fill = false)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            batchStops.forEach { stop ->
-                CompactTimelineStopRow(
-                    stop = stop,
-                    isSelected = stop.orderId == currentStop.orderId && stop.type == currentStop.type,
-                    onClick = { onSelectStop(stop) }
-                )
-            }
-
-            // One payment line
-            OnePaymentLineBar(
-                order = currentStop.order,
-                currencySymbol = currencySymbol
+            Box(
+                modifier = Modifier
+                    .width(44.dp)
+                    .height(5.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(MaterialTheme.colorScheme.outlineVariant)
             )
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
-
-        // Round icon action buttons row (Call, Chat, Headset) + Slide button
-        SheetQuickActionIconsRow(
-            currentStop = currentStop,
-            onCallClick = onCallClick,
-            onChatClick = onChatClick,
-            hasUnreadChat = hasUnreadChat,
-            onHeadsetClick = onHeadsetClick
-        )
-
-        Spacer(modifier = Modifier.height(10.dp))
-
-        SlideToConfirmButton(
-            text = getSlideButtonLabel(currentStop),
-            onConfirmed = onSlideConfirmed,
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .testTag("sheet_slide_button")
-        )
+                .weight(1f)
+                .clickable(onClick = onExpand),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = stopName,
+                fontWeight = FontWeight.ExtraBold,
+                fontSize = 20.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("collapsed_stop_name")
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Icon(
+                imageVector = Icons.Default.KeyboardArrowUp,
+                contentDescription = "Expand trip details",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .size(22.dp)
+                    .testTag("collapsed_up_chevron")
+            )
+        }
     }
 }
 
 @Composable
-private fun FullOrderSheetContent(
+private fun ExpandedOrderSheetContent(
     batchStops: List<RouteStop>,
     currentStop: RouteStop,
     selectedStop: RouteStop,
@@ -879,6 +848,7 @@ private fun FullOrderSheetContent(
     routeDistanceKm: Double,
     routeEtaMinutes: Int,
     showEarningsDetails: Boolean,
+    dragModifier: Modifier,
     onToggleEarningsDetails: () -> Unit,
     onSelectStop: (RouteStop) -> Unit,
     onNavigateClick: () -> Unit,
@@ -886,96 +856,202 @@ private fun FullOrderSheetContent(
     onChatClick: (Order) -> Unit,
     hasUnreadChat: (String) -> Boolean,
     onHeadsetClick: () -> Unit,
-    onCollapseToHalf: () -> Unit,
+    onCollapse: () -> Unit,
     onReportProblemClick: () -> Unit,
+    onTaxiPressAction: () -> Unit,
+    onPabiliPressAction: () -> Unit,
     onSlideConfirmed: () -> Unit
 ) {
+    val isTaxi = currentStop.order.isTaxi
+    val taxiStage = currentStop.order.taxiStepStage
+    val isPabili = currentStop.order.isPabili
+    val pabiliStage = currentStop.order.pabiliStepStage
+    val scrollState = rememberScrollState()
+    var cumulativePullDown by remember { mutableFloatStateOf(0f) }
+    val pullDownCollapseConnection = remember(scrollState) {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (source == NestedScrollSource.UserInput && scrollState.value == 0 && available.y > 0f) {
+                    cumulativePullDown += available.y
+                    if (cumulativePullDown > 72f) {
+                        cumulativePullDown = 0f
+                        onCollapse()
+                        return available
+                    }
+                } else if (available.y < 0f) {
+                    cumulativePullDown = 0f
+                }
+                return Offset.Zero
+            }
+
+            override suspend fun onPostFling(consumed: androidx.compose.ui.unit.Velocity, available: androidx.compose.ui.unit.Velocity): androidx.compose.ui.unit.Velocity {
+                cumulativePullDown = 0f
+                return super.onPostFling(consumed, available)
+            }
+        }
+    }
+
+    val orderedStops = remember(batchStops) {
+        val visible = batchStops.filterNot { stop ->
+            stop.isMerchant &&
+                stop.order.isPabili &&
+                stop.order.pabiliStepStage !in setOf(PabiliStepStage.TO_VENDOR, PabiliStepStage.AT_VENDOR)
+        }
+        val current = visible.filter { it.status == StopStatus.CURRENT }
+        val upcoming = visible.filter { it.status == StopStatus.NEXT }
+        val done = visible.filter { it.status == StopStatus.DONE }
+        current + upcoming + done
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .wrapContentHeight()
-            .padding(horizontal = 16.dp)
-            .padding(bottom = 12.dp)
+            .navigationBarsPadding()
     ) {
-        // Header
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+        // 1. Top drag handle with down chevron (tap or swipe down to collapse)
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp)
+                .then(dragModifier)
+                .clickable(onClick = onCollapse)
+                .padding(top = 10.dp, bottom = 4.dp)
+                .testTag("sheet_drag_handle"),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                StepBadgeRow(currentStop = currentStop, totalStops = batchStops.size.coerceAtLeast(1))
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = currentStop.name,
-                    fontWeight = FontWeight.ExtraBold,
-                    fontSize = 17.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(
-                    onClick = onNavigateClick,
-                    modifier = Modifier.size(48.dp)
-                ) {
-                    Icon(Icons.Default.Navigation, contentDescription = "Navigate", tint = DelivioYellow)
-                }
-                IconButton(
-                    onClick = onCollapseToHalf,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .testTag("collapse_sheet_button")
-                ) {
-                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Collapse", tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
+            Box(
+                modifier = Modifier
+                    .width(44.dp)
+                    .height(5.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(MaterialTheme.colorScheme.outlineVariant)
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Icon(
+                imageVector = Icons.Default.KeyboardArrowDown,
+                contentDescription = "Collapse trip details",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .size(22.dp)
+                    .testTag("collapse_sheet_button")
+            )
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // Scrollable Details Body
+        // 2. Scrollable Middle Details Body
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f, fill = false)
-                .verticalScroll(rememberScrollState()),
+                .nestedScroll(pullDownCollapseConnection)
+                .verticalScroll(scrollState)
+                .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Stop Timeline (tap any stop to view its items)
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                batchStops.forEach { stop ->
-                    CompactTimelineStopRow(
-                        stop = stop,
-                        isSelected = stop.orderId == selectedStop.orderId && stop.type == selectedStop.type,
-                        onClick = { onSelectStop(stop) }
-                    )
-                }
+            // (a) Step chip (+ Budget limit chip for Pabili at every step)
+            StepBadgeRow(
+                currentStop = currentStop,
+                totalStops = batchStops.size.coerceAtLeast(1),
+                currencySymbol = currencySymbol
+            )
+
+            // (b) Name
+            Text(
+                text = currentStop.name,
+                fontWeight = FontWeight.ExtraBold,
+                fontSize = 20.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.testTag("expanded_stop_name")
+            )
+
+            // (c) ETA and distance
+            val etaPart = if (routeEtaMinutes > 0) "$routeEtaMinutes min" else "Calculating ETA"
+            val distPart = if (routeDistanceKm > 0.0) " • ${String.format(Locale.US, "%.1f", routeDistanceKm)} km" else ""
+            Text(
+                text = "$etaPart$distPart",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag("expanded_eta_distance")
+            )
+
+            // (d) Labeled yellow "Navigate" button
+            Button(
+                onClick = onNavigateClick,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = DelivioYellow,
+                    contentColor = TextOnYellow
+                ),
+                shape = RoundedCornerShape(12.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .testTag("navigate_stop_button")
+            ) {
+                Icon(Icons.Default.Navigation, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Navigate", fontWeight = FontWeight.Bold, fontSize = 14.sp)
             }
 
-            // Items & Notes for selected stop
-            SelectedStopItemsCard(
-                stop = selectedStop,
-                currencySymbol = currencySymbol
-            )
+            if (isTaxi) {
+                // Taxi: Single current-step details card ONLY (NO stop timeline, NO items section)
+                TaxiSingleStopDetailsCard(stop = currentStop)
 
-            // One Payment Line
+                // Passenger count (+ pickup note during pickup steps only)
+                TaxiPassengerMetaRow(
+                    order = currentStop.order,
+                    showPickupNote = taxiStage == TaxiStepStage.TO_PICKUP || taxiStage == TaxiStepStage.AT_PICKUP
+                )
+            } else {
+                val isPabiliDropoffOnly = isPabili &&
+                    pabiliStage !in setOf(PabiliStepStage.TO_VENDOR, PabiliStepStage.AT_VENDOR) &&
+                    orderedStops.size <= 1
+                if (isPabiliDropoffOnly) {
+                    // Pabili Steps 3 & 4: Show ONLY drop-off details (customer name + revealed address), no merchant card
+                    PabiliDropoffDetailsCard(stop = orderedStops.firstOrNull() ?: currentStop)
+                } else {
+                    // Standard timeline (with finished Pabili merchant cards already excluded)
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.testTag("stop_timeline_list")
+                    ) {
+                        orderedStops.forEach { stop ->
+                            CompactTimelineStopRow(
+                                stop = stop,
+                                isSelected = stop.orderId == selectedStop.orderId && stop.type == selectedStop.type,
+                                onClick = { onSelectStop(stop) }
+                            )
+                        }
+                    }
+                }
+
+                SelectedStopItemsCard(
+                    stop = if (isPabiliDropoffOnly) currentStop else selectedStop,
+                    currencySymbol = currencySymbol
+                )
+            }
+
+            // Payment line
             OnePaymentLineBar(
-                order = selectedStop.order,
+                order = if (isTaxi) currentStop.order else selectedStop.order,
                 currencySymbol = currencySymbol
             )
 
-            // Round Action Buttons (Call, Chat, Headset)
+            // Row of three round labeled buttons: Call, Chat, Help
             SheetQuickActionIconsRow(
-                currentStop = selectedStop,
+                currentStop = if (isTaxi) currentStop else selectedStop,
                 onCallClick = onCallClick,
                 onChatClick = onChatClick,
                 hasUnreadChat = hasUnreadChat,
                 onHeadsetClick = onHeadsetClick
             )
 
-            // Collapsed "Earnings details" row
+            // Collapsed "Earnings details (...)" row
+            val totalEarned = activeOrders.sumOf { it.estimatedEarnings }
             Surface(
                 shape = RoundedCornerShape(14.dp),
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
@@ -991,9 +1067,8 @@ private fun FullOrderSheetContent(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        val totalEarned = activeOrders.sumOf { it.estimatedEarnings }
                         Text(
-                            text = "Earnings details ($currencySymbol${String.format("%.2f", totalEarned)})",
+                            text = "Earnings details ($currencySymbol${String.format(Locale.US, "%.2f", totalEarned)})",
                             fontWeight = FontWeight.Bold,
                             fontSize = 13.sp,
                             color = MaterialTheme.colorScheme.onSurface
@@ -1015,34 +1090,326 @@ private fun FullOrderSheetContent(
                     }
                 }
             }
+
+            Spacer(modifier = Modifier.height(2.dp))
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
-
-        // Slide Button
-        SlideToConfirmButton(
-            text = getSlideButtonLabel(currentStop),
-            onConfirmed = onSlideConfirmed,
+        // 3. Bottom pinned primary action (Press button for Taxi Steps 1/3 & Pabili Steps 1/3, Slide for Steps 2/4 and other services) + Report a Problem
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .testTag("sheet_slide_button")
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // Report a problem button
-        OutlinedButton(
-            onClick = onReportProblemClick,
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 48.dp)
-                .testTag("report_problem_button"),
-            shape = RoundedCornerShape(12.dp),
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = DelivioRed)
+                .padding(horizontal = 16.dp)
+                .padding(top = 8.dp, bottom = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Icon(Icons.Default.ReportProblem, contentDescription = null, modifier = Modifier.size(16.dp), tint = DelivioRed)
-            Spacer(modifier = Modifier.width(6.dp))
-            Text("Report a Problem", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            val isTaxiPressStep = isTaxi && (
+                taxiStage == TaxiStepStage.TO_PICKUP ||
+                    taxiStage == TaxiStepStage.TO_EXTRA_STOP ||
+                    taxiStage == TaxiStepStage.TO_DROPOFF
+                )
+            val isPabiliPressStep = isPabili && (
+                pabiliStage == PabiliStepStage.TO_VENDOR ||
+                    pabiliStage == PabiliStepStage.TO_RECIPIENT
+                )
+            if (isTaxiPressStep) {
+                val pressLabel = when (taxiStage) {
+                    TaxiStepStage.TO_PICKUP -> "Arrived at ${currentStop.name}"
+                    TaxiStepStage.TO_EXTRA_STOP -> "Arrived at Stop ${currentStop.order.currentTaxiStopNumber}"
+                    else -> "Arrived at the Drop Off Area"
+                }
+                Button(
+                    onClick = onTaxiPressAction,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = DelivioYellow,
+                        contentColor = TextOnYellow
+                    ),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 52.dp)
+                        .testTag("taxi_press_action_button")
+                ) {
+                    Icon(Icons.Default.WhereToVote, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = pressLabel,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 15.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            } else if (isPabiliPressStep) {
+                val pabiliPressLabel = if (pabiliStage == PabiliStepStage.TO_VENDOR) {
+                    "Arrived at the Merchant"
+                } else {
+                    "Arrived at the Customer"
+                }
+                Button(
+                    onClick = onPabiliPressAction,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = DelivioYellow,
+                        contentColor = TextOnYellow
+                    ),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 52.dp)
+                        .testTag("pabili_press_action_button")
+                ) {
+                    Icon(Icons.Default.WhereToVote, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = pabiliPressLabel,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 15.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            } else {
+                SlideToConfirmButton(
+                    text = getSlideButtonLabel(currentStop),
+                    onConfirmed = onSlideConfirmed,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("sheet_slide_button")
+                )
+            }
+
+            OutlinedButton(
+                onClick = onReportProblemClick,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .testTag("report_problem_button"),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = DelivioRed)
+            ) {
+                Icon(Icons.Default.ReportProblem, contentDescription = null, modifier = Modifier.size(16.dp), tint = DelivioRed)
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Report a Problem", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun TaxiSingleStopDetailsCard(
+    stop: RouteStop
+) {
+    val stage = stop.order.taxiStepStage
+    val isPickupStep = stage == TaxiStepStage.TO_PICKUP || stage == TaxiStepStage.AT_PICKUP
+    val badgeLabel = if (isPickupStep) "PICKUP" else "DROP-OFF"
+    val badgeColor = if (isPickupStep) DelivioGreenDark else DelivioRed
+    val addressText = stop.fullAddress.ifBlank { stop.address }.ifBlank { "Address unavailable" }
+
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+        border = BorderStroke(
+            width = 1.dp,
+            color = if (isPickupStep) DelivioGreen.copy(alpha = 0.45f) else DelivioRed.copy(alpha = 0.45f)
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("taxi_stop_details_card")
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = badgeColor.copy(alpha = 0.14f)
+                ) {
+                    Text(
+                        text = badgeLabel,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = badgeColor,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                }
+                Text(
+                    text = stop.displayOrderNumber,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Text(
+                text = stop.name,
+                fontWeight = FontWeight.ExtraBold,
+                fontSize = 15.sp,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+
+            Row(
+                verticalAlignment = Alignment.Top,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.LocationOn,
+                    contentDescription = null,
+                    tint = badgeColor,
+                    modifier = Modifier
+                        .size(16.dp)
+                        .padding(top = 2.dp)
+                )
+                Text(
+                    text = addressText,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag("taxi_stop_address")
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PabiliDropoffDetailsCard(
+    stop: RouteStop
+) {
+    val customerName = stop.order.customerName.ifBlank { stop.name }.ifBlank { "Customer" }
+    val addressText = stop.fullAddress
+        .ifBlank { deduplicateAddress(stop.order.customerAddress) }
+        .ifBlank { stop.address }
+        .ifBlank { "Address unavailable" }
+
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+        border = BorderStroke(1.dp, DelivioRed.copy(alpha = 0.45f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("pabili_dropoff_details_card")
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = DelivioRed.copy(alpha = 0.14f)
+                ) {
+                    Text(
+                        text = "DROP-OFF",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = DelivioRed,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                }
+                Text(
+                    text = stop.displayOrderNumber,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Text(
+                text = customerName,
+                fontWeight = FontWeight.ExtraBold,
+                fontSize = 15.sp,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+
+            Row(
+                verticalAlignment = Alignment.Top,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.LocationOn,
+                    contentDescription = null,
+                    tint = DelivioRed,
+                    modifier = Modifier
+                        .size(16.dp)
+                        .padding(top = 2.dp)
+                )
+                Text(
+                    text = addressText,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag("pabili_dropoff_address")
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TaxiPassengerMetaRow(
+    order: Order,
+    showPickupNote: Boolean
+) {
+    val count = order.passengerCount.coerceAtLeast(1)
+    val countText = if (count == 1) "1 passenger" else "$count passengers"
+    val note = if (showPickupNote) order.resolvedPickupNote else ""
+
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("taxi_passenger_meta")
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.People,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
+                Text(
+                    text = countText,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            if (note.isNotBlank()) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                Row(verticalAlignment = Alignment.Top) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.StickyNote2,
+                        contentDescription = null,
+                        tint = DelivioYellow,
+                        modifier = Modifier
+                            .size(16.dp)
+                            .padding(top = 2.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = note,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
         }
     }
 }
@@ -1053,16 +1420,18 @@ private fun CompactTimelineStopRow(
     isSelected: Boolean,
     onClick: () -> Unit
 ) {
+    val isHighlighted = stop.isCurrent || isSelected
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = when {
+            stop.isCurrent -> DelivioYellow.copy(alpha = 0.14f)
             isSelected -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
             stop.status == StopStatus.DONE -> MaterialTheme.colorScheme.surface.copy(alpha = 0.45f)
             else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
         },
         border = BorderStroke(
-            width = if (isSelected) 1.5.dp else 0.5.dp,
-            color = if (isSelected) DelivioYellow else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
+            width = if (isHighlighted) 1.5.dp else 0.5.dp,
+            color = if (isHighlighted) DelivioYellow else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
         ),
         modifier = Modifier
             .fillMaxWidth()
@@ -1116,7 +1485,7 @@ private fun CompactTimelineStopRow(
                     )
                 }
             }
-            if (stop.items.isNotEmpty()) {
+            if (!stop.order.isTaxi && stop.items.isNotEmpty()) {
                 Surface(
                     shape = RoundedCornerShape(8.dp),
                     color = MaterialTheme.colorScheme.surface
@@ -1146,7 +1515,9 @@ private fun OnePaymentLineBar(
     Surface(
         shape = RoundedCornerShape(10.dp),
         color = if (isCashCollect) Color(0xFFFFF3E0) else DelivioGreen.copy(alpha = 0.12f),
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("payment_line_bar")
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
@@ -1178,82 +1549,94 @@ private fun SheetQuickActionIconsRow(
     onHeadsetClick: () -> Unit
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalAlignment = Alignment.CenterVertically
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("quick_actions_row"),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.Top
     ) {
-        if (currentStop.phone.isNotBlank()) {
+        RoundLabeledActionButton(
+            icon = Icons.Default.Call,
+            label = "Call",
+            containerColor = DelivioGreen.copy(alpha = 0.16f),
+            iconTint = DelivioGreen,
+            showUnreadDot = false,
+            onClick = onCallClick,
+            testTag = "sheet_call_button"
+        )
+
+        RoundLabeledActionButton(
+            icon = Icons.Default.ChatBubble,
+            label = "Chat",
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+            iconTint = MaterialTheme.colorScheme.onSurface,
+            showUnreadDot = hasUnreadChat(currentStop.order.id),
+            onClick = { onChatClick(currentStop.order) },
+            testTag = "customer_chat_button"
+        )
+
+        RoundLabeledActionButton(
+            icon = Icons.Default.HeadsetMic,
+            label = "Help",
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+            iconTint = MaterialTheme.colorScheme.onSurface,
+            showUnreadDot = false,
+            onClick = onHeadsetClick,
+            testTag = "sheet_headset_button"
+        )
+    }
+}
+
+@Composable
+private fun RoundLabeledActionButton(
+    icon: ImageVector,
+    label: String,
+    containerColor: Color,
+    iconTint: Color,
+    showUnreadDot: Boolean,
+    onClick: () -> Unit,
+    testTag: String
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Box(modifier = Modifier.size(48.dp)) {
             Surface(
                 shape = CircleShape,
-                color = DelivioGreen.copy(alpha = 0.16f),
+                color = containerColor,
                 modifier = Modifier
                     .size(48.dp)
                     .clip(CircleShape)
-                    .clickable(onClick = onCallClick)
-                    .testTag("sheet_call_button")
+                    .clickable(onClick = onClick)
+                    .testTag(testTag)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
-                        imageVector = Icons.Default.Call,
-                        contentDescription = "Call",
-                        tint = DelivioGreen,
+                        imageVector = icon,
+                        contentDescription = label,
+                        tint = iconTint,
                         modifier = Modifier.size(20.dp)
                     )
                 }
             }
-        }
-
-        if (currentStop.isCustomer && !OrderChatConstants.isInstantOrder(currentStop.order.serviceType)) {
-            Box(modifier = Modifier.size(48.dp)) {
-                Surface(
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.surfaceVariant,
+            if (showUnreadDot) {
+                Box(
                     modifier = Modifier
-                        .size(48.dp)
+                        .size(10.dp)
                         .clip(CircleShape)
-                        .clickable { onChatClick(currentStop.order) }
-                        .testTag("customer_chat_button")
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = Icons.Default.ChatBubble,
-                            contentDescription = "Chat",
-                            tint = MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                }
-                if (hasUnreadChat(currentStop.order.id)) {
-                    Box(
-                        modifier = Modifier
-                            .size(10.dp)
-                            .clip(CircleShape)
-                            .background(DelivioRed)
-                            .align(Alignment.TopEnd)
-                            .testTag("chat_unread_dot")
-                    )
-                }
-            }
-        }
-
-        Surface(
-            shape = CircleShape,
-            color = MaterialTheme.colorScheme.surfaceVariant,
-            modifier = Modifier
-                .size(48.dp)
-                .clip(CircleShape)
-                .clickable(onClick = onHeadsetClick)
-                .testTag("sheet_headset_button")
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Icon(
-                    imageVector = Icons.Default.HeadsetMic,
-                    contentDescription = "Support options",
-                    tint = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.size(20.dp)
+                        .background(DelivioRed)
+                        .align(Alignment.TopEnd)
+                        .testTag("chat_unread_dot")
                 )
             }
         }
+        Text(
+            text = label,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
@@ -1277,8 +1660,16 @@ private fun SelectedStopItemsCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                val itemsHeader = if (stop.order.isPabili) {
+                    when (stop.order.pabiliStepStage) {
+                        PabiliStepStage.TO_VENDOR, PabiliStepStage.AT_VENDOR -> "Items to Pick Up"
+                        else -> "Items to Deliver"
+                    }
+                } else {
+                    if (stop.isMerchant) "Items to Pick Up" else "Items to Deliver"
+                }
                 Text(
-                    text = if (stop.isMerchant) "Items to Pick Up" else "Items to Deliver",
+                    text = itemsHeader,
                     fontWeight = FontWeight.Bold,
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurface
@@ -1405,11 +1796,33 @@ private fun SelectedStopItemsCard(
                 }
             }
 
+            if (stop.order.isPabili &&
+                stop.order.pabiliStepStage !in setOf(PabiliStepStage.TO_VENDOR, PabiliStepStage.AT_VENDOR) &&
+                stop.order.resolvedPaidOnMerchant > 0.0
+            ) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 2.dp)
+                        .testTag("pabili_paid_on_merchant_row"),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Paid on Merchant $currencySymbol${formatPaymentAmount(stop.order.resolvedPaidOnMerchant)}",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+
             if (stop.order.customerNotes.isNotBlank()) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
                 Row(verticalAlignment = Alignment.Top) {
                     Icon(
-                        imageVector = Icons.Default.StickyNote2,
+                        imageVector = Icons.AutoMirrored.Filled.StickyNote2,
                         contentDescription = null,
                         tint = DelivioYellow,
                         modifier = Modifier
@@ -1494,23 +1907,46 @@ private fun StopNumberBadge(stop: RouteStop, size: Int = 30) {
 @Composable
 private fun ItemChecklistDialog(
     currentStop: RouteStop,
+    currencySymbol: String,
     pabiliReceiptInput: String,
     onPabiliReceiptChange: (String) -> Unit,
-    onConfirmPickedUp: () -> Unit,
+    onConfirmPickedUp: (receiptTotal: Double?, overBudgetApproved: Boolean) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val isPabili = currentStop.order.isPabili
+    val budgetLimit = currentStop.order.resolvedBudgetLimit
+    var overBudgetApproved by remember(currentStop.orderId) { mutableStateOf(false) }
+
     val checkedItems = remember(currentStop.items) {
         mutableStateMapOf<Int, Boolean>().apply {
             currentStop.items.indices.forEach { put(it, true) }
         }
     }
 
-    Dialog(onDismissRequest = onDismiss) {
+    val parsedReceipt = remember(pabiliReceiptInput) {
+        PabiliFlowRules.parseReceiptOrNull(pabiliReceiptInput)
+    }
+    val hasReceiptText = pabiliReceiptInput.trim().isNotEmpty()
+    val isReceiptFormatInvalid = hasReceiptText && parsedReceipt == null
+    val isOverBudget = isPabili && budgetLimit > 0.0 && parsedReceipt != null && parsedReceipt > budgetLimit
+
+    LaunchedEffect(isOverBudget) {
+        if (!isOverBudget) {
+            overBudgetApproved = false
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
         Card(
             shape = RoundedCornerShape(20.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
             elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth(0.92f)
+                .wrapContentHeight()
         ) {
             Column(
                 modifier = Modifier
@@ -1532,6 +1968,24 @@ private fun ItemChecklistDialog(
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+
+                if (isPabili && budgetLimit > 0.0) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = DelivioYellow.copy(alpha = 0.22f),
+                        border = BorderStroke(0.5.dp, DelivioYellowDark.copy(alpha = 0.45f)),
+                        modifier = Modifier.testTag("checklist_budget_limit_chip")
+                    ) {
+                        Text(
+                            text = "Budget limit $currencySymbol${formatPaymentAmount(budgetLimit)}",
+                            color = TextOnYellow,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                    }
+                }
 
                 Spacer(modifier = Modifier.height(14.dp))
                 HorizontalDivider()
@@ -1570,7 +2024,7 @@ private fun ItemChecklistDialog(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 240.dp)
+                        .heightIn(max = 220.dp)
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
@@ -1639,15 +2093,89 @@ private fun ItemChecklistDialog(
                     }
                 }
 
-                if (currentStop.serviceType.lowercase().contains("pabili")) {
+                if (isPabili) {
                     Spacer(modifier = Modifier.height(12.dp))
                     OutlinedTextField(
                         value = pabiliReceiptInput,
-                        onValueChange = onPabiliReceiptChange,
-                        label = { Text("Final Receipt Total (₱)") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        modifier = Modifier.fillMaxWidth()
+                        onValueChange = { input ->
+                            // Allow only digits and at most one decimal point with up to 2 decimal places
+                            if (input.isEmpty() || Regex("^\\d*(\\.\\d{0,2})?$").matches(input)) {
+                                onPabiliReceiptChange(input)
+                            }
+                        },
+                        label = { Text("Final Receipt Total ($currencySymbol)") },
+                        placeholder = { Text("0.00") },
+                        singleLine = true,
+                        isError = isReceiptFormatInvalid,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("pabili_receipt_input")
                     )
+
+                    if (isReceiptFormatInvalid) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Enter a valid amount greater than 0 (max 2 decimal places)",
+                            fontSize = 11.sp,
+                            color = DelivioRed,
+                            modifier = Modifier.testTag("pabili_receipt_error")
+                        )
+                    }
+
+                    if (isOverBudget) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = DelivioRed.copy(alpha = 0.12f),
+                            border = BorderStroke(1.dp, DelivioRed.copy(alpha = 0.45f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("pabili_over_budget_warning")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Warning,
+                                    contentDescription = null,
+                                    tint = DelivioRed,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(
+                                    text = "Over the customer's budget limit ($currencySymbol${formatPaymentAmount(budgetLimit)}). Ask the customer first.",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = DelivioRed
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .defaultMinSize(minHeight = 48.dp)
+                                .clickable { overBudgetApproved = !overBudgetApproved }
+                                .testTag("pabili_over_budget_checkbox_row"),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(
+                                checked = overBudgetApproved,
+                                onCheckedChange = { overBudgetApproved = it },
+                                modifier = Modifier.testTag("pabili_over_budget_checkbox")
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "The customer approved the extra amount",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(18.dp))
@@ -1661,6 +2189,9 @@ private fun ItemChecklistDialog(
                     }
                     isTaken || (checkedItems[idx] == true)
                 }
+                val isPabiliValidToConfirm = !isPabili || (
+                    parsedReceipt != null && (!isOverBudget || overBudgetApproved)
+                    )
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1676,12 +2207,13 @@ private fun ItemChecklistDialog(
                     }
 
                     Button(
-                        onClick = onConfirmPickedUp,
-                        enabled = allRequiredChecked,
+                        onClick = { onConfirmPickedUp(parsedReceipt, isOverBudget && overBudgetApproved) },
+                        enabled = allRequiredChecked && isPabiliValidToConfirm,
                         colors = ButtonDefaults.buttonColors(containerColor = DelivioGreen, contentColor = Color.White),
                         modifier = Modifier
                             .weight(1.3f)
                             .heightIn(min = 48.dp)
+                            .testTag("checklist_confirm_button")
                     ) {
                         Text("Confirm Picked Up", fontWeight = FontWeight.Bold)
                     }
@@ -1771,7 +2303,7 @@ private fun CodCollectionDialog(
                     ) {
                         Text("CASH TO COLLECT", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFE65100))
                         Text(
-                            text = "$currencySymbol${String.format("%.2f", currentStop.cashToCollect)}",
+                            text = "$currencySymbol${String.format(Locale.US, "%.2f", currentStop.cashToCollect)}",
                             fontSize = 28.sp,
                             fontWeight = FontWeight.Black,
                             color = Color(0xFFBF360C)
@@ -1785,19 +2317,45 @@ private fun CodCollectionDialog(
                     modifier = Modifier
                         .fillMaxWidth()
                         .defaultMinSize(minHeight = 48.dp)
-                        .clickable { isConfirmed = !isConfirmed },
+                        .clickable { isConfirmed = !isConfirmed }
+                        .testTag("cod_confirm_checkbox_row"),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Checkbox(
                         checked = isConfirmed,
-                        onCheckedChange = { isConfirmed = it }
+                        onCheckedChange = { isConfirmed = it },
+                        modifier = Modifier.testTag("cod_confirm_checkbox")
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "I have received the exact cash amount ($currencySymbol${String.format("%.2f", currentStop.cashToCollect)})",
+                        text = "I have received the exact cash amount ($currencySymbol${String.format(Locale.US, "%.2f", currentStop.cashToCollect)})",
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold
                     )
+                }
+
+                if (currentStop.order.isPabili) {
+                    val paidOnMerchantAmt = currentStop.order.resolvedPaidOnMerchant
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 6.dp)
+                            .testTag("cod_paid_on_merchant_note"),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(
+                            text = "Paid on Merchant $currencySymbol${String.format(Locale.US, "%.2f", paidOnMerchantAmt)}",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "Items you paid at the store. Not part of the cash to collect.",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f)
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(18.dp))
@@ -1822,6 +2380,7 @@ private fun CodCollectionDialog(
                         modifier = Modifier
                             .weight(1.3f)
                             .heightIn(min = 48.dp)
+                            .testTag("cod_complete_delivery_button")
                     ) {
                         Text("Complete Delivery", fontWeight = FontWeight.Bold)
                     }

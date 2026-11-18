@@ -4,11 +4,12 @@ import android.Manifest
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.view.HapticFeedbackConstants
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -30,6 +31,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -115,9 +117,10 @@ fun MainMapScreen(
     val riderLat = liveLoc?.first ?: 9.7392
     val riderLng = liveLoc?.second ?: 118.7353
 
+    val view = LocalView.current
     var recenterTrigger by remember { mutableIntStateOf(0) }
     var isSatelliteLayer by remember { mutableStateOf(false) }
-    var sheetState by remember { mutableStateOf(OrderSheetState.PEEK) }
+    var sheetState by remember { mutableStateOf(OrderSheetState.EXPANDED) }
     var routeResult by remember { mutableStateOf<OsrmRouteResult?>(null) }
     var routeDistanceKm by remember { mutableDoubleStateOf(0.0) }
     var routeEtaMinutes by remember { mutableIntStateOf(0) }
@@ -128,10 +131,16 @@ fun MainMapScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val snackbarMsg by viewModel.snackbarMessage.collectAsState()
 
-    // Reset sheet back to PEEK when active stop changes
-    LaunchedEffect(currentStop?.orderId, currentStop?.stopNumber) {
+    // Open EXPANDED when a trip is accepted or a new step starts
+    LaunchedEffect(
+        currentStop?.orderId,
+        currentStop?.stopNumber,
+        currentStop?.order?.riderStep,
+        currentStop?.order?.status,
+        currentStop?.order?.hasArrivedAtDropoff
+    ) {
         if (currentStop != null) {
-            sheetState = OrderSheetState.PEEK
+            sheetState = OrderSheetState.EXPANDED
         }
     }
 
@@ -168,14 +177,16 @@ fun MainMapScreen(
     val todayEarnings = deliveredOrders.sumOf { it.estimatedEarnings }
     val walletCashOnHand = deliveredOrders.filter { it.isCod }.sumOf { it.codCollected } - (rider?.cashRemitted ?: 0.0)
 
-    val fallbackSheetDp = if (activeOrders.isEmpty() || currentStop == null) 172.dp else 210.dp
+    val navBarBottomPadding = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val fallbackSheetDp = (when {
+        activeOrders.isEmpty() || currentStop == null -> 172.dp
+        sheetState == OrderSheetState.COLLAPSED -> 88.dp
+        else -> 360.dp
+    }) + navBarBottomPadding
     val measuredSheetDp = if (sheetHeightPx > 0) with(density) { sheetHeightPx.toDp() } else fallbackSheetDp
     val animatedSheetHeight by animateDpAsState(
         targetValue = measuredSheetDp,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = Spring.StiffnessMediumLow
-        ),
+        animationSpec = tween(durationMillis = 250),
         label = "main_sheet_height"
     )
 
@@ -187,8 +198,17 @@ fun MainMapScreen(
         76.dp
     }
 
-    val sheetHeightFraction = (animatedSheetHeight.value / screenHeight.value).coerceIn(0.10f, 0.72f)
+    val sheetHeightFraction = (animatedSheetHeight.value / screenHeight.value).coerceIn(0.08f, 0.85f)
     val isTripActive = activeOrders.isNotEmpty() && currentStop != null
+
+    // System Back button collapses expanded trip sheet first instead of leaving screen
+    BackHandler(enabled = isTripActive && sheetState == OrderSheetState.EXPANDED) {
+        try {
+            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+        } catch (_: Throwable) {
+        }
+        sheetState = OrderSheetState.COLLAPSED
+    }
 
     Scaffold(
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
@@ -488,73 +508,108 @@ fun MainMapScreen(
                 }
             }
 
-            // 3. Floating Map Controls: Busy areas (hidden during active trip) + Locate + Layers, offset cleanly above docked sheet
-            Column(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .windowInsetsPadding(WindowInsets.navigationBars)
-                    .padding(end = 16.dp, bottom = animatedSheetHeight + 14.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                horizontalAlignment = Alignment.End
-            ) {
-                if (!isTripActive) {
-                    Card(
-                        shape = RoundedCornerShape(20.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (isBusyAreasVisible) DelivioYellow else MaterialTheme.colorScheme.surface
+            // 3. Floating Map Controls: strictly constrained between top banner clearance and top of docked sheet
+            val availableMiddleHeightDp = (screenHeight - topBannerClearanceDp - animatedSheetHeight - 14.dp).coerceAtLeast(0.dp)
+            if (availableMiddleHeightDp >= 52.dp) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(
+                            top = topBannerClearanceDp,
+                            bottom = animatedSheetHeight + 14.dp,
+                            end = 16.dp
                         ),
-                        border = BorderStroke(
-                            1.5.dp,
-                            if (isBusyAreasVisible) DelivioYellowDark else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
-                        ),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
-                        modifier = Modifier
-                            .defaultMinSize(minHeight = 48.dp)
-                            .clickable { viewModel.toggleBusyAreasOverlay() }
-                            .testTag("busy_areas_toggle")
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    contentAlignment = Alignment.BottomEnd
+                ) {
+                    if (availableMiddleHeightDp >= 112.dp) {
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                            horizontalAlignment = Alignment.End,
+                            modifier = Modifier.testTag("floating_map_controls")
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Whatshot,
-                                contentDescription = "Busy areas",
-                                tint = if (isBusyAreasVisible) Color(0xFFC62828) else MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(18.dp)
+                            if (!isTripActive && availableMiddleHeightDp >= 172.dp) {
+                                Card(
+                                    shape = RoundedCornerShape(20.dp),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = if (isBusyAreasVisible) DelivioYellow else MaterialTheme.colorScheme.surface
+                                    ),
+                                    border = BorderStroke(
+                                        1.5.dp,
+                                        if (isBusyAreasVisible) DelivioYellowDark else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+                                    ),
+                                    elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
+                                    modifier = Modifier
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .clickable { viewModel.toggleBusyAreasOverlay() }
+                                        .testTag("busy_areas_toggle")
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Whatshot,
+                                            contentDescription = "Busy areas",
+                                            tint = if (isBusyAreasVisible) Color(0xFFC62828) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Text(
+                                            text = if (isBusyAreasVisible) "Busy areas (${busyGridCells.size})" else "Busy areas",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp,
+                                            color = if (isBusyAreasVisible) TextOnYellow else MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+                                }
+                            }
+
+                            CircularFloatingButton(
+                                icon = Icons.Default.MyLocation,
+                                contentDescription = "Locate",
+                                onClick = { recenterTrigger += 1 },
+                                testTag = "recenter_button"
                             )
-                            Text(
-                                text = if (isBusyAreasVisible) "Busy areas (${busyGridCells.size})" else "Busy areas",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp,
-                                color = if (isBusyAreasVisible) TextOnYellow else MaterialTheme.colorScheme.onSurface
+
+                            CircularFloatingButton(
+                                icon = Icons.Default.Layers,
+                                contentDescription = "Toggle Map Layers",
+                                onClick = { isSatelliteLayer = !isSatelliteLayer },
+                                testTag = "layers_button"
+                            )
+                        }
+                    } else {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.testTag("floating_map_controls")
+                        ) {
+                            CircularFloatingButton(
+                                icon = Icons.Default.MyLocation,
+                                contentDescription = "Locate",
+                                onClick = { recenterTrigger += 1 },
+                                testTag = "recenter_button"
+                            )
+
+                            CircularFloatingButton(
+                                icon = Icons.Default.Layers,
+                                contentDescription = "Toggle Map Layers",
+                                onClick = { isSatelliteLayer = !isSatelliteLayer },
+                                testTag = "layers_button"
                             )
                         }
                     }
                 }
-
-                CircularFloatingButton(
-                    icon = Icons.Default.MyLocation,
-                    contentDescription = "Locate",
-                    onClick = { recenterTrigger += 1 },
-                    testTag = "recenter_button"
-                )
-
-                CircularFloatingButton(
-                    icon = Icons.Default.Layers,
-                    contentDescription = "Toggle Map Layers",
-                    onClick = { isSatelliteLayer = !isSatelliteLayer },
-                    testTag = "layers_button"
-                )
             }
 
-            // 4. Docked Order Bottom Sheet (PEEK, HALF, FULL) above navigation bar
+            // 4. Docked Order Bottom Sheet (COLLAPSED, EXPANDED) flush to bottom edge
+            val isDriverLocFresh = remember(liveLoc, lastLocationMillis) {
+                com.example.data.service.RiderLocationTracker.isLocationFresh()
+            }
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .windowInsetsPadding(WindowInsets.navigationBars)
             ) {
                 OrderDetailsSheet(
                     batchStops = batchStops,
@@ -568,11 +623,16 @@ fun MainMapScreen(
                     supportPhone = supportPhone,
                     routeDistanceKm = routeDistanceKm,
                     routeEtaMinutes = routeEtaMinutes,
+                    driverLocation = liveLoc,
+                    isDriverLocationFresh = isDriverLocFresh,
                     sheetState = sheetState,
                     onSheetStateChange = { sheetState = it },
                     onGoOnlineClick = { viewModel.toggleOnline(context) },
                     onAdvanceStep = { receiptTotal, orderId ->
                         viewModel.advanceCurrentOrderStep(receiptTotal, orderId)
+                    },
+                    onAdvanceStepWithApproval = { receiptTotal, overBudgetApproved, orderId ->
+                        viewModel.advanceCurrentOrderStep(receiptTotal, orderId, overBudgetApproved)
                     },
                     onReleaseOrder = { reason -> viewModel.releaseOrder(reason) },
                     onReportProblem = { reason ->

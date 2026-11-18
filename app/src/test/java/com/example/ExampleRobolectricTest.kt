@@ -173,7 +173,7 @@ class ExampleRobolectricTest {
         assertEquals(150.0, parcelSender.cashAmountToCollect, 0.001)
         assertTrue(parcelSender.parcelCollectAtSender)
 
-        // 3. Pabili COD with estimated total + fees
+        // 3. Pabili COD stays delivery fee + service fee only (never adds estimated or receipt total)
         val pabiliOrder = com.example.data.models.Order(
             serviceType = "pabili",
             paymentMethod = "cash",
@@ -181,18 +181,19 @@ class ExampleRobolectricTest {
             feesDeliveryFee = 60.0,
             feesServiceFee = 25.0
         )
-        assertEquals(585.0, pabiliOrder.cashAmountToCollect, 0.001)
+        assertEquals(85.0, pabiliOrder.cashAmountToCollect, 0.001)
 
-        // Pabili COD with final receipt total
+        // Pabili COD with paidOnMerchant / finalReceiptTotal still collects fees only
         val pabiliReceipt = com.example.data.models.Order(
             serviceType = "pabili",
             paymentMethod = "cash",
             pabiliEstimatedTotal = 500.0,
             finalReceiptTotal = 540.0,
+            paidOnMerchant = 540.0,
             feesDeliveryFee = 60.0,
             feesServiceFee = 25.0
         )
-        assertEquals(625.0, pabiliReceipt.cashAmountToCollect, 0.001)
+        assertEquals(85.0, pabiliReceipt.cashAmountToCollect, 0.001)
 
         // 4. Request Rider COD
         val requestOrder = com.example.data.models.Order(
@@ -2580,9 +2581,280 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `verify OrderSheetState has PEEK HALF FULL states`() {
+    fun `verify OrderSheetState has COLLAPSED EXPANDED states`() {
         val states = com.example.ui.components.OrderSheetState.values().map { it.name }
-        assertEquals(listOf("PEEK", "HALF", "FULL"), states)
+        assertEquals(listOf("COLLAPSED", "EXPANDED"), states)
+    }
+
+    @Test
+    fun `verify stop display names across all services and email fallbacks`() {
+        // Taxi pickup & drop-off -> passenger first name or Passenger fallback
+        val taxiOrder = Order(
+            id = "tx1",
+            serviceType = OrderStepConstants.SERVICE_TAXI,
+            customerName = "Maria Santos",
+            riderStep = OrderStepConstants.STEP_TO_PICKUP
+        )
+        assertEquals("Maria", com.example.data.models.resolveStopDisplayName(taxiOrder, com.example.data.models.StopType.MERCHANT))
+        assertEquals("Maria", com.example.data.models.resolveStopDisplayName(taxiOrder, com.example.data.models.StopType.CUSTOMER))
+
+        val taxiEmail = Order(
+            id = "tx2",
+            serviceType = OrderStepConstants.SERVICE_TAXI,
+            customerName = "rider@gmail.com"
+        )
+        assertEquals("Passenger", com.example.data.models.resolveStopDisplayName(taxiEmail, com.example.data.models.StopType.MERCHANT))
+        assertEquals("Passenger", com.example.data.models.resolveStopDisplayName(taxiEmail, com.example.data.models.StopType.CUSTOMER))
+
+        // Food & Convenience -> shop name with branch at pickup, customer first name at drop-off
+        val convOrder = Order(
+            id = "cv1",
+            serviceType = OrderStepConstants.SERVICE_CONVENIENCE,
+            merchantName = "Jollibee",
+            branchName = "Rizal",
+            branchCode = "MAIN",
+            customerName = "Carlo Mendoza"
+        )
+        assertEquals("Jollibee - Rizal (MAIN)", com.example.data.models.resolveStopDisplayName(convOrder, com.example.data.models.StopType.MERCHANT))
+        assertEquals("Carlo", com.example.data.models.resolveStopDisplayName(convOrder, com.example.data.models.StopType.CUSTOMER))
+
+        // Parcel -> sender name at pickup, recipient name at drop-off
+        val parcelOrder = Order(
+            id = "pr1",
+            serviceType = OrderStepConstants.SERVICE_PARCEL,
+            senderName = "Ana Reyes",
+            customerName = "Luis Tan"
+        )
+        assertEquals("Ana Reyes", com.example.data.models.resolveStopDisplayName(parcelOrder, com.example.data.models.StopType.MERCHANT))
+        assertEquals("Luis Tan", com.example.data.models.resolveStopDisplayName(parcelOrder, com.example.data.models.StopType.CUSTOMER))
+
+        // Pabili -> vendor name at pickup, recipient name at drop-off
+        val pabiliOrder = Order(
+            id = "pb1",
+            serviceType = OrderStepConstants.SERVICE_PABILI,
+            merchantName = "Puregold Public Market",
+            customerName = "Elena Cruz"
+        )
+        assertEquals("Puregold Public Market", com.example.data.models.resolveStopDisplayName(pabiliOrder, com.example.data.models.StopType.MERCHANT))
+        assertEquals("Elena Cruz", com.example.data.models.resolveStopDisplayName(pabiliOrder, com.example.data.models.StopType.CUSTOMER))
+
+        // Delivio Instant (request_rider) -> shop display name at pickup, recipient name at drop-off
+        val instantOrder = Order(
+            id = "rq1",
+            serviceType = OrderStepConstants.SERVICE_REQUEST,
+            merchantName = "Milk Tea Hub",
+            branchName = "Centro",
+            customerName = "Ben Garcia"
+        )
+        assertEquals("Milk Tea Hub - Centro", com.example.data.models.resolveStopDisplayName(instantOrder, com.example.data.models.StopType.MERCHANT))
+        assertEquals("Ben Garcia", com.example.data.models.resolveStopDisplayName(instantOrder, com.example.data.models.StopType.CUSTOMER))
+    }
+
+    @Test
+    fun `verify OrderDocumentParser parses taxi passengerCount, pickupNote, and hides Passenger Pickup placeholder`() {
+        val parsed = com.example.data.models.OrderDocumentParser.parseOrderFromMap(
+            id = "taxi_doc_1",
+            data = mapOf(
+                "serviceType" to "taxi",
+                "pickup" to mapOf(
+                    "name" to "Passenger Pickup",
+                    "note" to "Wearing yellow shirt near gate"
+                ),
+                "passengerName" to "Paolo Aquino",
+                "passengerCount" to 3
+            )
+        )
+        assertEquals("Paolo Aquino", parsed.customerName)
+        assertEquals("Paolo", parsed.displayPickupName)
+        assertEquals(3, parsed.passengerCount)
+        assertEquals("Wearing yellow shirt near gate", parsed.resolvedPickupNote)
+    }
+
+    @Test
+    fun `verify 4-step taxi stage resolution and timestamp parsing`() {
+        // Step 1: Driver is on the way
+        val step1 = com.example.data.models.OrderDocumentParser.parseOrderFromMap(
+            id = "tx_flow_1",
+            data = mapOf(
+                "serviceType" to "taxi",
+                "status" to OrderStepConstants.STATUS_DRIVER_ON_WAY,
+                "riderStep" to OrderStepConstants.STEP_TO_PICKUP,
+                "pickup" to mapOf(
+                    "street" to "Rizal Ave",
+                    "barangay" to "San Miguel",
+                    "city" to "Puerto Princesa"
+                ),
+                "dropoff" to mapOf(
+                    "street" to "Airport Rd",
+                    "barangay" to "San Miguel",
+                    "city" to "Puerto Princesa"
+                ),
+                "arrivedAtDropoffAt" to "   "
+            )
+        )
+        assertEquals(com.example.data.models.TaxiStepStage.TO_PICKUP, step1.taxiStepStage)
+        assertFalse(step1.hasArrivedAtDropoff)
+        assertEquals("Rizal Ave, San Miguel, Puerto Princesa", step1.merchantAddress)
+        assertEquals("Airport Rd, San Miguel, Puerto Princesa", step1.customerAddress)
+
+        // Step 2: Driver arrived
+        val step2 = step1.copy(
+            status = OrderStepConstants.STATUS_DRIVER_ARRIVED,
+            riderStep = OrderStepConstants.STEP_AT_PICKUP,
+            arrivedAtPickupAt = 1700000000000L
+        )
+        assertEquals(com.example.data.models.TaxiStepStage.AT_PICKUP, step2.taxiStepStage)
+        val step2Stops = com.example.data.models.RouteStopCalculator.computeBatchStops(listOf(step2), 9.74, 118.73)
+        assertEquals(com.example.data.models.StopType.MERCHANT, step2Stops.first { !it.isFinished }.type)
+
+        // Step 3: On trip, no arrivedAtDropoffAt
+        val step3 = step2.copy(
+            status = OrderStepConstants.STATUS_ON_TRIP,
+            riderStep = "to_stop_2",
+            pickedUpAt = 1700000100000L,
+            arrivedAtDropoffAt = null
+        )
+        assertEquals(com.example.data.models.TaxiStepStage.TO_DROPOFF, step3.taxiStepStage)
+        val step3Stops = com.example.data.models.RouteStopCalculator.computeBatchStops(listOf(step3), 9.74, 118.73)
+        val step3Current = step3Stops.first { !it.isFinished }
+        assertEquals(com.example.data.models.StopType.CUSTOMER, step3Current.type)
+        assertEquals("Airport Rd, San Miguel, Puerto Princesa", step3Current.fullAddress)
+
+        // Step 4: On trip with arrivedAtDropoffAt set
+        val step4 = step3.copy(arrivedAtDropoffAt = 1700000300000L)
+        assertTrue(step4.hasArrivedAtDropoff)
+        assertEquals(com.example.data.models.TaxiStepStage.AT_DROPOFF, step4.taxiStepStage)
+
+        // Extra intermediate stops use TO_EXTRA_STOP -> AT_EXTRA_STOP before final TO_DROPOFF
+        val withExtraStop = step3.copy(
+            stops = listOf(com.example.data.models.TaxiStop(stopNumber = 3, address = "Final Stop Rd"))
+        )
+        assertEquals(com.example.data.models.TaxiStepStage.TO_EXTRA_STOP, withExtraStop.taxiStepStage)
+        assertEquals(com.example.data.models.TaxiStepStage.AT_EXTRA_STOP, withExtraStop.copy(riderStep = "at_stop_2").taxiStepStage)
+        assertEquals(com.example.data.models.TaxiStepStage.TO_DROPOFF, withExtraStop.copy(riderStep = "to_stop_3").taxiStepStage)
+
+        // Completed
+        val done = step4.copy(status = OrderStepConstants.STATUS_COMPLETED, riderStep = OrderStepConstants.STEP_COMPLETED)
+        assertEquals(com.example.data.models.TaxiStepStage.COMPLETED, done.taxiStepStage)
+    }
+
+    @Test
+    fun `verify 300m far-arrival check helper`() {
+        val targetLat = 9.7410
+        val targetLng = 118.7360
+        // ~15 m away -> not far
+        assertFalse(com.example.ui.components.isDriverFarFromTarget(Pair(9.7411, 118.7361), targetLat, targetLng))
+        // ~1 km away -> far
+        assertTrue(com.example.ui.components.isDriverFarFromTarget(Pair(9.7500, 118.7360), targetLat, targetLng))
+        // Null or 0 location -> never blocks
+        assertFalse(com.example.ui.components.isDriverFarFromTarget(null, targetLat, targetLng))
+        assertFalse(com.example.ui.components.isDriverFarFromTarget(Pair(0.0, 0.0), targetLat, targetLng))
+    }
+
+    @Test
+    fun `verify pabili 4-step status transitions and strict precondition guards`() {
+        val rules = com.example.data.models.PabiliFlowRules
+
+        // Forward-only exact status order:
+        // Placed Order -> "Rider is on the way to vendor" -> "Arrived at vendor"
+        // -> "Rider is on the way to recipient" -> "Arrived at recipient" -> "Delivered"
+        val t1 = rules.transitionFor(com.example.data.models.PabiliStepStage.TO_VENDOR)!!
+        assertEquals("Rider is on the way to vendor", t1.expectedPrevStatus)
+        assertEquals(OrderStepConstants.STEP_AT_VENDOR, t1.nextStep)
+        assertEquals("Arrived at vendor", t1.nextStatus)
+
+        val t2 = rules.transitionFor(com.example.data.models.PabiliStepStage.AT_VENDOR)!!
+        assertEquals("Arrived at vendor", t2.expectedPrevStatus)
+        assertEquals(OrderStepConstants.STEP_TO_RECIPIENT, t2.nextStep)
+        assertEquals("Rider is on the way to recipient", t2.nextStatus)
+
+        val t3 = rules.transitionFor(com.example.data.models.PabiliStepStage.TO_RECIPIENT)!!
+        assertEquals("Rider is on the way to recipient", t3.expectedPrevStatus)
+        assertEquals(OrderStepConstants.STEP_AT_RECIPIENT, t3.nextStep)
+        assertEquals("Arrived at recipient", t3.nextStatus)
+
+        val t4 = rules.transitionFor(com.example.data.models.PabiliStepStage.AT_RECIPIENT)!!
+        assertEquals("Arrived at recipient", t4.expectedPrevStatus)
+        assertEquals(OrderStepConstants.STEP_COMPLETED, t4.nextStep)
+        assertEquals("Delivered", t4.nextStatus)
+
+        assertNull(rules.transitionFor(com.example.data.models.PabiliStepStage.COMPLETED))
+
+        // Duplicate / skipped status guard
+        assertTrue(rules.isExpectedStatus("Arrived at vendor", t2.expectedPrevStatus))
+        assertFalse(rules.isExpectedStatus("Rider is on the way to recipient", t2.expectedPrevStatus))
+        assertFalse(rules.isExpectedStatus("Placed Order", t1.expectedPrevStatus))
+
+        // Receipt validation: > 0, max 2 decimals
+        assertTrue(rules.isValidReceiptInput("500"))
+        assertTrue(rules.isValidReceiptInput("540.75"))
+        assertEquals(540.75, rules.parseReceiptOrNull("540.75")!!, 0.001)
+        assertFalse(rules.isValidReceiptInput("0"))
+        assertFalse(rules.isValidReceiptInput("0.00"))
+        assertFalse(rules.isValidReceiptInput("-10"))
+        assertFalse(rules.isValidReceiptInput("12.345"))
+        assertFalse(rules.isValidReceiptInput(""))
+    }
+
+    @Test
+    fun `verify pabili order parser and RouteStop address reveal + customer phone`() {
+        val docMap = mapOf<String, Any?>(
+            "orderNumber" to "PB-707",
+            "serviceType" to "pabili",
+            "status" to "Rider is on the way to vendor",
+            "riderStep" to OrderStepConstants.STEP_TO_VENDOR,
+            "merchantName" to "NCCC Supermarket",
+            "merchantPhone" to "09998887777",
+            "merchantAddress" to "Rizal Ave, Puerto Princesa",
+            "merchantLat" to 9.7400,
+            "merchantLng" to 118.7350,
+            "customerName" to "Ana Reyes",
+            "customerPhone" to "09175551234",
+            "customerAddress" to "123 Mabini St, San Pedro, Puerto Princesa",
+            "customerArea" to "San Pedro",
+            "customerLat" to 9.7520,
+            "customerLng" to 118.7420,
+            "budgetLimit" to 500,
+            "paidOnMerchant" to 620.5,
+            "paidOnMerchantAt" to "2025-11-18T10:15:30Z",
+            "overBudgetApproved" to true,
+            "fees" to mapOf("deliveryFee" to 60.0, "serviceFee" to 25.0),
+            "pabili" to mapOf(
+                "items" to listOf(
+                    mapOf("product" to "Jasmine Rice 5kg", "quantity" to 1, "estimatedPrice" to 280.0),
+                    mapOf("product" to "Cooking Oil 1L", "quantity" to 2, "estimatedPrice" to 110.0)
+                )
+            )
+        )
+        val parsed = com.example.data.models.OrderDocumentParser.parseOrderFromMap("ord_pb_707", docMap)
+        assertTrue(parsed.isPabili)
+        assertEquals(500.0, parsed.resolvedBudgetLimit, 0.001)
+        assertEquals(620.5, parsed.resolvedPaidOnMerchant, 0.001)
+        assertTrue(parsed.overBudgetApproved)
+        assertEquals(85.0, parsed.cashAmountToCollect, 0.001)
+        assertTrue(parsed.isCod)
+        assertEquals(2, parsed.items.size)
+        assertEquals("Jasmine Rice 5kg", parsed.items[0].name)
+
+        // Step 1: customer stop hides full address & vendor stop STILL holds customerPhone (never merchantPhone)
+        val stopsStep1 = com.example.data.models.RouteStopCalculator.computeBatchStops(listOf(parsed), 9.7392, 118.7353)
+        val vendorStop = stopsStep1.first { it.isMerchant }
+        val customerStopHidden = stopsStep1.first { it.isCustomer }
+        assertEquals("09175551234", vendorStop.phone)
+        assertFalse(vendorStop.isFinished)
+        assertTrue(customerStopHidden.address.contains("revealed after pickup"))
+
+        // Step 3 ("Rider is on the way to recipient"): vendor finished, full customer address revealed
+        val step3Order = parsed.copy(
+            status = OrderStepConstants.STATUS_RIDER_ON_WAY_RECIPIENT,
+            riderStep = OrderStepConstants.STEP_TO_RECIPIENT
+        )
+        val stopsStep3 = com.example.data.models.RouteStopCalculator.computeBatchStops(listOf(step3Order), 9.7400, 118.7350)
+        assertTrue(stopsStep3.first { it.isMerchant }.isFinished)
+        val customerStopRevealed = stopsStep3.first { it.isCustomer }
+        assertEquals("123 Mabini St, San Pedro, Puerto Princesa", customerStopRevealed.address)
     }
 }
+
+
 

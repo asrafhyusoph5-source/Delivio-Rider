@@ -72,6 +72,7 @@ fun SlideToConfirmButton(
                 .shadow(6.dp, CircleShape)
                 .clip(CircleShape)
                 .background(Color(0xFF1A1A1A))
+                .testTag("slide_confirm_thumb")
                 .draggable(
                     enabled = enabled,
                     orientation = Orientation.Horizontal,

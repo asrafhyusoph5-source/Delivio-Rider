@@ -208,6 +208,17 @@ object OrderDocumentParser {
 
     fun safeList(raw: Any?): List<*>? = raw as? List<*>
 
+    private fun firstValidDisplayName(vararg candidates: Any?, fallback: String = ""): String {
+        for (c in candidates) {
+            val s = safeStringOrNull(c)?.trim() ?: continue
+            if (s.isBlank()) continue
+            if (s.contains("@")) continue
+            if (s.equals("Merchant", ignoreCase = true) || s.equals("Passenger Pickup", ignoreCase = true)) continue
+            return s
+        }
+        return fallback
+    }
+
     fun parseOrderFromMap(
         id: String,
         data: Map<String, Any?>?,
@@ -318,13 +329,29 @@ object OrderDocumentParser {
             ?: safeDouble(data["merchantLng"])
             ?: stop1PickupLng
 
-        val rawMerchantName = sanitizeDisplayName(
-            safeStringOrNull(pickupMap?.get("name")) ?: safeStringOrNull(data["merchantName"]),
-            ""
+        val parcelMapPre = safeMap(data["parcel"])
+        val pabiliMapPre = safeMap(data["pabili"])
+        val vendorMapPre = safeMap(data["vendor"]) ?: safeMap(pabiliMapPre?.get("vendor"))
+        val merchantObjMap = safeMap(data["merchant"])
+        val rawMerchantName = firstValidDisplayName(
+            pickupMap?.get("name"),
+            pickupMap?.get("vendorName"),
+            data["merchantName"],
+            merchantObjMap?.get("name"),
+            data["shopName"],
+            data["storeName"],
+            data["vendorName"],
+            pabiliMapPre?.get("vendorName"),
+            vendorMapPre?.get("name"),
+            fallback = ""
         )
-        val rawSenderName = sanitizeDisplayName(
-            safeStringOrNull(pickupMap?.get("senderName")) ?: safeStringOrNull(data["senderName"]),
-            ""
+        val rawSenderName = firstValidDisplayName(
+            pickupMap?.get("senderName"),
+            data["senderName"],
+            parcelMapPre?.get("senderName"),
+            safeMap(data["sender"])?.get("name"),
+            pickupMap?.get("contactName"),
+            fallback = ""
         )
         val rawBranchName = sanitizeDisplayName(
             safeStringOrNull(data["branchName"]) ?: safeStringOrNull(pickupMap?.get("branchName")),
@@ -337,12 +364,18 @@ object OrderDocumentParser {
         val rawChainId = (safeStringOrNull(data["chainId"])?.trim()?.takeIf { it.isNotBlank() }
             ?: safeStringOrNull(pickupMap?.get("chainId"))?.trim()?.takeIf { it.isNotBlank() }
             ?: "")
+        val pickupStructuredAddr = listOfNotNull(
+            safeStringOrNull(pickupMap?.get("street"))?.takeIf { it.isNotBlank() },
+            safeStringOrNull(pickupMap?.get("barangay"))?.takeIf { it.isNotBlank() },
+            safeStringOrNull(pickupMap?.get("city"))?.takeIf { it.isNotBlank() }
+        ).joinToString(", ")
         val rawMerchantAddress = deduplicateAddress(
             safeStringOrNull(pickupMap?.get("address"))
                 ?: safeStringOrNull(data["pickupAddress"])
                 ?: safeStringOrNull(data["merchantAddress"])
                 ?: safeStringOrNull(data["senderAddress"])
-                ?: stop1PickupAddress
+                ?: stop1PickupAddress.ifBlank { null }
+                ?: pickupStructuredAddr
         )
         val rawMerchantPhone = safeStringOrNull(pickupMap?.get("phone"))
             ?: safeStringOrNull(data["pickupPhone"])
@@ -399,18 +432,65 @@ object OrderDocumentParser {
         val customerId = safeStringOrNull(dropoffMap?.get("customerId"))
             ?: safeStringOrNull(dropoffMap?.get("uid"))
             ?: safeString(data["customerId"])
-        val customerName = sanitizeDisplayName(
-            safeStringOrNull(dropoffMap?.get("name"))
-                ?: safeStringOrNull(data["customerName"])
-                ?: safeStringOrNull(data["recipientName"]),
-            "Customer"
-        )
+        val taxiMap = safeMap(data["taxi"]) ?: safeMap(data["ride"])
+        val passengerMap = safeMap(data["passenger"])
+        val customerMap = safeMap(data["customer"])
+        val isTaxiService = normService == OrderStepConstants.SERVICE_TAXI
+        val customerName = if (isTaxiService) {
+            firstValidDisplayName(
+                taxiMap?.get("passengerName"),
+                data["passengerName"],
+                pickupMap?.get("passengerName"),
+                passengerMap?.get("name"),
+                dropoffMap?.get("name"),
+                data["customerName"],
+                customerMap?.get("name"),
+                data["userName"],
+                data["recipientName"],
+                pickupMap?.get("name"),
+                fallback = "Passenger"
+            )
+        } else {
+            firstValidDisplayName(
+                dropoffMap?.get("recipientName"),
+                dropoffMap?.get("name"),
+                data["recipientName"],
+                data["customerName"],
+                customerMap?.get("name"),
+                fallback = "Customer"
+            )
+        }
+        val pickupNote = (
+            safeStringOrNull(data["pickupNote"])
+                ?: safeStringOrNull(data["pickupNotes"])
+                ?: safeStringOrNull(pickupMap?.get("note"))
+                ?: safeStringOrNull(pickupMap?.get("notes"))
+                ?: safeStringOrNull(pickupMap?.get("instructions"))
+                ?: safeStringOrNull(taxiMap?.get("note"))
+                ?: safeStringOrNull(taxiMap?.get("pickupNote"))
+                ?: ""
+            ).trim()
+        val passengerCount = (
+            safeInt(data["passengerCount"])
+                ?: safeInt(taxiMap?.get("passengerCount"))
+                ?: safeInt(data["passengers"])
+                ?: safeInt(taxiMap?.get("passengers"))
+                ?: safeInt(data["pax"])
+                ?: safeInt(taxiMap?.get("pax"))
+                ?: safeInt(pickupMap?.get("passengerCount"))
+                ?: 1
+            ).coerceAtLeast(1)
+        val dropoffStructuredAddr = listOfNotNull(
+            safeStringOrNull(dropoffMap?.get("street"))?.takeIf { it.isNotBlank() },
+            safeStringOrNull(dropoffMap?.get("barangay"))?.takeIf { it.isNotBlank() },
+            safeStringOrNull(dropoffMap?.get("city"))?.takeIf { it.isNotBlank() }
+        ).joinToString(", ")
         val customerAddress = deduplicateAddress(
             safeStringOrNull(dropoffMap?.get("address"))
                 ?: safeStringOrNull(data["dropoffAddress"])
                 ?: safeStringOrNull(data["customerAddress"])
                 ?: safeStringOrNull(data["recipientAddress"])
-                ?: ""
+                ?: dropoffStructuredAddr
         )
         val customerPhone = safeStringOrNull(dropoffMap?.get("phone"))
             ?: safeStringOrNull(data["customerPhone"])
@@ -528,14 +608,36 @@ object OrderDocumentParser {
             )
         } ?: emptyList()
         val pabiliEstimatedTotal = safeDouble(pabiliMap?.get("estimatedTotal")) ?: safeDouble(data["pabiliEstimatedTotal"]) ?: 0.0
-        val pabiliBudget = safeDouble(pabiliMap?.get("budget")) ?: safeDouble(data["pabiliBudget"]) ?: 0.0
-        val finalReceiptTotal = safeDouble(data["finalReceiptTotal"]) ?: 0.0
+        val budgetLimit = safeDouble(data["budgetLimit"])
+            ?: safeDouble(pabiliMap?.get("budgetLimit"))
+            ?: safeDouble(pabiliMap?.get("budget"))
+            ?: safeDouble(data["pabiliBudget"])
+            ?: 0.0
+        val pabiliBudget = safeDouble(pabiliMap?.get("budget")) ?: safeDouble(data["pabiliBudget"]) ?: budgetLimit
+        val paidOnMerchant = safeDouble(data["paidOnMerchant"]) ?: safeDouble(pabiliMap?.get("paidOnMerchant")) ?: 0.0
+        val finalReceiptTotal = safeDouble(data["finalReceiptTotal"]) ?: paidOnMerchant
+        val paidOnMerchantAtRaw = (data["paidOnMerchantAt"] ?: pabiliMap?.get("paidOnMerchantAt"))
+            ?.takeUnless { it is String && it.isBlank() }
+        parseTolerantTimeMillis(paidOnMerchantAtRaw, fieldName = "paidOnMerchantAt")
+        val overBudgetApproved = safeBoolean(data["overBudgetApproved"])
+            ?: safeBoolean(pabiliMap?.get("overBudgetApproved"))
+            ?: false
+        val resolvedItems = if (items.isNotEmpty()) {
+            items
+        } else {
+            pabiliItems.map { pItem ->
+                OrderItem(
+                    name = pItem.product,
+                    quantity = pItem.quantity,
+                    price = pItem.estimatedPrice
+                )
+            }
+        }
 
         val riderReqMap = safeMap(data["riderRequest"])
         val riderReqStatus = safeStringOrNull(riderReqMap?.get("status")) ?: safeString(data["riderRequestStatus"])
 
         // Taxi vehicleType fallback checks
-        val taxiMap = safeMap(data["taxi"]) ?: safeMap(data["ride"])
         val vehicleMap = safeMap(data["vehicle"])
         val vehicleType = safeStringOrNull(data["vehicleType"])?.takeIf { it.isNotBlank() }
             ?: safeStringOrNull(taxiMap?.get("vehicleType"))?.takeIf { it.isNotBlank() }
@@ -618,9 +720,12 @@ object OrderDocumentParser {
         val createdAtRaw = data["createdAt"]
         val acceptedAtFieldRaw = data["acceptedAt"]
         val pickedUpAtRaw = data["pickedUpAt"]
-        val arrivedMerchantAtRaw = data["arrivedMerchantAt"]
-        val arrivedCustomerAtRaw = data["arrivedCustomerAt"]
-        val deliveredAtRaw = data["deliveredAt"]
+        val arrivedAtPickupAtRaw = data["arrivedAtPickupAt"]?.takeUnless { it is String && it.isBlank() }
+        val arrivedMerchantAtRaw = data["arrivedMerchantAt"] ?: arrivedAtPickupAtRaw
+        val arrivedAtDropoffAtRaw = data["arrivedAtDropoffAt"]?.takeUnless { it is String && it.isBlank() }
+        val arrivedCustomerAtRaw = data["arrivedCustomerAt"] ?: arrivedAtDropoffAtRaw
+        val completedAtRaw = data["completedAt"]?.takeUnless { it is String && it.isBlank() }
+        val deliveredAtRaw = data["deliveredAt"] ?: completedAtRaw
         val updatedAtRaw = data["updatedAt"] ?: data["statusUpdatedAt"]
         val explicitHoldUntilRaw = data["holdUntil"] ?: data["holdUntilMillis"]
 
@@ -628,8 +733,11 @@ object OrderDocumentParser {
         val placedAtParsed = parseTolerantTimeMillis(placedAtRaw, fieldName = "placedAt", allowLiteralRecentWords = true)
         val createdAtParsed = parseTolerantTimeMillis(createdAtRaw, fieldName = "createdAt")
         parseTolerantTimeMillis(pickedUpAtRaw, fieldName = "pickedUpAt")
+        parseTolerantTimeMillis(arrivedAtPickupAtRaw, fieldName = "arrivedAtPickupAt")
         parseTolerantTimeMillis(arrivedMerchantAtRaw, fieldName = "arrivedMerchantAt")
+        parseTolerantTimeMillis(arrivedAtDropoffAtRaw, fieldName = "arrivedAtDropoffAt")
         parseTolerantTimeMillis(arrivedCustomerAtRaw, fieldName = "arrivedCustomerAt")
+        parseTolerantTimeMillis(completedAtRaw, fieldName = "completedAt")
         parseTolerantTimeMillis(deliveredAtRaw, fieldName = "deliveredAt")
         parseTolerantTimeMillis(updatedAtRaw, fieldName = "updatedAt")
         val explicitHoldUntilMillis = parseTolerantTimeMillis(explicitHoldUntilRaw, fieldName = "holdUntil") ?: 0L
@@ -691,6 +799,8 @@ object OrderDocumentParser {
             vehicleType = vehicleType,
             stops = taxiStops,
             completedStops = completedStopsRaw,
+            passengerCount = passengerCount,
+            pickupNote = pickupNote,
             fulfillment = fulfillment,
             isScheduled = isScheduled,
             scheduledFor = scheduledForRaw,
@@ -715,7 +825,7 @@ object OrderDocumentParser {
             customerLat = customerLat,
             customerLng = customerLng,
             customerNotes = customerNotes,
-            items = items,
+            items = resolvedItems,
             baseFare = baseFare,
             distanceFare = distanceFare,
             tip = tip,
@@ -738,7 +848,11 @@ object OrderDocumentParser {
             pabiliItems = pabiliItems,
             pabiliEstimatedTotal = pabiliEstimatedTotal,
             pabiliBudget = pabiliBudget,
+            budgetLimit = budgetLimit,
             finalReceiptTotal = finalReceiptTotal,
+            paidOnMerchant = paidOnMerchant,
+            paidOnMerchantAt = paidOnMerchantAtRaw,
+            overBudgetApproved = overBudgetApproved,
             riderRequestStatus = riderReqStatus,
             pickupDistanceKm = safeDouble(data["pickupDistanceKm"]) ?: 0.0,
             deliveryDistanceKm = safeDouble(data["deliveryDistanceKm"]) ?: 3.2,
@@ -746,6 +860,9 @@ object OrderDocumentParser {
             pickedUpAt = pickedUpAtRaw,
             arrivedMerchantAt = arrivedMerchantAtRaw,
             arrivedCustomerAt = arrivedCustomerAtRaw,
+            arrivedAtPickupAt = arrivedAtPickupAtRaw,
+            arrivedAtDropoffAt = arrivedAtDropoffAtRaw,
+            completedAt = completedAtRaw,
             deliveredAt = deliveredAtRaw,
             updatedAt = updatedAtRaw,
             statusHistory = statusHistory,
