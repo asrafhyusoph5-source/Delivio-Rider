@@ -277,12 +277,30 @@ object OrderDocumentParser {
 
         val editedAt = data["editedAt"] ?: data["merchantEditedAt"]
 
+        val normServicePre = serviceType.lowercase(Locale.US).trim()
+        val parcelMapPre = safeMap(data["parcel"])
+        val pabiliMapPre = safeMap(data["pabili"])
+        val vendorMapPre = safeMap(data["vendor"]) ?: safeMap(pabiliMapPre?.get("vendor"))
+        val merchantObjMap = safeMap(data["merchant"])
+        val senderObjMap = safeMap(data["sender"])
+        val parcelSenderMap = safeMap(parcelMapPre?.get("sender"))
+        val pickupLocationMap = safeMap(data["pickupLocation"])
+        val pickupObjMap = safeMap(data["pickup"])
+
         // Pickup / merchant coordinates & metadata (supporting taxi, parcel, pabili, and merchant orders)
-        val pickupMap = safeMap(data["pickup"])
-            ?: safeMap(data["pickupLocation"])
-            ?: safeMap(data["origin"])
-            ?: safeMap(data["sender"])
-            ?: safeMap(data["merchant"])
+        val pickupMap = if (normServicePre == OrderStepConstants.SERVICE_PARCEL) {
+            pickupObjMap
+                ?: pickupLocationMap
+                ?: safeMap(data["origin"])
+                ?: senderObjMap
+                ?: parcelSenderMap
+        } else {
+            pickupObjMap
+                ?: pickupLocationMap
+                ?: safeMap(data["origin"])
+                ?: senderObjMap
+                ?: merchantObjMap
+        }
 
         val stopsRaw = safeList(data["stops"])
         var stop1PickupLat = 0.0
@@ -329,30 +347,40 @@ object OrderDocumentParser {
             ?: safeDouble(data["merchantLng"])
             ?: stop1PickupLng
 
-        val parcelMapPre = safeMap(data["parcel"])
-        val pabiliMapPre = safeMap(data["pabili"])
-        val vendorMapPre = safeMap(data["vendor"]) ?: safeMap(pabiliMapPre?.get("vendor"))
-        val merchantObjMap = safeMap(data["merchant"])
-        val rawMerchantName = firstValidDisplayName(
-            pickupMap?.get("name"),
-            pickupMap?.get("vendorName"),
-            data["merchantName"],
-            merchantObjMap?.get("name"),
-            data["shopName"],
-            data["storeName"],
-            data["vendorName"],
-            pabiliMapPre?.get("vendorName"),
-            vendorMapPre?.get("name"),
-            fallback = ""
-        )
-        val normServicePre = serviceType.lowercase(Locale.US).trim()
+        val rawMerchantName = if (normServicePre == OrderStepConstants.SERVICE_PARCEL) {
+            firstValidDisplayName(
+                pickupMap?.get("name"),
+                pickupMap?.get("senderName"),
+                senderObjMap?.get("name"),
+                parcelSenderMap?.get("name"),
+                parcelMapPre?.get("senderName"),
+                data["senderName"],
+                data["pickupName"],
+                pickupMap?.get("contactName"),
+                fallback = ""
+            )
+        } else {
+            firstValidDisplayName(
+                pickupMap?.get("name"),
+                pickupMap?.get("vendorName"),
+                data["merchantName"],
+                merchantObjMap?.get("name"),
+                data["shopName"],
+                data["storeName"],
+                data["vendorName"],
+                pabiliMapPre?.get("vendorName"),
+                vendorMapPre?.get("name"),
+                fallback = ""
+            )
+        }
         val rawSenderName = firstValidDisplayName(
             pickupMap?.get("senderName"),
             data["senderName"],
             parcelMapPre?.get("senderName"),
-            safeMap(data["sender"])?.get("name"),
+            parcelSenderMap?.get("name"),
+            senderObjMap?.get("name"),
             pickupMap?.get("contactName"),
-            if (normServicePre == OrderStepConstants.SERVICE_PARCEL) pickupMap?.get("name") else null,
+            if (normServicePre == OrderStepConstants.SERVICE_PARCEL) (pickupMap?.get("name") ?: data["pickupName"]) else null,
             fallback = ""
         )
         val rawBranchName = sanitizeDisplayName(
@@ -372,18 +400,43 @@ object OrderDocumentParser {
             safeStringOrNull(pickupMap?.get("city"))?.takeIf { it.isNotBlank() }
         ).joinToString(", ")
         val rawMerchantAddress = deduplicateAddress(
-            safeStringOrNull(pickupMap?.get("address"))
-                ?: safeStringOrNull(data["pickupAddress"])
-                ?: safeStringOrNull(data["merchantAddress"])
-                ?: safeStringOrNull(data["senderAddress"])
-                ?: stop1PickupAddress.ifBlank { null }
-                ?: pickupStructuredAddr
+            if (normServicePre == OrderStepConstants.SERVICE_PARCEL) {
+                safeStringOrNull(pickupMap?.get("address"))
+                    ?: safeStringOrNull(pickupLocationMap?.get("address"))
+                    ?: safeStringOrNull(senderObjMap?.get("address"))
+                    ?: safeStringOrNull(parcelSenderMap?.get("address"))
+                    ?: safeStringOrNull(parcelMapPre?.get("senderAddress"))
+                    ?: safeStringOrNull(data["pickupAddress"])
+                    ?: safeStringOrNull(data["senderAddress"])
+                    ?: stop1PickupAddress.ifBlank { null }
+                    ?: pickupStructuredAddr
+            } else {
+                safeStringOrNull(pickupMap?.get("address"))
+                    ?: safeStringOrNull(data["pickupAddress"])
+                    ?: safeStringOrNull(data["merchantAddress"])
+                    ?: safeStringOrNull(data["senderAddress"])
+                    ?: stop1PickupAddress.ifBlank { null }
+                    ?: pickupStructuredAddr
+            }
         )
-        val rawMerchantPhone = safeStringOrNull(pickupMap?.get("phone"))
-            ?: safeStringOrNull(data["pickupPhone"])
-            ?: safeStringOrNull(data["merchantPhone"])
-            ?: safeStringOrNull(data["senderPhone"])
-            ?: ""
+        val rawMerchantPhone = if (normServicePre == OrderStepConstants.SERVICE_PARCEL) {
+            safeStringOrNull(pickupMap?.get("phone"))
+                ?: safeStringOrNull(pickupMap?.get("contactPhone"))
+                ?: safeStringOrNull(pickupMap?.get("senderPhone"))
+                ?: safeStringOrNull(pickupLocationMap?.get("phone"))
+                ?: safeStringOrNull(senderObjMap?.get("phone"))
+                ?: safeStringOrNull(parcelSenderMap?.get("phone"))
+                ?: safeStringOrNull(parcelMapPre?.get("senderPhone"))
+                ?: safeStringOrNull(data["senderPhone"])
+                ?: safeStringOrNull(data["pickupPhone"])
+                ?: ""
+        } else {
+            safeStringOrNull(pickupMap?.get("phone"))
+                ?: safeStringOrNull(data["pickupPhone"])
+                ?: safeStringOrNull(data["merchantPhone"])
+                ?: safeStringOrNull(data["senderPhone"])
+                ?: ""
+        }
 
         val normService = serviceType.lowercase(Locale.US).trim()
         val isNonMerchant = normService == OrderStepConstants.SERVICE_TAXI ||
@@ -418,28 +471,40 @@ object OrderDocumentParser {
         val merchantPhone = rawMerchantPhone.ifBlank { safeString(cachedMerchant?.get("phone")) }
 
         // Dropoff / customer
-        val dropoffMap = safeMap(data["dropoff"])
-            ?: safeMap(data["dropOff"])
-            ?: safeMap(data["customer"])
+        val isParcelService = normService == OrderStepConstants.SERVICE_PARCEL
+        val dropoffObjMap = safeMap(data["dropoff"])
+        val dropOffCamelMap = safeMap(data["dropOff"])
+        val recipientObjMap = safeMap(data["recipient"])
+        val parcelRecipientMap = safeMap(parcelMapPre?.get("recipient"))
+        val customerMap = safeMap(data["customer"])
+        val dropoffMap = if (isParcelService) {
+            dropoffObjMap
+                ?: dropOffCamelMap
+                ?: recipientObjMap
+                ?: parcelRecipientMap
+        } else {
+            dropoffObjMap
+                ?: dropOffCamelMap
+                ?: customerMap
+        }
         val customerLat = safeDouble(dropoffMap?.get("lat"))
             ?: safeDouble(dropoffMap?.get("latitude"))
             ?: safeDouble(data["dropoffLat"])
-            ?: safeDouble(data["customerLat"])
+            ?: safeDouble(if (isParcelService) data["recipientLat"] else data["customerLat"])
             ?: 0.0
         val customerLng = safeDouble(dropoffMap?.get("lng"))
             ?: safeDouble(dropoffMap?.get("longitude"))
             ?: safeDouble(data["dropoffLng"])
-            ?: safeDouble(data["customerLng"])
+            ?: safeDouble(if (isParcelService) data["recipientLng"] else data["customerLng"])
             ?: 0.0
         val customerId = safeStringOrNull(dropoffMap?.get("customerId"))
             ?: safeStringOrNull(dropoffMap?.get("uid"))
             ?: safeString(data["customerId"])
         val taxiMap = safeMap(data["taxi"]) ?: safeMap(data["ride"])
         val passengerMap = safeMap(data["passenger"])
-        val customerMap = safeMap(data["customer"])
         val isTaxiService = normService == OrderStepConstants.SERVICE_TAXI
-        val customerName = if (isTaxiService) {
-            firstValidDisplayName(
+        val customerName = when {
+            isTaxiService -> firstValidDisplayName(
                 taxiMap?.get("passengerName"),
                 data["passengerName"],
                 pickupMap?.get("passengerName"),
@@ -452,8 +517,20 @@ object OrderDocumentParser {
                 pickupMap?.get("name"),
                 fallback = "Passenger"
             )
-        } else {
-            firstValidDisplayName(
+            isParcelService -> firstValidDisplayName(
+                dropoffObjMap?.get("name"),
+                dropOffCamelMap?.get("name"),
+                dropoffObjMap?.get("recipientName"),
+                dropOffCamelMap?.get("recipientName"),
+                recipientObjMap?.get("name"),
+                parcelRecipientMap?.get("name"),
+                parcelMapPre?.get("recipientName"),
+                data["recipientName"],
+                data["dropoffName"],
+                dropoffMap?.get("contactName"),
+                fallback = ""
+            )
+            else -> firstValidDisplayName(
                 dropoffMap?.get("recipientName"),
                 dropoffMap?.get("name"),
                 data["recipientName"],
@@ -468,6 +545,8 @@ object OrderDocumentParser {
                 ?: safeStringOrNull(pickupMap?.get("note"))
                 ?: safeStringOrNull(pickupMap?.get("notes"))
                 ?: safeStringOrNull(pickupMap?.get("instructions"))
+                ?: safeStringOrNull(senderObjMap?.get("note"))
+                ?: safeStringOrNull(parcelMapPre?.get("senderNote"))
                 ?: safeStringOrNull(taxiMap?.get("note"))
                 ?: safeStringOrNull(taxiMap?.get("pickupNote"))
                 ?: ""
@@ -488,28 +567,71 @@ object OrderDocumentParser {
             safeStringOrNull(dropoffMap?.get("city"))?.takeIf { it.isNotBlank() }
         ).joinToString(", ")
         val customerAddress = deduplicateAddress(
-            safeStringOrNull(dropoffMap?.get("address"))
-                ?: safeStringOrNull(data["dropoffAddress"])
-                ?: safeStringOrNull(data["customerAddress"])
-                ?: safeStringOrNull(data["recipientAddress"])
-                ?: dropoffStructuredAddr
+            if (isParcelService) {
+                safeStringOrNull(dropoffObjMap?.get("address"))
+                    ?: safeStringOrNull(dropOffCamelMap?.get("address"))
+                    ?: safeStringOrNull(recipientObjMap?.get("address"))
+                    ?: safeStringOrNull(parcelRecipientMap?.get("address"))
+                    ?: safeStringOrNull(parcelMapPre?.get("recipientAddress"))
+                    ?: safeStringOrNull(data["dropoffAddress"])
+                    ?: safeStringOrNull(data["recipientAddress"])
+                    ?: dropoffStructuredAddr
+            } else {
+                safeStringOrNull(dropoffMap?.get("address"))
+                    ?: safeStringOrNull(data["dropoffAddress"])
+                    ?: safeStringOrNull(data["customerAddress"])
+                    ?: safeStringOrNull(data["recipientAddress"])
+                    ?: dropoffStructuredAddr
+            }
         )
-        val customerPhone = safeStringOrNull(dropoffMap?.get("phone"))
-            ?: safeStringOrNull(data["customerPhone"])
-            ?: safeStringOrNull(data["recipientPhone"])
-            ?: ""
+        val customerPhone = if (isParcelService) {
+            safeStringOrNull(dropoffObjMap?.get("phone"))
+                ?: safeStringOrNull(dropOffCamelMap?.get("phone"))
+                ?: safeStringOrNull(dropoffObjMap?.get("recipientPhone"))
+                ?: safeStringOrNull(dropOffCamelMap?.get("recipientPhone"))
+                ?: safeStringOrNull(recipientObjMap?.get("phone"))
+                ?: safeStringOrNull(parcelRecipientMap?.get("phone"))
+                ?: safeStringOrNull(parcelMapPre?.get("recipientPhone"))
+                ?: safeStringOrNull(data["recipientPhone"])
+                ?: safeStringOrNull(data["dropoffPhone"])
+                ?: safeStringOrNull(dropoffMap?.get("contactPhone"))
+                ?: ""
+        } else {
+            safeStringOrNull(dropoffMap?.get("phone"))
+                ?: safeStringOrNull(data["customerPhone"])
+                ?: safeStringOrNull(data["recipientPhone"])
+                ?: ""
+        }
         val customerArea = deduplicateAddress(
-            safeStringOrNull(dropoffMap?.get("area"))
-                ?: safeStringOrNull(data["customerArea"])
-                ?: safeStringOrNull(data["recipientArea"])
-                ?: "Downtown"
+            if (isParcelService) {
+                safeStringOrNull(dropoffMap?.get("area"))
+                    ?: safeStringOrNull(data["dropoffArea"])
+                    ?: safeStringOrNull(data["recipientArea"])
+                    ?: ""
+            } else {
+                safeStringOrNull(dropoffMap?.get("area"))
+                    ?: safeStringOrNull(data["customerArea"])
+                    ?: safeStringOrNull(data["recipientArea"])
+                    ?: "Downtown"
+            }
         )
-        val customerNotes = safeStringOrNull(dropoffMap?.get("note"))
-            ?: safeStringOrNull(dropoffMap?.get("notes"))
-            ?: safeStringOrNull(data["dropoffNote"])
-            ?: safeStringOrNull(data["dropoffNotes"])
-            ?: safeStringOrNull(data["deliveryNote"])
-            ?: safeString(data["customerNotes"])
+        val customerNotes = if (isParcelService) {
+            safeStringOrNull(dropoffMap?.get("note"))
+                ?: safeStringOrNull(dropoffMap?.get("notes"))
+                ?: safeStringOrNull(recipientObjMap?.get("note"))
+                ?: safeStringOrNull(parcelMapPre?.get("recipientNote"))
+                ?: safeStringOrNull(data["dropoffNote"])
+                ?: safeStringOrNull(data["dropoffNotes"])
+                ?: safeStringOrNull(data["deliveryNote"])
+                ?: ""
+        } else {
+            safeStringOrNull(dropoffMap?.get("note"))
+                ?: safeStringOrNull(dropoffMap?.get("notes"))
+                ?: safeStringOrNull(data["dropoffNote"])
+                ?: safeStringOrNull(data["dropoffNotes"])
+                ?: safeStringOrNull(data["deliveryNote"])
+                ?: safeString(data["customerNotes"])
+        }
 
         // Items
         val items = safeList(data["items"])?.mapNotNull { itemObj ->
@@ -807,6 +929,98 @@ object OrderDocumentParser {
             rawMap.entries.associate { (k, v) -> k.toString() to v }
         } ?: emptyList()
 
+        val rawContactFields = linkedMapOf<String, String>().apply {
+            fun addIfPresent(key: String, raw: Any?) {
+                val s = safeStringOrNull(raw)?.trim() ?: return
+                if (s.isNotEmpty()) put(key, s)
+            }
+            fun collectMap(prefix: String, m: Map<*, *>?) {
+                if (m == null) return
+                for ((k, v) in m) {
+                    val key = "$prefix.${k.toString()}"
+                    if (v is Map<*, *>) {
+                        collectMap(key, v)
+                    } else {
+                        addIfPresent(key, v)
+                    }
+                }
+            }
+            collectMap("pickup", pickupObjMap)
+            collectMap("pickupLocation", pickupLocationMap)
+            collectMap("sender", senderObjMap)
+            collectMap("parcel.sender", parcelSenderMap)
+            collectMap("dropoff", dropoffObjMap)
+            collectMap("dropOff", dropOffCamelMap)
+            collectMap("recipient", recipientObjMap)
+            collectMap("parcel.recipient", parcelRecipientMap)
+            collectMap("customer", customerMap)
+            collectMap("merchant", merchantObjMap)
+            collectMap("vendor", vendorMapPre)
+            collectMap("taxi", taxiMap)
+            collectMap("passenger", passengerMap)
+
+            listOf(
+                "parcel.senderName" to parcelMapPre?.get("senderName"),
+                "parcel.senderPhone" to parcelMapPre?.get("senderPhone"),
+                "parcel.senderAddress" to parcelMapPre?.get("senderAddress"),
+                "parcel.recipientName" to parcelMapPre?.get("recipientName"),
+                "parcel.recipientPhone" to parcelMapPre?.get("recipientPhone"),
+                "parcel.recipientAddress" to parcelMapPre?.get("recipientAddress"),
+                "senderName" to data["senderName"],
+                "senderPhone" to data["senderPhone"],
+                "senderAddress" to data["senderAddress"],
+                "pickupName" to data["pickupName"],
+                "pickupPhone" to data["pickupPhone"],
+                "pickupAddress" to data["pickupAddress"],
+                "recipientName" to data["recipientName"],
+                "recipientPhone" to data["recipientPhone"],
+                "recipientAddress" to data["recipientAddress"],
+                "dropoffName" to data["dropoffName"],
+                "dropoffPhone" to data["dropoffPhone"],
+                "dropoffAddress" to data["dropoffAddress"],
+                "customerName" to data["customerName"],
+                "customerPhone" to data["customerPhone"],
+                "customerAddress" to data["customerAddress"],
+                "merchantName" to data["merchantName"],
+                "merchantPhone" to data["merchantPhone"],
+                "merchantAddress" to data["merchantAddress"],
+                "passengerName" to data["passengerName"]
+            ).forEach { (k, v) -> addIfPresent(k, v) }
+        }
+
+        val rawDebugFields = linkedMapOf<String, String>().apply {
+            fun addDebug(key: String, raw: Any?) {
+                val s = when (raw) {
+                    null -> return
+                    is String -> raw.trim().ifEmpty { return }
+                    is Number, is Boolean -> raw.toString()
+                    else -> raw.toString()
+                }
+                put(key, s)
+            }
+            addDebug("docId", id)
+            addDebug("orderNumber", data["orderNumber"] ?: data["orderId"])
+            addDebug("serviceType", data["serviceType"])
+            addDebug("status", data["status"])
+            addDebug("riderStep", data["riderStep"])
+            addDebug("riderId", data["riderId"])
+            addDebug("paymentMethod", data["paymentMethod"] ?: data["paymentType"])
+            addDebug("cashToCollect", data["cashToCollect"] ?: data["totalAmountToCollect"])
+            addDebug("cashCollectAt", data["cashCollectAt"])
+            addDebug("codAmount", data["codAmount"])
+            addDebug("feePayer", data["feePayer"] ?: parcelMap?.get("feePayer") ?: data["parcelFeePayer"])
+            addDebug("vehicleType", data["vehicleType"] ?: parcelMap?.get("vehicleType") ?: taxiMap?.get("vehicleType"))
+            addDebug("parcel.size", parcelMap?.get("size") ?: data["parcelSize"])
+            addDebug("parcel.weightKg", parcelMap?.get("weightKg") ?: data["parcelWeightKg"])
+            addDebug("parcel.description", parcelMap?.get("description") ?: parcelMap?.get("itemDescription") ?: data["parcelDescription"])
+            addDebug("parcel.fragile", parcelMap?.get("fragile") ?: data["parcelFragile"])
+            addDebug("pabili.budget", pabiliMap?.get("budgetLimit") ?: pabiliMap?.get("budget") ?: data["budgetLimit"] ?: data["pabiliBudget"])
+            addDebug("riderRequest.status", riderReqMap?.get("status") ?: data["riderRequestStatus"])
+            for ((k, v) in rawContactFields) {
+                put(k, v)
+            }
+        }
+
         return Order(
             id = id,
             orderNumber = orderNumber,
@@ -914,7 +1128,9 @@ object OrderDocumentParser {
             isSplitChild = isSplitChild,
             cashCollected = cashCollected,
             cashCollectedStage = cashCollectedStage,
-            cashCollectedAt = cashCollectedAtRaw
+            cashCollectedAt = cashCollectedAtRaw,
+            rawContactFields = rawContactFields,
+            rawDebugFields = rawDebugFields
         )
     }
 

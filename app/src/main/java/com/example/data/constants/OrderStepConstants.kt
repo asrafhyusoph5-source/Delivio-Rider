@@ -253,7 +253,15 @@ object OrderStepConstants {
                 STEP_DELIVERED
             )
             SERVICE_TAXI -> step != STEP_TO_PICKUP
-            else -> step in listOf(STEP_TO_CUSTOMER, STEP_AT_CUSTOMER, STEP_HEADING_TO_CUSTOMER, STEP_ARRIVED_AT_CUSTOMER)
+            else -> step in listOf(
+                STEP_PICKED_UP,
+                STEP_TO_CUSTOMER,
+                STEP_AT_CUSTOMER,
+                STEP_HEADING_TO_CUSTOMER,
+                STEP_ARRIVED_AT_CUSTOMER,
+                STEP_COMPLETED,
+                STEP_DELIVERED
+            )
         }
     }
 
@@ -297,10 +305,9 @@ object OrderStepConstants {
             else -> when (step) {
                 STEP_TO_MERCHANT, STEP_HEADING_TO_MERCHANT -> "Heading to Merchant"
                 STEP_AT_MERCHANT, STEP_ARRIVED_AT_MERCHANT -> "At Merchant"
-                STEP_PICKED_UP -> "Order Picked Up"
-                STEP_TO_CUSTOMER, STEP_HEADING_TO_CUSTOMER -> "Heading to Customer"
+                STEP_PICKED_UP, STEP_TO_CUSTOMER, STEP_HEADING_TO_CUSTOMER -> "Heading to Customer"
                 STEP_AT_CUSTOMER, STEP_ARRIVED_AT_CUSTOMER -> "At Customer"
-                STEP_COMPLETED -> "Delivery Completed"
+                STEP_COMPLETED, STEP_DELIVERED -> "Delivery Completed"
                 else -> "On the Way"
             }
         }
@@ -338,12 +345,11 @@ object OrderStepConstants {
                 else -> "Slide to Confirm Delivery"
             }
             else -> when (step) {
-                STEP_TO_MERCHANT, STEP_HEADING_TO_MERCHANT -> "Slide to confirm Arrival at Merchant"
+                STEP_TO_MERCHANT, STEP_HEADING_TO_MERCHANT -> "Arrived at the Merchant"
                 STEP_AT_MERCHANT, STEP_ARRIVED_AT_MERCHANT -> "Slide to confirm Picked Up"
-                STEP_PICKED_UP -> "Slide to start heading to Customer"
-                STEP_TO_CUSTOMER, STEP_HEADING_TO_CUSTOMER -> "Slide to confirm Arrival at Customer"
-                STEP_AT_CUSTOMER, STEP_ARRIVED_AT_CUSTOMER -> "Slide to Complete Delivery"
-                else -> "Slide to Complete Delivery"
+                STEP_PICKED_UP, STEP_TO_CUSTOMER, STEP_HEADING_TO_CUSTOMER -> "Arrived at the Customer"
+                STEP_AT_CUSTOMER, STEP_ARRIVED_AT_CUSTOMER -> "Slide to Confirm Delivery"
+                else -> "Slide to Confirm Delivery"
             }
         }
     }

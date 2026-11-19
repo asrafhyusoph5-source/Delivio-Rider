@@ -470,6 +470,226 @@ object ParcelFlowRules {
     }
 }
 
+enum class FoodStepStage {
+    TO_MERCHANT,
+    AT_MERCHANT,
+    TO_CUSTOMER,
+    AT_CUSTOMER,
+    COMPLETED
+}
+
+data class FoodTransitionSpec(
+    val currentStage: FoodStepStage,
+    val nextStep: String,
+    val nextReqStatus: String
+)
+
+object FoodFlowRules {
+    private val TERMINAL_STATUSES = setOf("delivered", "completed", "cancelled", "canceled", "rejected")
+    private val PICKUP_DONE_STATUSES = setOf("rider is on the way", "on another delivery")
+
+    fun normalizeStep(rawStep: String?): FoodStepStage {
+        return when ((rawStep ?: "").trim().lowercase(Locale.US)) {
+            OrderStepConstants.STEP_COMPLETED,
+            OrderStepConstants.STEP_DELIVERED -> FoodStepStage.COMPLETED
+
+            OrderStepConstants.STEP_AT_CUSTOMER,
+            OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER -> FoodStepStage.AT_CUSTOMER
+
+            OrderStepConstants.STEP_TO_CUSTOMER,
+            OrderStepConstants.STEP_HEADING_TO_CUSTOMER,
+            OrderStepConstants.STEP_PICKED_UP -> FoodStepStage.TO_CUSTOMER
+
+            OrderStepConstants.STEP_AT_MERCHANT,
+            OrderStepConstants.STEP_ARRIVED_AT_MERCHANT -> FoodStepStage.AT_MERCHANT
+
+            else -> FoodStepStage.TO_MERCHANT
+        }
+    }
+
+    fun resolveStage(rawStep: String?, rawStatus: String?): FoodStepStage {
+        val normStatus = (rawStatus ?: "").trim().lowercase(Locale.US)
+        if (normStatus == "delivered" || normStatus == "completed") {
+            return FoodStepStage.COMPLETED
+        }
+        val stepStage = normalizeStep(rawStep)
+        if (stepStage == FoodStepStage.TO_MERCHANT && normStatus in PICKUP_DONE_STATUSES) {
+            return FoodStepStage.TO_CUSTOMER
+        }
+        return stepStage
+    }
+
+    fun transitionFor(stage: FoodStepStage): FoodTransitionSpec? = when (stage) {
+        FoodStepStage.TO_MERCHANT -> FoodTransitionSpec(
+            currentStage = FoodStepStage.TO_MERCHANT,
+            nextStep = OrderStepConstants.STEP_AT_MERCHANT,
+            nextReqStatus = OrderStepConstants.REQ_ARRIVED_AT_MERCHANT
+        )
+        FoodStepStage.AT_MERCHANT -> FoodTransitionSpec(
+            currentStage = FoodStepStage.AT_MERCHANT,
+            nextStep = OrderStepConstants.STEP_TO_CUSTOMER,
+            nextReqStatus = OrderStepConstants.REQ_ON_THE_WAY
+        )
+        FoodStepStage.TO_CUSTOMER -> FoodTransitionSpec(
+            currentStage = FoodStepStage.TO_CUSTOMER,
+            nextStep = OrderStepConstants.STEP_AT_CUSTOMER,
+            nextReqStatus = OrderStepConstants.REQ_ON_THE_WAY
+        )
+        FoodStepStage.AT_CUSTOMER -> FoodTransitionSpec(
+            currentStage = FoodStepStage.AT_CUSTOMER,
+            nextStep = OrderStepConstants.STEP_COMPLETED,
+            nextReqStatus = OrderStepConstants.REQ_DELIVERED
+        )
+        FoodStepStage.COMPLETED -> null
+    }
+
+    fun isExpectedState(
+        actualDbStep: String?,
+        actualDbStatus: String?,
+        expectedStage: FoodStepStage
+    ): Boolean {
+        val normStatus = (actualDbStatus ?: "").trim().lowercase(Locale.US)
+        if (normStatus in TERMINAL_STATUSES) return false
+        val actualStage = resolveStage(actualDbStep, actualDbStatus)
+        return actualStage == expectedStage
+    }
+}
+
+enum class AcceptOrderDecision {
+    ALLOW_ACCEPT,
+    ALREADY_OURS,
+    TAKEN_BY_OTHER,
+    UNAVAILABLE
+}
+
+data class AcceptOrderEvalResult(
+    val decision: AcceptOrderDecision,
+    val rawStatus: String,
+    val reason: String = ""
+)
+
+object AcceptOrderRules {
+    private val GENERAL_ACCEPTABLE_STATUSES = setOf(
+        "placed order",
+        "placed_order",
+        "preparing",
+        "ready"
+    )
+    private val NON_MERCHANT_ACCEPTABLE_STATUSES = setOf(
+        "placed order",
+        "placed_order",
+        "searching",
+        "preparing",
+        "ready"
+    )
+    private val TAXI_ACCEPTABLE_STATUSES = setOf(
+        "searching",
+        "placed order",
+        "placed_order",
+        "preparing",
+        "ready"
+    )
+    private val INSTANT_ACCEPTABLE_STATUSES = setOf(
+        "placed order",
+        "placed_order",
+        "preparing",
+        "ready",
+        "searching"
+    )
+
+    fun formatRawStatus(raw: Any?): String {
+        return when (raw) {
+            null -> "(missing)"
+            is String -> raw.trim().ifBlank { "(missing)" }
+            else -> raw.toString().trim().ifBlank { "(missing)" }
+        }
+    }
+
+    fun evaluateDocument(
+        exists: Boolean,
+        riderIdRaw: Any?,
+        statusRaw: Any?,
+        riderRequestStatusRaw: Any?,
+        serviceTypeRaw: Any?,
+        excludeRiderIds: List<String>,
+        myUid: String
+    ): AcceptOrderEvalResult {
+        val rawStatus = formatRawStatus(statusRaw)
+        if (!exists) {
+            return AcceptOrderEvalResult(
+                decision = AcceptOrderDecision.UNAVAILABLE,
+                rawStatus = "(missing)",
+                reason = "This order is no longer available"
+            )
+        }
+
+        val existingRider = when (riderIdRaw) {
+            null -> ""
+            is String -> riderIdRaw.trim()
+            else -> riderIdRaw.toString().trim()
+        }
+
+        if (existingRider.isNotEmpty() && existingRider == myUid) {
+            return AcceptOrderEvalResult(
+                decision = AcceptOrderDecision.ALREADY_OURS,
+                rawStatus = rawStatus
+            )
+        }
+        if (existingRider.isNotEmpty() && existingRider != myUid) {
+            return AcceptOrderEvalResult(
+                decision = AcceptOrderDecision.TAKEN_BY_OTHER,
+                rawStatus = rawStatus,
+                reason = "Another rider already took this order"
+            )
+        }
+        if (excludeRiderIds.any { it.trim() == myUid }) {
+            return AcceptOrderEvalResult(
+                decision = AcceptOrderDecision.UNAVAILABLE,
+                rawStatus = rawStatus,
+                reason = "This order is no longer available"
+            )
+        }
+        if (rawStatus == "(missing)") {
+            return AcceptOrderEvalResult(
+                decision = AcceptOrderDecision.UNAVAILABLE,
+                rawStatus = rawStatus,
+                reason = "This order is no longer available"
+            )
+        }
+
+        val normStatus = rawStatus.trim().lowercase(Locale.US)
+        val normReqStatus = formatRawStatus(riderRequestStatusRaw).lowercase(Locale.US)
+        val normService = when (serviceTypeRaw) {
+            null -> OrderStepConstants.SERVICE_FOOD
+            is String -> serviceTypeRaw.trim().lowercase(Locale.US)
+            else -> serviceTypeRaw.toString().trim().lowercase(Locale.US)
+        }
+
+        val acceptable = when (normService) {
+            OrderStepConstants.SERVICE_PARCEL,
+            OrderStepConstants.SERVICE_PABILI -> normStatus in NON_MERCHANT_ACCEPTABLE_STATUSES
+            OrderStepConstants.SERVICE_TAXI -> normStatus in TAXI_ACCEPTABLE_STATUSES
+            OrderStepConstants.SERVICE_REQUEST -> {
+                normStatus in INSTANT_ACCEPTABLE_STATUSES || normReqStatus == "searching"
+            }
+            else -> normStatus in GENERAL_ACCEPTABLE_STATUSES
+        }
+
+        return if (acceptable) {
+            AcceptOrderEvalResult(
+                decision = AcceptOrderDecision.ALLOW_ACCEPT,
+                rawStatus = rawStatus
+            )
+        } else {
+            AcceptOrderEvalResult(
+                decision = AcceptOrderDecision.UNAVAILABLE,
+                rawStatus = rawStatus,
+                reason = "This order is no longer available"
+            )
+        }
+    }
+}
+
 data class Order(
     val id: String = "",
     val orderNumber: String = "",
@@ -608,7 +828,9 @@ data class Order(
     val isSplitChild: Boolean = false,
     val cashCollected: Double = 0.0,
     val cashCollectedStage: String = "",
-    val cashCollectedAt: Any? = null
+    val cashCollectedAt: Any? = null,
+    val rawContactFields: Map<String, String> = emptyMap(),
+    val rawDebugFields: Map<String, String> = emptyMap()
 ) {
     val hasSplitOut: Boolean
         get() = splitOutInfo != null || splitOut.isNotEmpty()
@@ -805,6 +1027,9 @@ data class Order(
 
     val isMart: Boolean
         get() = serviceType.trim().lowercase().let { it == OrderStepConstants.SERVICE_MART || it == "mart" }
+
+    val foodStepStage: FoodStepStage
+        get() = FoodFlowRules.resolveStage(riderStep, status)
 
     val allTaxiStops: List<TaxiStop>
         get() {
@@ -1648,16 +1873,199 @@ fun sanitizeDisplayName(raw: String?, fallback: String = ""): String {
     return trimmed
 }
 
+data class OrderContact(
+    val name: String,
+    val phone: String,
+    val address: String
+)
+
+data class OrderContacts(
+    val pickup: OrderContact,
+    val dropoff: OrderContact
+)
+
+fun contactsOf(order: Order): OrderContacts {
+    if (order.isParcel) {
+        val raw = order.rawContactFields
+        if (raw.isNotEmpty()) {
+            fun firstRaw(vararg keys: String): String {
+                for (k in keys) {
+                    val v = raw[k]?.trim()
+                    if (!v.isNullOrBlank()) return v
+                }
+                return ""
+            }
+
+            val senderName = sanitizeDisplayName(
+                firstRaw(
+                    "pickup.name",
+                    "pickupLocation.name",
+                    "sender.name",
+                    "parcel.sender.name",
+                    "parcel.senderName",
+                    "senderName",
+                    "pickup.senderName",
+                    "pickup.contactName"
+                ),
+                ""
+            ).ifBlank { sanitizeDisplayName(order.senderName, "").ifBlank { "Not provided" } }
+
+            val senderPhone = firstRaw(
+                "pickup.phone",
+                "pickupLocation.phone",
+                "sender.phone",
+                "parcel.sender.phone",
+                "parcel.senderPhone",
+                "senderPhone",
+                "pickupPhone",
+                "pickup.contactPhone",
+                "pickup.senderPhone"
+            ).ifBlank { order.merchantPhone.trim() }.ifBlank { "Not provided" }
+
+            val senderAddress = deduplicateAddress(
+                firstRaw(
+                    "pickup.address",
+                    "pickupLocation.address",
+                    "sender.address",
+                    "parcel.sender.address",
+                    "parcel.senderAddress",
+                    "pickupAddress",
+                    "senderAddress"
+                )
+            ).ifBlank { deduplicateAddress(order.merchantAddress) }.ifBlank { "Not provided" }
+
+            // Parcel recipient MUST NEVER fall back to booking customer fields (customer.name / customerName / customerPhone / customerAddress)
+            val recipientName = sanitizeDisplayName(
+                firstRaw(
+                    "dropoff.name",
+                    "dropOff.name",
+                    "dropoff.recipientName",
+                    "dropOff.recipientName",
+                    "recipient.name",
+                    "parcel.recipient.name",
+                    "parcel.recipientName",
+                    "recipientName",
+                    "dropoffName",
+                    "dropoff.contactName"
+                ),
+                ""
+            ).ifBlank { "Not provided" }
+
+            val recipientPhone = firstRaw(
+                "dropoff.phone",
+                "dropOff.phone",
+                "dropoff.recipientPhone",
+                "dropOff.recipientPhone",
+                "recipient.phone",
+                "parcel.recipient.phone",
+                "parcel.recipientPhone",
+                "recipientPhone",
+                "dropoffPhone",
+                "dropoff.contactPhone"
+            ).ifBlank { "Not provided" }
+
+            val recipientAddress = deduplicateAddress(
+                firstRaw(
+                    "dropoff.address",
+                    "dropOff.address",
+                    "recipient.address",
+                    "parcel.recipient.address",
+                    "parcel.recipientAddress",
+                    "dropoffAddress",
+                    "recipientAddress"
+                )
+            ).ifBlank { "Not provided" }
+
+            return OrderContacts(
+                pickup = OrderContact(name = senderName, phone = senderPhone, address = senderAddress),
+                dropoff = OrderContact(name = recipientName, phone = recipientPhone, address = recipientAddress)
+            )
+        }
+
+        // In-memory Order constructed directly in tests without rawContactFields
+        val senderName = sanitizeDisplayName(order.senderName, "")
+            .ifBlank { sanitizeDisplayName(order.merchantName, "") }
+            .ifBlank { "Not provided" }
+        val senderPhone = order.merchantPhone.trim().ifBlank { "Not provided" }
+        val senderAddress = deduplicateAddress(order.merchantAddress).ifBlank { "Not provided" }
+
+        val recipientName = sanitizeDisplayName(order.customerName, "")
+            .takeUnless { it.equals("Customer", ignoreCase = true) }
+            .orEmpty()
+            .ifBlank { "Not provided" }
+        val recipientPhone = order.customerPhone.trim().ifBlank { "Not provided" }
+        val recipientAddress = deduplicateAddress(order.customerAddress)
+            .ifBlank { deduplicateAddress(order.customerArea) }
+            .ifBlank { "Not provided" }
+
+        return OrderContacts(
+            pickup = OrderContact(name = senderName, phone = senderPhone, address = senderAddress),
+            dropoff = OrderContact(name = recipientName, phone = recipientPhone, address = recipientAddress)
+        )
+    }
+
+    val pickupName = resolveStopDisplayName(order, StopType.MERCHANT).ifBlank { "Not provided" }
+    val pickupPhone = if (order.isPabili) "" else order.merchantPhone.trim().ifBlank { "Not provided" }
+    val pickupAddress = deduplicateAddress(order.merchantAddress).ifBlank { "Not provided" }
+
+    val dropoffName = resolveStopDisplayName(order, StopType.CUSTOMER).ifBlank { "Not provided" }
+    val dropoffPhone = order.customerPhone.trim().ifBlank { "Not provided" }
+    val dropoffAddress = deduplicateAddress(order.customerAddress)
+        .ifBlank { deduplicateAddress(order.customerArea) }
+        .ifBlank { "Not provided" }
+
+    return OrderContacts(
+        pickup = OrderContact(name = pickupName, phone = pickupPhone, address = pickupAddress),
+        dropoff = OrderContact(name = dropoffName, phone = dropoffPhone, address = dropoffAddress)
+    )
+}
+
 fun deduplicateAddress(raw: String?): String {
     val input = (raw ?: "").trim()
     if (input.isBlank()) return ""
-    val parts = input.split(",").map { it.trim() }.filter { it.isNotBlank() }
+
+    fun collapseConsecutivePhraseRepeats(segment: String): String {
+        val tokens = segment.trim().split("\\s+".toRegex()).filter { it.isNotBlank() }.toMutableList()
+        var n = 4
+        while (n >= 1) {
+            var i = 0
+            while (i + 2 * n <= tokens.size) {
+                val firstSlice = tokens.subList(i, i + n).joinToString(" ").lowercase(Locale.US)
+                val secondSlice = tokens.subList(i + n, i + 2 * n).joinToString(" ").lowercase(Locale.US)
+                val isSingleNumeric = n == 1 && firstSlice.all { it.isDigit() }
+                if (!isSingleNumeric && firstSlice == secondSlice) {
+                    repeat(n) { tokens.removeAt(i + n) }
+                } else {
+                    i += 1
+                }
+            }
+            n -= 1
+        }
+        return tokens.joinToString(" ")
+    }
+
+    val parts = input.split(",")
+        .map { collapseConsecutivePhraseRepeats(it.trim()) }
+        .filter { it.isNotBlank() }
     if (parts.isEmpty()) return input
+
     val seen = LinkedHashSet<String>()
+    val seenCityStems = LinkedHashSet<String>()
     val result = mutableListOf<String>()
+
+    fun cityStem(norm: String): String? {
+        if (!norm.endsWith(" city")) return null
+        val stem = norm.removeSuffix(" city").trim()
+        return if (stem.contains(" ")) stem else null
+    }
+
     for (part in parts) {
-        val key = part.lowercase().replace("\\s+".toRegex(), " ")
-        if (seen.add(key)) {
+        val key = part.lowercase(Locale.US).replace("\\s+".toRegex(), " ")
+        val stem = cityStem(key)
+        val isDuplicateCityVariant = (stem != null && (seen.contains(stem) || seenCityStems.contains(stem))) ||
+            seenCityStems.contains(key)
+        if (!isDuplicateCityVariant && seen.add(key)) {
+            if (stem != null) seenCityStems.add(stem) else seenCityStems.add(key)
             result.add(part)
         }
     }

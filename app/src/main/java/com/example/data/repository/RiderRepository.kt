@@ -62,6 +62,7 @@ class RiderRepository(
     val eligibleOrdersCount: StateFlow<Int> = _eligibleOrdersCount.asStateFlow()
 
     private val inFlightAdvanceOrderIds = Collections.synchronizedSet(mutableSetOf<String>())
+    private val inFlightAcceptOrderIds = Collections.synchronizedSet(mutableSetOf<String>())
 
     private val _skippedOrderRecords = MutableStateFlow<List<SkippedOrderRecord>>(emptyList())
     val skippedOrderRecords: StateFlow<List<SkippedOrderRecord>> = _skippedOrderRecords.asStateFlow()
@@ -1197,7 +1198,10 @@ class RiderRepository(
         val eligibleWithDist = mutableListOf<Pair<Order, Double>>()
         var latestTaxiCandidate: Pair<Order, TaxiOrderDiagnostics>? = null
 
+        val sessionUid = activeSessionUid ?: auth.currentUser?.uid
         for (order in rawCandidates) {
+            if (order.id in inFlightAcceptOrderIds) continue
+            if (!sessionUid.isNullOrBlank() && order.riderId == sessionUid) continue
             val checkCity = if (order.cityId.isNotBlank()) order.cityId else (currentRider?.cityId ?: "")
             if (order.isTaxi) {
                 val diag = com.example.data.constants.TaxiDispatchEvaluator.diagnoseTaxiOrder(
@@ -1551,13 +1555,15 @@ class RiderRepository(
     ) {
         val currentRider = _rider.value
         val authUid = auth.currentUser?.uid ?: currentRider?.uid ?: ""
+        val firstOrder = bundle.orders.firstOrNull()
+        val initialRawStatus = AcceptOrderRules.formatRawStatus(firstOrder?.status)
 
         if (currentRider == null || authUid.isEmpty()) {
             onError(
                 AcceptOrderErrorDetails(
                     exceptionMessage = "Rider profile or FirebaseAuth session is not ready",
                     orderId = bundle.id,
-                    currentStatus = "unknown",
+                    currentStatus = initialRawStatus,
                     authUid = authUid,
                     fieldsWritten = emptyMap()
                 )
@@ -1565,57 +1571,113 @@ class RiderRepository(
             return
         }
 
+        val orderIds = bundle.orders.map { it.id }.filter { it.isNotBlank() }
+        if (orderIds.isEmpty()) return
+
+        // Per-order single-flight lock: ignore further taps/auto-accepts while an accept is running
+        val lockedIds = mutableListOf<String>()
+        synchronized(inFlightAcceptOrderIds) {
+            if (orderIds.any { it in inFlightAcceptOrderIds }) {
+                android.util.Log.d("STATUS", "Ignored duplicate acceptOfferBundle for in-flight orders=$orderIds")
+                return
+            }
+            inFlightAcceptOrderIds.addAll(orderIds)
+            lockedIds.addAll(orderIds)
+        }
+
+        fun releaseAcceptLock() {
+            synchronized(inFlightAcceptOrderIds) {
+                inFlightAcceptOrderIds.removeAll(lockedIds.toSet())
+            }
+        }
+
         val startingIndex = if (bundle.type == OfferType.ADD_TO_BOOKING) _activeOrders.value.size + 1 else 1
         val existingBatchId = _activeOrders.value.firstOrNull { !it.batchId.isNullOrBlank() }?.batchId
         val batchId = existingBatchId ?: UUID.randomUUID().toString()
 
         var writeMap: Map<String, Any?> = emptyMap()
+        var lastObservedOrderId: String = firstOrder?.id ?: bundle.id
+        var lastObservedRawStatus: String = initialRawStatus
+        var lastFailureDecision: AcceptOrderDecision? = null
 
         db.runTransaction { tx ->
             // 1. Re-read all order documents in offer
-            val orderDocs = bundle.orders.map { order ->
+            val docsToWrite = mutableListOf<Triple<Int, DocumentReference, DocumentSnapshot>>()
+            bundle.orders.forEachIndexed { idx, order ->
                 val ref = db.collection("orders").document(order.id)
                 val snapshot = tx.get(ref)
-                if (!snapshot.exists()) {
-                    throw FirebaseFirestoreException("Order already taken", FirebaseFirestoreException.Code.ABORTED)
+                lastObservedOrderId = order.id
+
+                val exists = snapshot.exists()
+                val rawStatusObj = if (exists) snapshot.get("status") else null
+                val rawStatusFormatted = if (exists) {
+                    AcceptOrderRules.formatRawStatus(rawStatusObj)
+                } else {
+                    "(missing)"
                 }
-                val existingRider = snapshot.getString("riderId")
-                if (!existingRider.isNullOrBlank()) {
-                    throw FirebaseFirestoreException("Order already taken", FirebaseFirestoreException.Code.ABORTED)
+                lastObservedRawStatus = rawStatusFormatted
+
+                val rawRiderId = if (exists) snapshot.get("riderId") else null
+                val rawReqMap = if (exists) OrderDocumentParser.safeMap(snapshot.get("riderRequest")) else null
+                val rawReqStatus = rawReqMap?.get("status") ?: if (exists) snapshot.get("riderRequestStatus") else null
+                val rawServiceType = if (exists) snapshot.get("serviceType") ?: order.serviceType else order.serviceType
+                val excludes = if (exists) {
+                    (snapshot.get("excludeRiderIds") as? List<*>)?.mapNotNull { it?.toString() } ?: emptyList()
+                } else {
+                    emptyList()
                 }
-                val excludes = (snapshot.get("excludeRiderIds") as? List<*>)?.mapNotNull { it?.toString() } ?: emptyList()
-                if (excludes.contains(authUid)) {
-                    throw FirebaseFirestoreException("Order not available", FirebaseFirestoreException.Code.ABORTED)
-                }
-                val docServiceType = (snapshot.getString("serviceType") ?: order.serviceType).lowercase().trim()
-                if (docServiceType == OrderStepConstants.SERVICE_PABILI || docServiceType == OrderStepConstants.SERVICE_PARCEL) {
-                    val dbStatus = snapshot.getString("status")?.trim().orEmpty()
-                    val isPlacedOrder = dbStatus.isBlank() ||
-                        dbStatus.equals(OrderStepConstants.STATUS_PLACED_ORDER, ignoreCase = true)
-                    if (!isPlacedOrder) {
-                        val serviceLabel = if (docServiceType == OrderStepConstants.SERVICE_PARCEL) "Parcel" else "Pabili"
+
+                val eval = AcceptOrderRules.evaluateDocument(
+                    exists = exists,
+                    riderIdRaw = rawRiderId,
+                    statusRaw = rawStatusObj,
+                    riderRequestStatusRaw = rawReqStatus,
+                    serviceTypeRaw = rawServiceType,
+                    excludeRiderIds = excludes,
+                    myUid = authUid
+                )
+
+                when (eval.decision) {
+                    AcceptOrderDecision.ALREADY_OURS -> {
+                        android.util.Log.d("STATUS", "Order ${order.id} already assigned to current rider ($authUid); opening trip")
+                    }
+                    AcceptOrderDecision.ALLOW_ACCEPT -> {
+                        docsToWrite.add(Triple(idx, ref, snapshot))
+                    }
+                    AcceptOrderDecision.TAKEN_BY_OTHER -> {
+                        lastFailureDecision = AcceptOrderDecision.TAKEN_BY_OTHER
+                        throw FirebaseFirestoreException(
+                            eval.reason,
+                            FirebaseFirestoreException.Code.ABORTED
+                        )
+                    }
+                    AcceptOrderDecision.UNAVAILABLE -> {
+                        lastFailureDecision = AcceptOrderDecision.UNAVAILABLE
                         android.util.Log.w(
                             "STATUS",
-                            "Skipped $serviceLabel accept for order=${order.id}: expected='${OrderStepConstants.STATUS_PLACED_ORDER}', actual='$dbStatus'"
+                            "Accept unavailable for order=${order.id}: exists=$exists, status='$rawStatusFormatted', service='$rawServiceType'"
                         )
                         throw FirebaseFirestoreException(
-                            "Order already accepted (status: $dbStatus)",
+                            eval.reason,
                             FirebaseFirestoreException.Code.ABORTED
                         )
                     }
                 }
-                ref to snapshot
             }
 
-            // 2. Perform writes across all orders
-            orderDocs.forEachIndexed { idx, (ref, snapshot) ->
+            // 2. Perform writes across orders that still need assignment
+            docsToWrite.forEach { (idx, ref, snapshot) ->
                 val order = bundle.orders[idx]
                 val rank = startingIndex + idx
                 val breakdown = bundle.breakdowns.getOrNull(idx)
                 val feeEstimate = breakdown?.totalPay ?: 0.0
 
-                val currentStatus = snapshot.getString("status") ?: OrderStepConstants.STATUS_PLACED_ORDER
-                val serviceType = (snapshot.getString("serviceType") ?: order.serviceType).lowercase()
+                val currentStatus = OrderDocumentParser.safeStringOrNull(snapshot.get("status"))
+                    ?.trim()
+                    ?.ifBlank { null }
+                    ?: OrderStepConstants.STATUS_PLACED_ORDER
+                val serviceType = (OrderDocumentParser.safeStringOrNull(snapshot.get("serviceType"))
+                    ?: order.serviceType).lowercase(Locale.US)
 
                 val stepForOrder = when (serviceType) {
                     OrderStepConstants.SERVICE_TAXI -> OrderStepConstants.STEP_TO_PICKUP
@@ -1641,8 +1703,14 @@ class RiderRepository(
                     "color" to currentRider.vehicle.color
                 )
 
-                if (serviceType == OrderStepConstants.SERVICE_REQUEST || serviceType == OrderStepConstants.SERVICE_TAXI || snapshot.contains("riderRequest")) {
-                    val existingReq = (snapshot.get("riderRequest") as? Map<*, *>)?.mapKeys { it.key.toString() }?.toMutableMap() ?: mutableMapOf()
+                if (serviceType == OrderStepConstants.SERVICE_REQUEST ||
+                    serviceType == OrderStepConstants.SERVICE_TAXI ||
+                    snapshot.contains("riderRequest")
+                ) {
+                    val existingReq = (snapshot.get("riderRequest") as? Map<*, *>)
+                        ?.mapKeys { it.key.toString() }
+                        ?.toMutableMap()
+                        ?: mutableMapOf()
                     existingReq["status"] = OrderStepConstants.REQ_RIDER_ASSIGNED
                     updates["riderRequest"] = existingReq
                 }
@@ -1677,6 +1745,7 @@ class RiderRepository(
                 tx.update(ref, updates)
             }
         }.addOnSuccessListener {
+            releaseAcceptLock()
             _incomingOfferBundle.value = null
             _incomingOffer.value = null
 
@@ -1690,7 +1759,7 @@ class RiderRepository(
                 val rank = startingIndex + idx
                 val breakdown = bundle.breakdowns.getOrNull(idx)
                 val feeEstimate = breakdown?.totalPay ?: 0.0
-                val serviceType = ord.serviceType.lowercase()
+                val serviceType = ord.serviceType.lowercase(Locale.US)
                 val stepForOrder = when (serviceType) {
                     OrderStepConstants.SERVICE_TAXI -> OrderStepConstants.STEP_TO_PICKUP
                     OrderStepConstants.SERVICE_PARCEL -> OrderStepConstants.STEP_TO_SENDER
@@ -1719,12 +1788,20 @@ class RiderRepository(
             RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
             onSuccess()
         }.addOnFailureListener { exception ->
+            releaseAcceptLock()
             _incomingOfferBundle.value = null
             _incomingOffer.value = null
+            if (lastFailureDecision == AcceptOrderDecision.TAKEN_BY_OTHER ||
+                lastFailureDecision == AcceptOrderDecision.UNAVAILABLE
+            ) {
+                val removeIds = lockedIds.toSet()
+                _candidateOrders.value = _candidateOrders.value.filterNot { it.id in removeIds }
+            }
+            val msg = exception.message ?: exception.localizedMessage ?: "This order is no longer available"
             val errorDetails = AcceptOrderErrorDetails(
-                exceptionMessage = exception.message ?: exception.localizedMessage ?: "Order already taken",
-                orderId = bundle.id,
-                currentStatus = "unknown",
+                exceptionMessage = msg,
+                orderId = lastObservedOrderId,
+                currentStatus = lastObservedRawStatus.ifBlank { "(missing)" },
                 authUid = authUid,
                 fieldsWritten = writeMap
             )
@@ -1805,6 +1882,7 @@ class RiderRepository(
         var nextReqStatus: String? = null
         var pabiliExpectedPrevStatus: String? = null
         var parcelExpectedPrevStatus: String? = null
+        var foodExpectedStage: FoodStepStage? = null
 
         when (serviceType) {
             OrderStepConstants.SERVICE_TAXI -> {
@@ -1944,44 +2022,25 @@ class RiderRepository(
             }
             else -> {
                 // FOOD, CONVENIENCE (Mart), and REQUEST (Delivio Instant)
+                val stage = order.foodStepStage
+                val spec = FoodFlowRules.transitionFor(stage)
+                if (spec == null) {
+                    android.util.Log.w("STATUS", "Skipped Food/Instant step update for order=${order.id}: already COMPLETED (status='${order.status}')")
+                    return
+                }
+                foodExpectedStage = stage
                 val isRequest = serviceType == OrderStepConstants.SERVICE_REQUEST
-                when (currentStep) {
-                    OrderStepConstants.STEP_TO_MERCHANT, OrderStepConstants.STEP_HEADING_TO_MERCHANT -> {
-                        nextStep = OrderStepConstants.STEP_AT_MERCHANT
-                        nextStatus = order.status // food, convenience, and request keep status
-                        if (isRequest) nextReqStatus = OrderStepConstants.REQ_ARRIVED_AT_MERCHANT
+                nextStep = spec.nextStep
+                if (isRequest) nextReqStatus = spec.nextReqStatus
+
+                nextStatus = when (stage) {
+                    FoodStepStage.TO_MERCHANT -> {
                         updates["arrivedMerchantAt"] = FieldValue.serverTimestamp()
+                        updates["arrivedAtPickupAt"] = FieldValue.serverTimestamp()
+                        order.status
                     }
-                    OrderStepConstants.STEP_AT_MERCHANT, OrderStepConstants.STEP_ARRIVED_AT_MERCHANT -> {
-                        nextStep = OrderStepConstants.STEP_PICKED_UP
-                        // 1. CUSTOMER STATUS IN A DOUBLE BOOKING:
-                        // When I pick up an order in a batch of two or more, write its status like this:
-                        // if its customer stop is the NEXT unfinished customer stop, "Rider is on the way";
-                        // otherwise "On another delivery".
-                        val activeBatch = _activeOrders.value.filter {
-                            it.status !in listOf("Delivered", "Completed", "Cancelled", "Rejected")
-                        }
-                        val loc = RiderLocationTracker.currentLocation.value
-                        if (activeBatch.size >= 2) {
-                            val stops = RouteStopCalculator.computeBatchStops(
-                                activeBatch,
-                                loc?.first ?: order.merchantLat,
-                                loc?.second ?: order.merchantLng
-                            )
-                            val nextCustStop = stops.firstOrNull { it.isCustomer && !it.isFinished }
-                            nextStatus = if (nextCustStop != null && nextCustStop.orderId == order.id) {
-                                OrderStepConstants.STATUS_RIDER_ON_THE_WAY
-                            } else {
-                                OrderStepConstants.STATUS_ON_ANOTHER_DELIVERY
-                            }
-                        } else {
-                            nextStatus = OrderStepConstants.STATUS_RIDER_ON_THE_WAY
-                        }
-                        if (isRequest) nextReqStatus = OrderStepConstants.REQ_PICKED_UP
+                    FoodStepStage.AT_MERCHANT -> {
                         updates["pickedUpAt"] = FieldValue.serverTimestamp()
-                    }
-                    OrderStepConstants.STEP_PICKED_UP -> {
-                        nextStep = OrderStepConstants.STEP_TO_CUSTOMER
                         val activeBatch = _activeOrders.value.filter {
                             it.status !in listOf("Delivered", "Completed", "Cancelled", "Rejected")
                         }
@@ -1993,28 +2052,29 @@ class RiderRepository(
                                 loc?.second ?: order.merchantLng
                             )
                             val nextCustStop = stops.firstOrNull { it.isCustomer && !it.isFinished }
-                            nextStatus = if (nextCustStop != null && nextCustStop.orderId == order.id) {
+                            if (nextCustStop != null && nextCustStop.orderId == order.id) {
                                 OrderStepConstants.STATUS_RIDER_ON_THE_WAY
                             } else {
                                 OrderStepConstants.STATUS_ON_ANOTHER_DELIVERY
                             }
                         } else {
-                            nextStatus = OrderStepConstants.STATUS_RIDER_ON_THE_WAY
+                            OrderStepConstants.STATUS_RIDER_ON_THE_WAY
                         }
-                        if (isRequest) nextReqStatus = OrderStepConstants.REQ_ON_THE_WAY
                     }
-                    OrderStepConstants.STEP_TO_CUSTOMER, OrderStepConstants.STEP_HEADING_TO_CUSTOMER -> {
-                        nextStep = OrderStepConstants.STEP_AT_CUSTOMER
-                        nextStatus = OrderStepConstants.STATUS_RIDER_ON_THE_WAY
-                        if (isRequest) nextReqStatus = OrderStepConstants.REQ_ON_THE_WAY
+                    FoodStepStage.TO_CUSTOMER -> {
                         updates["arrivedCustomerAt"] = FieldValue.serverTimestamp()
+                        updates["arrivedAtDropoffAt"] = FieldValue.serverTimestamp()
+                        OrderStepConstants.STATUS_RIDER_ON_THE_WAY
                     }
-                    else -> { // at_customer -> completed
-                        nextStep = OrderStepConstants.STEP_COMPLETED
-                        nextStatus = OrderStepConstants.STATUS_DELIVERED
-                        if (isRequest) nextReqStatus = OrderStepConstants.REQ_DELIVERED
+                    FoodStepStage.AT_CUSTOMER, FoodStepStage.COMPLETED -> {
                         updates["deliveredAt"] = FieldValue.serverTimestamp()
+                        updates["completedAt"] = FieldValue.serverTimestamp()
+                        OrderStepConstants.STATUS_DELIVERED
                     }
+                }
+                if (!inFlightAdvanceOrderIds.add(order.id)) {
+                    android.util.Log.w("STATUS", "Skipped duplicate in-flight Food/Instant tap for order=${order.id} (stage=$stage)")
+                    return
                 }
             }
         }
@@ -2149,7 +2209,7 @@ class RiderRepository(
                     OrderStepConstants.SERVICE_PARCEL -> parcelExpectedPrevStatus
                     else -> null
                 }
-                if (expectedTxPrevStatus != null) {
+                if (expectedTxPrevStatus != null || foodExpectedStage != null) {
                     val nextOrderRef = nextOrderToPromote?.let { db.collection("orders").document(it.id) }
                     val promoteUpdates = if (nextOrderToPromote != null) {
                         mapOf<String, Any>(
@@ -2167,17 +2227,26 @@ class RiderRepository(
                     db.runTransaction { tx ->
                         val snap = tx.get(orderRef)
                         val nextSnap = nextOrderRef?.let { tx.get(it) }
-                        val actualDbStatus = snap.getString("status")?.trim().orEmpty()
-                        val matches = if (serviceType == OrderStepConstants.SERVICE_PARCEL) {
-                            ParcelFlowRules.isExpectedStatus(actualDbStatus, expectedTxPrevStatus)
-                        } else {
-                            PabiliFlowRules.isExpectedStatus(actualDbStatus, expectedTxPrevStatus)
+                        val actualDbStatus = OrderDocumentParser.safeStringOrNull(snap.get("status"))?.trim().orEmpty()
+                        val actualDbStep = OrderDocumentParser.safeStringOrNull(snap.get("riderStep"))?.trim().orEmpty()
+                        val matches = when {
+                            serviceType == OrderStepConstants.SERVICE_PARCEL && expectedTxPrevStatus != null ->
+                                ParcelFlowRules.isExpectedStatus(actualDbStatus, expectedTxPrevStatus)
+                            serviceType == OrderStepConstants.SERVICE_PABILI && expectedTxPrevStatus != null ->
+                                PabiliFlowRules.isExpectedStatus(actualDbStatus, expectedTxPrevStatus)
+                            foodExpectedStage != null ->
+                                FoodFlowRules.isExpectedState(actualDbStep, actualDbStatus, foodExpectedStage)
+                            else -> false
                         }
                         if (!matches) {
-                            val tagLabel = if (serviceType == OrderStepConstants.SERVICE_PARCEL) "Parcel" else "Pabili"
+                            val tagLabel = when (serviceType) {
+                                OrderStepConstants.SERVICE_PARCEL -> "Parcel"
+                                OrderStepConstants.SERVICE_PABILI -> "Pabili"
+                                else -> "Food/Instant"
+                            }
                             android.util.Log.w(
                                 "STATUS",
-                                "Skipped $tagLabel delivery write for order=${order.id}: expected='$expectedTxPrevStatus', actual='$actualDbStatus', target='$nextStatus'"
+                                "Skipped $tagLabel delivery write for order=${order.id}: expectedStatus='$expectedTxPrevStatus', expectedStage='$foodExpectedStage', actualStatus='$actualDbStatus', actualStep='$actualDbStep', target='$nextStatus'"
                             )
                             throw FirebaseFirestoreException(
                                 "Skipped out-of-order status update (current: $actualDbStatus)",
@@ -2187,7 +2256,7 @@ class RiderRepository(
                         tx.update(orderRef, updates)
                         if (nextOrderRef != null && promoteUpdates != null &&
                             nextSnap != null && nextSnap.exists() &&
-                            nextSnap.getString("status") == OrderStepConstants.STATUS_ON_ANOTHER_DELIVERY
+                            OrderDocumentParser.safeStringOrNull(nextSnap.get("status")) == OrderStepConstants.STATUS_ON_ANOTHER_DELIVERY
                         ) {
                             tx.update(nextOrderRef, promoteUpdates)
                         }
@@ -2243,33 +2312,57 @@ class RiderRepository(
                 }
             }
         } else if ((serviceType == OrderStepConstants.SERVICE_PABILI && pabiliExpectedPrevStatus != null) ||
-            (serviceType == OrderStepConstants.SERVICE_PARCEL && parcelExpectedPrevStatus != null)
+            (serviceType == OrderStepConstants.SERVICE_PARCEL && parcelExpectedPrevStatus != null) ||
+            foodExpectedStage != null
         ) {
-            val expectedStatus = if (serviceType == OrderStepConstants.SERVICE_PARCEL) {
-                parcelExpectedPrevStatus!!
-            } else {
-                pabiliExpectedPrevStatus!!
+            val expectedStatus = when (serviceType) {
+                OrderStepConstants.SERVICE_PARCEL -> parcelExpectedPrevStatus
+                OrderStepConstants.SERVICE_PABILI -> pabiliExpectedPrevStatus
+                else -> null
             }
+            val expectedFood = foodExpectedStage
+            var effectiveWrittenStatus = nextStatus
             db.runTransaction { tx ->
                 val snap = tx.get(orderRef)
-                val actualDbStatus = snap.getString("status")?.trim().orEmpty()
-                val matches = if (serviceType == OrderStepConstants.SERVICE_PARCEL) {
-                    ParcelFlowRules.isExpectedStatus(actualDbStatus, expectedStatus)
-                } else {
-                    PabiliFlowRules.isExpectedStatus(actualDbStatus, expectedStatus)
+                val actualDbStatus = OrderDocumentParser.safeStringOrNull(snap.get("status"))?.trim().orEmpty()
+                val actualDbStep = OrderDocumentParser.safeStringOrNull(snap.get("riderStep"))?.trim().orEmpty()
+                val matches = when {
+                    serviceType == OrderStepConstants.SERVICE_PARCEL && expectedStatus != null ->
+                        ParcelFlowRules.isExpectedStatus(actualDbStatus, expectedStatus)
+                    serviceType == OrderStepConstants.SERVICE_PABILI && expectedStatus != null ->
+                        PabiliFlowRules.isExpectedStatus(actualDbStatus, expectedStatus)
+                    expectedFood != null ->
+                        FoodFlowRules.isExpectedState(actualDbStep, actualDbStatus, expectedFood)
+                    else -> false
                 }
                 if (!matches) {
-                    val tagLabel = if (serviceType == OrderStepConstants.SERVICE_PARCEL) "Parcel" else "Pabili"
+                    val tagLabel = when (serviceType) {
+                        OrderStepConstants.SERVICE_PARCEL -> "Parcel"
+                        OrderStepConstants.SERVICE_PABILI -> "Pabili"
+                        else -> "Food/Instant"
+                    }
                     android.util.Log.w(
                         "STATUS",
-                        "Skipped $tagLabel step write for order=${order.id}: expected='$expectedStatus', actual='$actualDbStatus', target='$nextStatus'"
+                        "Skipped $tagLabel step write for order=${order.id}: expectedStatus='$expectedStatus', expectedStage='$expectedFood', actualStatus='$actualDbStatus', actualStep='$actualDbStep', target='$nextStatus'"
                     )
                     throw FirebaseFirestoreException(
                         "Skipped out-of-order status update (current: $actualDbStatus)",
                         FirebaseFirestoreException.Code.ABORTED
                     )
                 }
-                tx.update(orderRef, updates)
+                val finalUpdates = updates.toMutableMap()
+                if (expectedFood == FoodStepStage.TO_MERCHANT && actualDbStatus.isNotBlank()) {
+                    // Preserve live merchant status (e.g. Preparing -> Ready) without overwriting it on arrival
+                    finalUpdates["status"] = actualDbStatus
+                    finalUpdates["statusHistory"] = FieldValue.arrayUnion(
+                        mapOf(
+                            "status" to actualDbStatus,
+                            "timestamp" to com.google.firebase.Timestamp.now()
+                        )
+                    )
+                    effectiveWrittenStatus = actualDbStatus
+                }
+                tx.update(orderRef, finalUpdates)
             }.addOnSuccessListener {
                 inFlightAdvanceOrderIds.remove(order.id)
                 val nowTs = com.google.firebase.Timestamp.now()
@@ -2277,7 +2370,7 @@ class RiderRepository(
                     if (it.id == order.id) {
                         it.copy(
                             riderStep = nextStep,
-                            status = nextStatus,
+                            status = effectiveWrittenStatus,
                             arrivedAtPickupAt = if (updates.containsKey("arrivedAtPickupAt")) nowTs else it.arrivedAtPickupAt,
                             arrivedMerchantAt = if (updates.containsKey("arrivedMerchantAt")) nowTs else it.arrivedMerchantAt,
                             pickedUpAt = if (updates.containsKey("pickedUpAt")) nowTs else it.pickedUpAt,

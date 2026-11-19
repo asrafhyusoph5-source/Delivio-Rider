@@ -57,6 +57,7 @@ fun IncomingOrderDialog(
     val totalTimerSeconds = bundle.timerSeconds.coerceAtLeast(10)
     var secondsLeft by remember(bundle.id) { mutableIntStateOf(totalTimerSeconds) }
     var showPayBreakdown by remember(bundle.id) { mutableStateOf(false) }
+    var isAcceptClicked by remember(bundle.id) { mutableStateOf(false) }
 
     // Log display, play sound & trigger vibration on launch
     LaunchedEffect(bundle.id) {
@@ -547,7 +548,13 @@ fun IncomingOrderDialog(
                     }
 
                     Button(
-                        onClick = onAccept,
+                        onClick = {
+                            if (!isAcceptClicked) {
+                                isAcceptClicked = true
+                                onAccept()
+                            }
+                        },
+                        enabled = !isAcceptClicked,
                         shape = RoundedCornerShape(14.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = DelivioYellow, contentColor = TextOnYellow),
                         modifier = Modifier
@@ -555,7 +562,11 @@ fun IncomingOrderDialog(
                             .height(50.dp)
                             .testTag("accept_offer_button")
                     ) {
-                        Text(acceptLabel, fontWeight = FontWeight.ExtraBold, fontSize = 15.sp)
+                        Text(
+                            if (isAcceptClicked) "Accepting..." else acceptLabel,
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 15.sp
+                        )
                     }
                 }
             }

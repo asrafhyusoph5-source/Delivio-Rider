@@ -1,5 +1,7 @@
 package com.example.ui.components
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -122,7 +124,7 @@ fun OrderDetailsSheet(
     var parcelCashDialogStage by remember(currentStop?.orderId, currentStop?.order?.riderStep, currentStop?.order?.status) {
         mutableStateOf<ParcelStepStage?>(null)
     }
-    var showParcelTripDetails by remember(currentStop?.orderId) {
+    var showTripDetails by remember(currentStop?.orderId) {
         mutableStateOf(false)
     }
     var pabiliReceiptInput by remember(currentStop?.orderId) {
@@ -339,39 +341,61 @@ fun OrderDetailsSheet(
                         },
                         onNavigateClick = { launchExternalNavigation(context, currentStop) },
                         onTripDetailsClick = {
-                            if (currentStop.order.isParcel) {
-                                showParcelTripDetails = true
-                            }
+                            showTripDetails = true
                         },
                         onCallClick = {
                             val target = selectedStop ?: currentStop
                             val isPabiliOrder = target.order.isPabili
                             val isParcelOrder = target.order.isParcel
-                            val phone = when {
+                            val isTaxiOrder = target.order.isTaxi
+                            val phoneRaw = when {
                                 isParcelOrder -> {
+                                    val contacts = contactsOf(target.order)
                                     val stage = target.order.parcelStepStage
                                     if (stage == ParcelStepStage.TO_SENDER || stage == ParcelStepStage.AT_SENDER) {
-                                        target.order.merchantPhone
+                                        contacts.pickup.phone
                                     } else {
-                                        target.order.customerPhone
+                                        contacts.dropoff.phone
                                     }
                                 }
                                 isPabiliOrder -> target.order.customerPhone
-                                else -> target.phone
-                                    .ifBlank { target.order.customerPhone }
-                                    .ifBlank { target.order.merchantPhone }
-                            }
+                                isTaxiOrder -> target.order.customerPhone
+                                else -> {
+                                    val isMerchantStop = if (activeOrders.size <= 1) {
+                                        val foodStage = target.order.foodStepStage
+                                        foodStage == FoodStepStage.TO_MERCHANT || foodStage == FoodStepStage.AT_MERCHANT
+                                    } else {
+                                        target.isMerchant
+                                    }
+                                    if (isMerchantStop) target.order.merchantPhone else target.order.customerPhone
+                                }
+                            }.trim()
+                            val phone = if (phoneRaw.equals("Not provided", ignoreCase = true)) "" else phoneRaw
                             val callName = when {
                                 isParcelOrder -> {
+                                    val contacts = contactsOf(target.order)
                                     val stage = target.order.parcelStepStage
                                     if (stage == ParcelStepStage.TO_SENDER || stage == ParcelStepStage.AT_SENDER) {
+                                        contacts.pickup.name
+                                    } else {
+                                        contacts.dropoff.name
+                                    }
+                                }
+                                isPabiliOrder -> target.order.customerName.ifBlank { "Customer" }
+                                isTaxiOrder -> target.name
+                                else -> {
+                                    val isMerchantStop = if (activeOrders.size <= 1) {
+                                        val foodStage = target.order.foodStepStage
+                                        foodStage == FoodStepStage.TO_MERCHANT || foodStage == FoodStepStage.AT_MERCHANT
+                                    } else {
+                                        target.isMerchant
+                                    }
+                                    if (isMerchantStop) {
                                         resolveStopDisplayName(target.order, StopType.MERCHANT)
                                     } else {
                                         resolveStopDisplayName(target.order, StopType.CUSTOMER)
                                     }
                                 }
-                                isPabiliOrder -> target.order.customerName.ifBlank { "Customer" }
-                                else -> target.name
                             }
                             if (phone.isNotBlank()) {
                                 onCallClick(callName, phone)
@@ -412,6 +436,9 @@ fun OrderDetailsSheet(
                             triggerAdvance(null, false, currentStop.orderId)
                         },
                         onParcelPressAction = {
+                            triggerAdvance(null, false, currentStop.orderId)
+                        },
+                        onFoodPressAction = {
                             triggerAdvance(null, false, currentStop.orderId)
                         },
                         onSlideConfirmed = {
@@ -500,13 +527,14 @@ fun OrderDetailsSheet(
         )
     }
 
-    // Full-screen Parcel Trip Details page (opened from clickable step chip)
-    if (showParcelTripDetails && currentStop != null && currentStop.order.isParcel) {
-        ParcelTripDetailsDialog(
-            order = currentStop.order,
+    // Full-screen Trip Details page (opened from clickable step chip for all services)
+    if (showTripDetails && currentStop != null) {
+        val tripOrder = (selectedStop ?: currentStop).order
+        TripDetailsDialog(
+            order = tripOrder,
             currencySymbol = currencySymbol,
             onCallClick = { name, phone ->
-                if (phone.isNotBlank()) {
+                if (phone.isNotBlank() && !phone.equals("Not provided", ignoreCase = true)) {
                     onCallClick(name, phone)
                 } else {
                     Toast.makeText(context, "No phone number available", Toast.LENGTH_SHORT).show()
@@ -515,7 +543,7 @@ fun OrderDetailsSheet(
             onNavigateToLocation = { name, lat, lng ->
                 launchExternalCoordinatesNavigation(context, name, lat, lng)
             },
-            onDismiss = { showParcelTripDetails = false }
+            onDismiss = { showTripDetails = false }
         )
     }
 
@@ -696,36 +724,17 @@ private fun handleSlideAction(
         }
         return
     }
-    val step = currentStop.order.riderStep.lowercase().trim()
-    if (currentStop.isMerchant) {
-        val atMerchantSteps = setOf(
-            OrderStepConstants.STEP_AT_MERCHANT,
-            OrderStepConstants.STEP_ARRIVED_AT_MERCHANT,
-            OrderStepConstants.STEP_AT_SENDER,
-            OrderStepConstants.STEP_AT_VENDOR,
-            OrderStepConstants.STEP_AT_PICKUP
-        )
-        if (step in atMerchantSteps) {
-            onOpenChecklist()
-        } else {
-            onAdvanceDirect()
-        }
-    } else {
-        val atCustomerSteps = setOf(
-            OrderStepConstants.STEP_AT_CUSTOMER,
-            OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER,
-            OrderStepConstants.STEP_AT_RECIPIENT
-        )
-        if (step in atCustomerSteps) {
+    when (currentStop.order.foodStepStage) {
+        FoodStepStage.AT_MERCHANT -> onOpenChecklist()
+        FoodStepStage.AT_CUSTOMER -> {
             val isSplitChild = currentStop.order.isSplitChild || currentStop.order.badge.equals("split", ignoreCase = true)
             if (currentStop.isCod && !isSplitChild) {
                 onOpenCodConfirm()
             } else {
                 onAdvanceDirect()
             }
-        } else {
-            onAdvanceDirect()
         }
+        else -> onAdvanceDirect()
     }
 }
 
@@ -752,31 +761,10 @@ private fun getSlideButtonLabel(stop: RouteStop): String {
             else -> "Slide to Confirm Delivery"
         }
     }
-    val step = stop.order.riderStep.lowercase().trim()
-    return if (stop.isMerchant) {
-        val atMerchantSteps = setOf(
-            OrderStepConstants.STEP_AT_MERCHANT,
-            OrderStepConstants.STEP_ARRIVED_AT_MERCHANT,
-            OrderStepConstants.STEP_AT_SENDER,
-            OrderStepConstants.STEP_AT_VENDOR,
-            OrderStepConstants.STEP_AT_PICKUP
-        )
-        if (step in atMerchantSteps) {
-            "Slide to confirm Picked Up"
-        } else {
-            "Slide to confirm Arrival at ${stop.name}"
-        }
-    } else {
-        val atCustomerSteps = setOf(
-            OrderStepConstants.STEP_AT_CUSTOMER,
-            OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER,
-            OrderStepConstants.STEP_AT_RECIPIENT
-        )
-        if (step in atCustomerSteps) {
-            "Slide to Complete Delivery"
-        } else {
-            "Slide to confirm Arrival at Customer"
-        }
+    return when (stop.order.foodStepStage) {
+        FoodStepStage.AT_MERCHANT -> "Slide to confirm Picked Up"
+        FoodStepStage.AT_CUSTOMER, FoodStepStage.COMPLETED -> "Slide to Confirm Delivery"
+        else -> "Slide to Confirm Delivery"
     }
 }
 
@@ -786,7 +774,7 @@ private fun StepBadgeRow(
     currentStop: RouteStop,
     totalStops: Int,
     currencySymbol: String,
-    onParcelChipClick: (() -> Unit)? = null
+    onStepChipClick: (() -> Unit)? = null
 ) {
     val isTaxi = currentStop.order.isTaxi
     val isParcel = currentStop.order.isParcel
@@ -820,13 +808,13 @@ private fun StepBadgeRow(
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         val chipTint = if (isPickupTint) DelivioGreenDark else DelivioRed
-        val chipModifier = if (isParcel && onParcelChipClick != null) {
+        val chipModifier = if (onStepChipClick != null) {
             Modifier
                 .clip(RoundedCornerShape(8.dp))
-                .clickable(onClick = onParcelChipClick)
-                .testTag("parcel_trip_details_chip")
+                .clickable(onClick = onStepChipClick)
+                .testTag("trip_details_chip")
         } else {
-            Modifier
+            Modifier.testTag("trip_details_chip")
         }
         Surface(
             shape = RoundedCornerShape(8.dp),
@@ -843,7 +831,7 @@ private fun StepBadgeRow(
                     fontSize = 11.sp,
                     color = chipTint
                 )
-                if (isParcel && onParcelChipClick != null) {
+                if (onStepChipClick != null) {
                     Spacer(modifier = Modifier.width(2.dp))
                     Icon(
                         imageVector = Icons.Default.ChevronRight,
@@ -990,6 +978,7 @@ private fun ExpandedOrderSheetContent(
     onTaxiPressAction: () -> Unit,
     onPabiliPressAction: () -> Unit,
     onParcelPressAction: () -> Unit,
+    onFoodPressAction: () -> Unit,
     onSlideConfirmed: () -> Unit
 ) {
     val isTaxi = currentStop.order.isTaxi
@@ -998,6 +987,7 @@ private fun ExpandedOrderSheetContent(
     val pabiliStage = currentStop.order.pabiliStepStage
     val isParcel = currentStop.order.isParcel
     val parcelStage = currentStop.order.parcelStepStage
+    val foodStage = currentStop.order.foodStepStage
     val scrollState = rememberScrollState()
     var cumulativePullDown by remember { mutableFloatStateOf(0f) }
     val pullDownCollapseConnection = remember(scrollState) {
@@ -1086,7 +1076,7 @@ private fun ExpandedOrderSheetContent(
                 currentStop = currentStop,
                 totalStops = batchStops.size.coerceAtLeast(1),
                 currencySymbol = currencySymbol,
-                onParcelChipClick = if (isParcel) onTripDetailsClick else null
+                onStepChipClick = onTripDetailsClick
             )
 
             // (b) Name
@@ -1111,27 +1101,6 @@ private fun ExpandedOrderSheetContent(
                 modifier = Modifier.testTag("expanded_eta_distance")
             )
 
-            // (d) Labeled yellow "Navigate" button (hidden here for Parcel; shown beside Help instead)
-            if (!isParcel) {
-                Button(
-                    onClick = onNavigateClick,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = DelivioYellow,
-                        contentColor = TextOnYellow
-                    ),
-                    shape = RoundedCornerShape(12.dp),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 48.dp)
-                        .testTag("navigate_stop_button")
-                ) {
-                    Icon(Icons.Default.Navigation, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Navigate", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                }
-            }
-
             if (isTaxi) {
                 // Taxi: Single current-step details card ONLY (NO stop timeline, NO items section)
                 TaxiSingleStopDetailsCard(stop = currentStop)
@@ -1145,6 +1114,17 @@ private fun ExpandedOrderSheetContent(
                 // Parcel: Pickup-only details in Steps 1-2, Drop-off-only details in Steps 3-4, plus compact Parcel card
                 ParcelSingleStopDetailsCard(stop = currentStop)
                 ParcelCompactInfoCard(order = currentStop.order)
+            } else if (!isPabili && activeOrders.size <= 1) {
+                // Food / Convenience / Instant single order: isolated Merchant-only (Steps 1-2) or Customer-only (Steps 3-4)
+                FoodSingleStopDetailsCard(
+                    stop = currentStop,
+                    stage = foodStage
+                )
+                SelectedStopItemsCard(
+                    stop = currentStop,
+                    currencySymbol = currencySymbol,
+                    showCustomerNotes = false
+                )
             } else {
                 val isPabiliDropoffOnly = isPabili &&
                     pabiliStage !in setOf(PabiliStepStage.TO_VENDOR, PabiliStepStage.AT_VENDOR) &&
@@ -1153,7 +1133,7 @@ private fun ExpandedOrderSheetContent(
                     // Pabili Steps 3 & 4: Show ONLY drop-off details (customer name + revealed address), no merchant card
                     PabiliDropoffDetailsCard(stop = orderedStops.firstOrNull() ?: currentStop)
                 } else {
-                    // Standard timeline (with finished Pabili merchant cards already excluded)
+                    // Standard timeline (batched stops or Pabili vendor steps)
                     Column(
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier.testTag("stop_timeline_list")
@@ -1176,14 +1156,13 @@ private fun ExpandedOrderSheetContent(
 
             // Payment line
             OnePaymentLineBar(
-                order = if (isTaxi || isParcel) currentStop.order else selectedStop.order,
+                order = if (isTaxi || isParcel || (!isPabili && activeOrders.size <= 1)) currentStop.order else selectedStop.order,
                 currencySymbol = currencySymbol
             )
 
-            // Row of labeled buttons: Call, Chat, Help (+ yellow Navigate button for Parcel)
+            // Row of labeled buttons: Call, Chat, Help, and yellow Navigate button (all services)
             SheetQuickActionIconsRow(
-                currentStop = if (isTaxi || isParcel) currentStop else selectedStop,
-                isParcel = isParcel,
+                currentStop = if (isTaxi || isParcel || (!isPabili && activeOrders.size <= 1)) currentStop else selectedStop,
                 onCallClick = onCallClick,
                 onChatClick = onChatClick,
                 hasUnreadChat = hasUnreadChat,
@@ -1255,6 +1234,10 @@ private fun ExpandedOrderSheetContent(
             val isParcelPressStep = isParcel && (
                 parcelStage == ParcelStepStage.TO_SENDER ||
                     parcelStage == ParcelStepStage.TO_RECIPIENT
+                )
+            val isFoodPressStep = !isTaxi && !isPabili && !isParcel && (
+                foodStage == FoodStepStage.TO_MERCHANT ||
+                    foodStage == FoodStepStage.TO_CUSTOMER
                 )
             if (isTaxiPressStep) {
                 val pressLabel = when (taxiStage) {
@@ -1334,6 +1317,34 @@ private fun ExpandedOrderSheetContent(
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = parcelPressLabel,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 15.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            } else if (isFoodPressStep) {
+                val foodPressLabel = if (foodStage == FoodStepStage.TO_MERCHANT) {
+                    "Arrived at the Merchant"
+                } else {
+                    "Arrived at the Customer"
+                }
+                Button(
+                    onClick = onFoodPressAction,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = DelivioYellow,
+                        contentColor = TextOnYellow
+                    ),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 52.dp)
+                        .testTag("food_press_action_button")
+                ) {
+                    Icon(Icons.Default.WhereToVote, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = foodPressLabel,
                         fontWeight = FontWeight.ExtraBold,
                         fontSize = 15.sp,
                         maxLines = 1,
@@ -1588,6 +1599,162 @@ private fun TaxiPassengerMetaRow(
 }
 
 @Composable
+private fun FoodSingleStopDetailsCard(
+    stop: RouteStop,
+    stage: FoodStepStage
+) {
+    val context = LocalContext.current
+    val isMerchantStep = stage == FoodStepStage.TO_MERCHANT || stage == FoodStepStage.AT_MERCHANT
+    val badgeLabel = if (isMerchantStep) "PICKUP" else "DROP-OFF"
+    val badgeColor = if (isMerchantStep) DelivioGreenDark else DelivioRed
+    val personName = if (isMerchantStep) {
+        resolveStopDisplayName(stop.order, StopType.MERCHANT)
+    } else {
+        resolveStopDisplayName(stop.order, StopType.CUSTOMER)
+    }
+    val addressText = if (isMerchantStep) {
+        deduplicateAddress(stop.order.merchantAddress)
+            .ifBlank { stop.fullAddress }
+            .ifBlank { stop.address }
+            .ifBlank { "Address unavailable" }
+    } else {
+        stop.fullAddress
+            .ifBlank { deduplicateAddress(stop.order.customerAddress) }
+            .ifBlank { deduplicateAddress(stop.order.customerArea) }
+            .ifBlank { stop.address }
+            .ifBlank { "Address unavailable" }
+    }
+    val noteText = if (!isMerchantStep) {
+        stop.order.customerNotes.trim().ifBlank { stop.order.resolvedDropoffNote }
+    } else {
+        ""
+    }
+    val orderBadgeText = if (stop.displayOrderNumber.startsWith("Order ", ignoreCase = true)) {
+        stop.displayOrderNumber
+    } else {
+        "Order ${stop.displayOrderNumber}"
+    }
+    val copyText = stop.order.displayOrderNumber.ifBlank { stop.displayOrderNumber }
+
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+        border = BorderStroke(
+            width = 1.dp,
+            color = if (isMerchantStep) DelivioGreen.copy(alpha = 0.45f) else DelivioRed.copy(alpha = 0.45f)
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("food_stop_details_card")
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = badgeColor.copy(alpha = 0.14f)
+                ) {
+                    Text(
+                        text = badgeLabel,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = badgeColor,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                }
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                            clipboard?.setPrimaryClip(ClipData.newPlainText("Order number", copyText))
+                            Toast.makeText(context, "Copied $copyText", Toast.LENGTH_SHORT).show()
+                        }
+                        .testTag("sheet_order_number_chip")
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = orderBadgeText,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Icon(
+                            imageVector = Icons.Default.ContentCopy,
+                            contentDescription = "Copy order number",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(12.dp)
+                        )
+                    }
+                }
+            }
+
+            Text(
+                text = personName,
+                fontWeight = FontWeight.ExtraBold,
+                fontSize = 15.sp,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+
+            Row(
+                verticalAlignment = Alignment.Top,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.LocationOn,
+                    contentDescription = null,
+                    tint = badgeColor,
+                    modifier = Modifier
+                        .size(16.dp)
+                        .padding(top = 2.dp)
+                )
+                Text(
+                    text = addressText,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag("food_stop_address")
+                )
+            }
+
+            if (noteText.isNotBlank()) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                Row(
+                    verticalAlignment = Alignment.Top,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.StickyNote2,
+                        contentDescription = null,
+                        tint = DelivioYellowDark,
+                        modifier = Modifier
+                            .size(16.dp)
+                            .padding(top = 2.dp)
+                    )
+                    Text(
+                        text = noteText,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun CompactTimelineStopRow(
     stop: RouteStop,
     isSelected: Boolean,
@@ -1724,7 +1891,6 @@ private fun OnePaymentLineBar(
 @Composable
 private fun SheetQuickActionIconsRow(
     currentStop: RouteStop,
-    isParcel: Boolean = false,
     onCallClick: () -> Unit,
     onChatClick: (Order) -> Unit,
     hasUnreadChat: (String) -> Boolean,
@@ -1735,8 +1901,8 @@ private fun SheetQuickActionIconsRow(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("quick_actions_row"),
-        horizontalArrangement = if (isParcel) Arrangement.spacedBy(12.dp) else Arrangement.SpaceEvenly,
-        verticalAlignment = if (isParcel) Alignment.CenterVertically else Alignment.Top
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
         RoundLabeledActionButton(
             icon = Icons.Default.Call,
@@ -1768,24 +1934,22 @@ private fun SheetQuickActionIconsRow(
             testTag = "sheet_headset_button"
         )
 
-        if (isParcel) {
-            Button(
-                onClick = onNavigateClick,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = DelivioYellow,
-                    contentColor = TextOnYellow
-                ),
-                shape = RoundedCornerShape(12.dp),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
-                modifier = Modifier
-                    .weight(1f)
-                    .heightIn(min = 48.dp)
-                    .testTag("parcel_inline_navigate_button")
-            ) {
-                Icon(Icons.Default.Navigation, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("Navigate", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-            }
+        Button(
+            onClick = onNavigateClick,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = DelivioYellow,
+                contentColor = TextOnYellow
+            ),
+            shape = RoundedCornerShape(12.dp),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+            modifier = Modifier
+                .weight(1f)
+                .heightIn(min = 48.dp)
+                .testTag("inline_navigate_button")
+        ) {
+            Icon(Icons.Default.Navigation, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(modifier = Modifier.width(6.dp))
+            Text("Navigate", fontWeight = FontWeight.Bold, fontSize = 14.sp)
         }
     }
 }
@@ -1846,7 +2010,8 @@ private fun RoundLabeledActionButton(
 @Composable
 private fun SelectedStopItemsCard(
     stop: RouteStop,
-    currencySymbol: String
+    currencySymbol: String,
+    showCustomerNotes: Boolean = true
 ) {
     Surface(
         shape = RoundedCornerShape(14.dp),
@@ -2021,7 +2186,7 @@ private fun SelectedStopItemsCard(
                 }
             }
 
-            if (stop.order.customerNotes.isNotBlank()) {
+            if (showCustomerNotes && stop.order.customerNotes.isNotBlank()) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
                 Row(verticalAlignment = Alignment.Top) {
                     Icon(

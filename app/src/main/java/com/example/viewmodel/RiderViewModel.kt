@@ -1127,12 +1127,11 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val targetId = targetOrderId ?: currentRouteStop.value?.orderId ?: currentActiveOrder.value?.id ?: return
         val order = activeOrders.value.firstOrNull { it.id == targetId } ?: currentActiveOrder.value ?: return
         triggerVibration()
-        val step = order.riderStep.lowercase()
         val isFinal = when (order.serviceType.lowercase()) {
             OrderStepConstants.SERVICE_PARCEL -> order.parcelStepStage == com.example.data.models.ParcelStepStage.AT_RECIPIENT
             OrderStepConstants.SERVICE_PABILI -> order.pabiliStepStage == com.example.data.models.PabiliStepStage.AT_RECIPIENT
             OrderStepConstants.SERVICE_TAXI -> order.taxiStepStage == com.example.data.models.TaxiStepStage.AT_DROPOFF
-            else -> step in listOf(OrderStepConstants.STEP_AT_CUSTOMER, OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER)
+            else -> order.foodStepStage == com.example.data.models.FoodStepStage.AT_CUSTOMER
         }
         riderRepository.advanceOrderStep(
             order = order,

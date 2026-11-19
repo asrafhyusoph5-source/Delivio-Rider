@@ -191,7 +191,7 @@ fun AcceptOrderErrorDialog(
                     // 3. Current Order Status
                     DetailRow(
                         label = "CURRENT ORDER STATUS",
-                        value = errorDetails.currentStatus.ifEmpty { "unknown" },
+                        value = errorDetails.currentStatus.ifEmpty { "(missing)" },
                         isMono = false
                     )
 

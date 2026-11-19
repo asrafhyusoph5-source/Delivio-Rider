@@ -3,7 +3,11 @@ package com.example
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -13,14 +17,23 @@ import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeRight
 import com.example.data.constants.OrderStepConstants
+import com.example.data.models.AcceptOrderDecision
+import com.example.data.models.AcceptOrderRules
+import com.example.data.models.FoodFlowRules
+import com.example.data.models.FoodStepStage
 import com.example.data.models.Order
+import com.example.data.models.OrderDocumentParser
 import com.example.data.models.OrderItem
 import com.example.data.models.RouteStopCalculator
 import com.example.data.models.TaxiStop
+import com.example.data.models.contactsOf
+import com.example.data.models.deduplicateAddress
+import com.example.ui.components.IncomingOrderDialog
 import com.example.ui.components.OrderDetailsSheet
 import com.example.ui.components.OrderSheetState
 import com.example.ui.theme.DelivioRiderTheme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -208,7 +221,8 @@ class OrderDetailsSheetUiTest {
         composeRule.onNodeWithText("Step 1 of 4 - Go to pickup").assertIsDisplayed()
         composeRule.onNodeWithTag("expanded_stop_name").assertIsDisplayed()
         composeRule.onNodeWithText("4 min • 0.8 km").assertIsDisplayed()
-        composeRule.onNodeWithTag("navigate_stop_button").assertIsDisplayed()
+        composeRule.onNodeWithTag("navigate_stop_button").assertDoesNotExist()
+        composeRule.onNodeWithTag("inline_navigate_button").performScrollTo().assertIsDisplayed()
 
         // Single details card showing PICKUP address ONLY; NO timeline; NO items list; NO drop-off address
         composeRule.onNodeWithTag("stop_timeline_list").assertDoesNotExist()
@@ -502,7 +516,10 @@ class OrderDetailsSheetUiTest {
         composeRule.waitForIdle()
 
         composeRule.onNodeWithText("Stop 1 of 2 - Pick up").assertIsDisplayed()
-        composeRule.onNodeWithTag("stop_timeline_list").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("trip_details_chip").assertIsDisplayed()
+        composeRule.onNodeWithTag("food_stop_details_card").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("sheet_order_number_chip").assertIsDisplayed()
+        composeRule.onNodeWithText("Maria Santos").assertDoesNotExist()
         composeRule.onNodeWithText("Items to Pick Up").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag("slide_confirm_thumb", useUnmergedTree = true).performTouchInput {
             swipeRight(startX = centerX, endX = centerX + 1500f, durationMillis = 300)
@@ -870,12 +887,12 @@ class OrderDetailsSheetUiTest {
         composeRule.waitForIdle()
 
         // Step chip is clickable
-        composeRule.onNodeWithTag("parcel_trip_details_chip").assertIsDisplayed()
+        composeRule.onNodeWithTag("trip_details_chip").assertIsDisplayed()
         composeRule.onNodeWithText("Stop 1 of 2 - Pick up").assertIsDisplayed()
 
         // Standalone top Navigate button is hidden; inline Navigate sits beside Help
         composeRule.onNodeWithTag("navigate_stop_button").assertDoesNotExist()
-        composeRule.onNodeWithTag("parcel_inline_navigate_button").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("inline_navigate_button").performScrollTo().assertIsDisplayed()
 
         // Pickup-only card with deduplicated full address & pickup note (no dropoff address or items list)
         composeRule.onNodeWithText("No item list provided").assertDoesNotExist()
@@ -1159,10 +1176,10 @@ class OrderDetailsSheetUiTest {
         composeRule.waitForIdle()
 
         // Tap clickable step chip
-        composeRule.onNodeWithTag("parcel_trip_details_chip").performClick()
+        composeRule.onNodeWithTag("trip_details_chip").performClick()
         composeRule.waitForIdle()
 
-        composeRule.onNodeWithTag("parcel_trip_details_page").assertIsDisplayed()
+        composeRule.onNodeWithTag("trip_details_page").assertIsDisplayed()
         composeRule.onNodeWithText("Trip details").assertIsDisplayed()
         composeRule.onNodeWithTag("trip_details_order_number").assertIsDisplayed()
 
@@ -1181,9 +1198,9 @@ class OrderDetailsSheetUiTest {
         assertEquals("09182220002", calledPhone)
 
         // Back button closes Trip details page
-        composeRule.onNodeWithTag("parcel_trip_details_back_button").performClick()
+        composeRule.onNodeWithTag("trip_details_back_button").performClick()
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("parcel_trip_details_page").assertDoesNotExist()
+        composeRule.onNodeWithTag("trip_details_page").assertDoesNotExist()
     }
 
     @Test
@@ -1219,12 +1236,440 @@ class OrderDetailsSheetUiTest {
         composeRule.onNodeWithTag("collapsed_trip_bar").assertIsDisplayed()
         composeRule.onNodeWithText("Carlos Mendoza").assertIsDisplayed()
         composeRule.onNodeWithTag("parcel_press_action_button").assertDoesNotExist()
-        composeRule.onNodeWithTag("parcel_inline_navigate_button").assertDoesNotExist()
-        composeRule.onNodeWithTag("parcel_trip_details_chip").assertDoesNotExist()
+        composeRule.onNodeWithTag("inline_navigate_button").assertDoesNotExist()
+        composeRule.onNodeWithTag("trip_details_chip").assertDoesNotExist()
 
         composeRule.onNodeWithTag("collapsed_trip_bar").performClick()
         composeRule.waitForIdle()
         assertEquals(OrderSheetState.EXPANDED, currentState)
+    }
+
+    private fun sampleFoodOrder(
+        serviceType: String = OrderStepConstants.SERVICE_FOOD,
+        status: String = OrderStepConstants.STATUS_PREPARING,
+        riderStep: String = OrderStepConstants.STEP_TO_MERCHANT,
+        paymentMethod: String = "cod",
+        cashToCollect: Double = 245.0
+    ) = Order(
+        id = "ord_food_1",
+        orderNumber = "F4410",
+        serviceType = serviceType,
+        status = status,
+        riderStep = riderStep,
+        merchantName = "Mang Inasal",
+        branchName = "Robinsons",
+        merchantPhone = "09171001111",
+        merchantAddress = "Robinsons Place, Robinsons Place, San Miguel, Puerto Princesa, Puerto Princesa City",
+        merchantLat = 9.7400,
+        merchantLng = 118.7350,
+        customerName = "Maria Santos",
+        customerPhone = "09189990000",
+        customerAddress = "88 Malvar St, San Miguel, Puerto Princesa",
+        customerArea = "San Miguel",
+        customerLat = 9.7510,
+        customerLng = 118.7410,
+        customerNotes = "Leave at lobby reception",
+        paymentMethod = paymentMethod,
+        cashToCollect = cashToCollect,
+        riderFeeEstimate = 65.0,
+        items = listOf(OrderItem(name = "PM1 Pecho", quantity = 1, price = 180.0))
+    )
+
+    @Test
+    fun foodStep1_showsMerchantOnlyAddressOrderChipCallAndPressButton() {
+        val foodOrder = sampleFoodOrder(riderStep = OrderStepConstants.STEP_TO_MERCHANT)
+        val stops = RouteStopCalculator.computeBatchStops(listOf(foodOrder), 9.7392, 118.7353)
+        var advances = 0
+        var calledName = ""
+        var calledPhone = ""
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                OrderDetailsSheet(
+                    batchStops = stops,
+                    currentStop = stops.first { !it.isFinished },
+                    activeOrders = listOf(foodOrder),
+                    isOnline = true,
+                    walletBalance = 0.0,
+                    todayEarnings = 0.0,
+                    todayTrips = 0,
+                    currencySymbol = "₱",
+                    supportPhone = null,
+                    sheetState = OrderSheetState.EXPANDED,
+                    onGoOnlineClick = {},
+                    onAdvanceStep = { _, _ -> advances += 1 },
+                    onReleaseOrder = {},
+                    onReportProblem = {},
+                    onCallClick = { name, phone ->
+                        calledName = name
+                        calledPhone = phone
+                    }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("trip_details_chip").assertIsDisplayed()
+        composeRule.onNodeWithText("Stop 1 of 2 - Pick up").assertIsDisplayed()
+        composeRule.onNodeWithTag("navigate_stop_button").assertDoesNotExist()
+        composeRule.onNodeWithTag("inline_navigate_button").performScrollTo().assertIsDisplayed()
+
+        // Merchant-only details with deduplicated full address & clickable order number chip
+        composeRule.onNodeWithTag("food_stop_details_card").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("sheet_order_number_chip").assertIsDisplayed()
+        composeRule.onNodeWithText("Robinsons Place, San Miguel, Puerto Princesa").assertIsDisplayed()
+        composeRule.onNodeWithText("Maria Santos").assertDoesNotExist()
+        composeRule.onNodeWithText("88 Malvar St, San Miguel, Puerto Princesa").assertDoesNotExist()
+        composeRule.onNodeWithText("Leave at lobby reception").assertDoesNotExist()
+
+        // Call dials merchant phone only
+        composeRule.onNodeWithTag("sheet_call_button").performScrollTo().performClick()
+        composeRule.waitForIdle()
+        assertEquals("Mang Inasal - Robinsons", calledName)
+        assertEquals("09171001111", calledPhone)
+
+        // Press button "Arrived at the Merchant"
+        composeRule.onNodeWithTag("sheet_slide_button").assertDoesNotExist()
+        composeRule.onNodeWithTag("food_press_action_button").assertIsDisplayed()
+        composeRule.onNodeWithText("Arrived at the Merchant").assertIsDisplayed()
+        composeRule.onNodeWithTag("food_press_action_button").performClick()
+        composeRule.waitForIdle()
+        assertEquals(1, advances)
+    }
+
+    @Test
+    fun foodStep3AndStep4_showCustomerOnlyFullAddressPressAndCodDeliverySlide() {
+        val step3Order = sampleFoodOrder(
+            serviceType = OrderStepConstants.SERVICE_REQUEST,
+            status = OrderStepConstants.REQ_ON_THE_WAY,
+            riderStep = OrderStepConstants.STEP_TO_CUSTOMER
+        )
+        val step3Stops = RouteStopCalculator.computeBatchStops(listOf(step3Order), 9.7400, 118.7350)
+        var step3Advances = 0
+        var calledPhone = ""
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                OrderDetailsSheet(
+                    batchStops = step3Stops,
+                    currentStop = step3Stops.first { !it.isFinished },
+                    activeOrders = listOf(step3Order),
+                    isOnline = true,
+                    walletBalance = 0.0,
+                    todayEarnings = 0.0,
+                    todayTrips = 0,
+                    currencySymbol = "₱",
+                    supportPhone = null,
+                    sheetState = OrderSheetState.EXPANDED,
+                    onGoOnlineClick = {},
+                    onAdvanceStep = { _, _ -> step3Advances += 1 },
+                    onReleaseOrder = {},
+                    onReportProblem = {},
+                    onCallClick = { _, phone -> calledPhone = phone }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        // Customer-only card with revealed full address + customer note; NO merchant card
+        composeRule.onNodeWithText("Stop 2 of 2 - Drop off").assertIsDisplayed()
+        composeRule.onNodeWithText("Mang Inasal - Robinsons").assertDoesNotExist()
+        composeRule.onNodeWithText("88 Malvar St, San Miguel, Puerto Princesa").assertIsDisplayed()
+        composeRule.onNodeWithText("Leave at lobby reception").assertIsDisplayed()
+
+        composeRule.onNodeWithTag("sheet_call_button").performScrollTo().performClick()
+        composeRule.waitForIdle()
+        assertEquals("09189990000", calledPhone)
+
+        // Step 3 uses press button "Arrived at the Customer"
+        composeRule.onNodeWithTag("food_press_action_button").assertIsDisplayed()
+        composeRule.onNodeWithText("Arrived at the Customer").assertIsDisplayed()
+        composeRule.onNodeWithTag("food_press_action_button").performClick()
+        composeRule.waitForIdle()
+        assertEquals(1, step3Advances)
+    }
+
+    @Test
+    fun foodStep4_usesSlideToConfirmDeliveryAndOpensCodDialog() {
+        val step4Order = sampleFoodOrder(
+            serviceType = OrderStepConstants.SERVICE_MART,
+            status = OrderStepConstants.REQ_ON_THE_WAY,
+            riderStep = OrderStepConstants.STEP_AT_CUSTOMER,
+            paymentMethod = "cod",
+            cashToCollect = 245.0
+        )
+        val stops = RouteStopCalculator.computeBatchStops(listOf(step4Order), 9.7510, 118.7410)
+        var delivered = false
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                OrderDetailsSheet(
+                    batchStops = stops,
+                    currentStop = stops.first { !it.isFinished },
+                    activeOrders = listOf(step4Order),
+                    isOnline = true,
+                    walletBalance = 0.0,
+                    todayEarnings = 0.0,
+                    todayTrips = 0,
+                    currencySymbol = "₱",
+                    supportPhone = null,
+                    sheetState = OrderSheetState.EXPANDED,
+                    onGoOnlineClick = {},
+                    onAdvanceStep = { _, _ -> delivered = true },
+                    onReleaseOrder = {},
+                    onReportProblem = {},
+                    onCallClick = { _, _ -> }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("food_press_action_button").assertDoesNotExist()
+        composeRule.onNodeWithText("Slide to Confirm Delivery").assertIsDisplayed()
+        composeRule.onNodeWithTag("slide_confirm_thumb", useUnmergedTree = true).performTouchInput {
+            swipeRight(startX = centerX, endX = centerX + 1500f, durationMillis = 300)
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("COD Cash Collection").assertIsDisplayed()
+        composeRule.onNodeWithTag("cod_confirm_checkbox_row").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("cod_complete_delivery_button").performClick()
+        composeRule.waitForIdle()
+        assertTrue(delivered)
+    }
+
+    @Test
+    fun universalTripDetailsDialog_opensForFoodPabiliTaxiAndTogglesRawDataOnLongPress() {
+        // 1. Pabili Trip details: VENDOR has NO call button; CUSTOMER has call button & masked address before pickup; long-press reveals Raw data
+        val pabili = samplePabiliOrder().copy(
+            rawDebugFields = mapOf(
+                "status" to OrderStepConstants.STATUS_RIDER_ON_WAY_VENDOR,
+                "riderStep" to OrderStepConstants.STEP_TO_VENDOR,
+                "serviceType" to "pabili"
+            )
+        )
+        val pabiliStops = RouteStopCalculator.computeBatchStops(listOf(pabili), 9.7392, 118.7353)
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                OrderDetailsSheet(
+                    batchStops = pabiliStops,
+                    currentStop = pabiliStops.first { !it.isFinished },
+                    activeOrders = listOf(pabili),
+                    isOnline = true,
+                    walletBalance = 0.0,
+                    todayEarnings = 0.0,
+                    todayTrips = 0,
+                    currencySymbol = "₱",
+                    supportPhone = null,
+                    sheetState = OrderSheetState.EXPANDED,
+                    onGoOnlineClick = {},
+                    onAdvanceStep = { _, _ -> },
+                    onReleaseOrder = {},
+                    onReportProblem = {},
+                    onCallClick = { _, _ -> }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("trip_details_chip").performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("trip_details_page").assertIsDisplayed()
+        composeRule.onNodeWithTag("trip_details_vendor_card").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("trip_details_vendor_call_button").assertDoesNotExist()
+        composeRule.onNodeWithTag("trip_details_customer_card").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("trip_details_customer_call_button").assertIsDisplayed()
+        composeRule.onNode(
+            hasText("San Pedro (Full address revealed after pickup)") and hasAnyAncestor(hasTestTag("trip_details_customer_card"))
+        ).performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("trip_details_order_card").performScrollTo().assertIsDisplayed()
+
+        // Raw data hidden until long-press on order number
+        composeRule.onNodeWithTag("trip_details_raw_data_card").assertDoesNotExist()
+        composeRule.onNodeWithTag("trip_details_order_number").performTouchInput {
+            longClick()
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("trip_details_raw_data_card").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Raw data").assertIsDisplayed()
+
+        // Long-press again hides Raw data
+        composeRule.onNodeWithTag("trip_details_order_number").performTouchInput {
+            longClick()
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("trip_details_raw_data_card").assertDoesNotExist()
+    }
+
+    @Test
+    fun taxiTripDetailsDialog_opensFromStepChipAndShowsPickupDropoffTripCards() {
+        val taxi = sampleTaxiOrder()
+        val stops = RouteStopCalculator.computeBatchStops(listOf(taxi), 9.7392, 118.7353)
+        var calledPhone = ""
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                OrderDetailsSheet(
+                    batchStops = stops,
+                    currentStop = stops.first(),
+                    activeOrders = listOf(taxi),
+                    isOnline = true,
+                    walletBalance = 0.0,
+                    todayEarnings = 0.0,
+                    todayTrips = 0,
+                    currencySymbol = "₱",
+                    supportPhone = null,
+                    sheetState = OrderSheetState.EXPANDED,
+                    onGoOnlineClick = {},
+                    onAdvanceStep = { _, _ -> },
+                    onReleaseOrder = {},
+                    onReportProblem = {},
+                    onCallClick = { _, phone -> calledPhone = phone }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("trip_details_chip").performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("trip_details_page").assertIsDisplayed()
+        composeRule.onNodeWithTag("trip_details_pickup_card").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("trip_details_dropoff_card").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("trip_details_trip_card").performScrollTo().assertIsDisplayed()
+        composeRule.onNode(
+            hasText("2 passengers") and hasAnyAncestor(hasTestTag("trip_details_trip_card"))
+        ).performScrollTo().assertIsDisplayed()
+
+        composeRule.onNodeWithTag("trip_details_pickup_call_button").performScrollTo().performClick()
+        composeRule.waitForIdle()
+        assertEquals("09171234567", calledPhone)
+    }
+
+    @Test
+    fun incomingOrderDialog_disablesAcceptButtonOnFirstTapAndPreventsDuplicateAccept() {
+        val order = sampleFoodOrder()
+        var acceptCount = 0
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                IncomingOrderDialog(
+                    order = order,
+                    currencySymbol = "₱",
+                    soundEnabled = false,
+                    vibrationEnabled = false,
+                    onAccept = { acceptCount += 1 },
+                    onDecline = {}
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("accept_offer_button").assertIsEnabled()
+        composeRule.onNodeWithTag("accept_offer_button").performClick()
+        composeRule.waitForIdle()
+
+        assertEquals(1, acceptCount)
+        composeRule.onNodeWithTag("accept_offer_button").assertIsNotEnabled()
+        composeRule.onNodeWithText("Accepting...").assertIsDisplayed()
+    }
+
+    @Test
+    fun acceptOrderRules_foodFlowRules_deduplicateAddress_and_parcelContactsIsolation() {
+        // 1. AcceptOrderRules handles ALREADY_OURS, ALLOW_ACCEPT, TAKEN_BY_OTHER, missing status != "unknown"
+        val ours = AcceptOrderRules.evaluateDocument(
+            exists = true,
+            riderIdRaw = "rider_me",
+            statusRaw = "Rider is on the way",
+            riderRequestStatusRaw = "accepted",
+            serviceTypeRaw = "food",
+            excludeRiderIds = emptyList(),
+            myUid = "rider_me"
+        )
+        assertEquals(AcceptOrderDecision.ALREADY_OURS, ours.decision)
+
+        val other = AcceptOrderRules.evaluateDocument(
+            exists = true,
+            riderIdRaw = "rider_other",
+            statusRaw = "Preparing",
+            riderRequestStatusRaw = null,
+            serviceTypeRaw = "food",
+            excludeRiderIds = emptyList(),
+            myUid = "rider_me"
+        )
+        assertEquals(AcceptOrderDecision.TAKEN_BY_OTHER, other.decision)
+
+        val missing = AcceptOrderRules.evaluateDocument(
+            exists = true,
+            riderIdRaw = null,
+            statusRaw = null,
+            riderRequestStatusRaw = null,
+            serviceTypeRaw = "parcel",
+            excludeRiderIds = emptyList(),
+            myUid = "rider_me"
+        )
+        assertEquals(AcceptOrderDecision.UNAVAILABLE, missing.decision)
+        assertEquals("(missing)", missing.rawStatus)
+
+        val validReady = AcceptOrderRules.evaluateDocument(
+            exists = true,
+            riderIdRaw = "",
+            statusRaw = "Ready",
+            riderRequestStatusRaw = "pending",
+            serviceTypeRaw = "food",
+            excludeRiderIds = emptyList(),
+            myUid = "rider_me"
+        )
+        assertEquals(AcceptOrderDecision.ALLOW_ACCEPT, validReady.decision)
+
+        // 2. FoodFlowRules forward-only & skip checks
+        assertTrue(FoodFlowRules.isExpectedState(OrderStepConstants.STEP_TO_MERCHANT, "Preparing", FoodStepStage.TO_MERCHANT))
+        assertFalse(FoodFlowRules.isExpectedState(OrderStepConstants.STEP_AT_MERCHANT, "Preparing", FoodStepStage.TO_MERCHANT))
+        assertFalse(FoodFlowRules.isExpectedState(OrderStepConstants.STEP_AT_CUSTOMER, "Delivered", FoodStepStage.AT_CUSTOMER))
+
+        // 3. deduplicateAddress removes consecutive multi-word repeats and Puerto Princesa / City duplicate
+        assertEquals(
+            "San Pedro, Puerto Princesa",
+            deduplicateAddress("San Pedro, San Pedro, Puerto Princesa, Puerto Princesa City")
+        )
+        assertEquals(
+            "Robinsons Place Mall, San Miguel, Puerto Princesa",
+            deduplicateAddress("Robinsons Place Mall Robinsons Place Mall, San Miguel, Puerto Princesa")
+        )
+
+        // 4. Parcel contactsOf isolation: never leaks booking customer ("Test C") into recipient drop-off
+        val parcelDocs = OrderDocumentParser.parseOrderMapsIndividually(
+            docs = listOf(
+                "parcel_iso_1" to mapOf(
+                    "orderNumber" to "P-555",
+                    "serviceType" to "parcel",
+                    "status" to "Placed Order",
+                    "customerName" to "Test C",
+                    "customerPhone" to "09170009999",
+                    "customerAddress" to "Wrong Booking Address",
+                    "pickup" to mapOf(
+                        "name" to "Alice Sender",
+                        "phone" to "09171112222",
+                        "address" to "10 Main St, Puerto Princesa, Puerto Princesa City"
+                    ),
+                    "dropoff" to mapOf(
+                        "address" to "20 Second St, San Pedro"
+                    )
+                )
+            ),
+            sourceLabel = "test"
+        )
+        val parsedParcel = parcelDocs.first()
+        val contacts = contactsOf(parsedParcel)
+        assertEquals("Alice Sender", contacts.pickup.name)
+        assertEquals("09171112222", contacts.pickup.phone)
+        assertEquals("10 Main St, Puerto Princesa", contacts.pickup.address)
+        assertEquals("Not provided", contacts.dropoff.name)
+        assertEquals("Not provided", contacts.dropoff.phone)
+        assertEquals("20 Second St, San Pedro", contacts.dropoff.address)
     }
 }
 

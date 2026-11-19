@@ -83,10 +83,11 @@ fun resolveStopDisplayName(order: Order, type: StopType): String {
             }
         }
         OrderStepConstants.SERVICE_PARCEL -> {
+            val contacts = contactsOf(order)
             if (type == StopType.MERCHANT) {
-                cleanSender.ifBlank { cleanMerchant }.ifBlank { "Sender" }
+                contacts.pickup.name
             } else {
-                cleanCustomer.ifBlank { "Customer" }
+                contacts.dropoff.name
             }
         }
         OrderStepConstants.SERVICE_PABILI -> {
@@ -133,15 +134,7 @@ object RouteStopCalculator {
                 order.taxiStepStage !in setOf(TaxiStepStage.TO_PICKUP, TaxiStepStage.AT_PICKUP)
             }
             else -> {
-                step in setOf(
-                    OrderStepConstants.STEP_PICKED_UP,
-                    OrderStepConstants.STEP_TO_CUSTOMER,
-                    OrderStepConstants.STEP_AT_CUSTOMER,
-                    OrderStepConstants.STEP_HEADING_TO_CUSTOMER,
-                    OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER,
-                    OrderStepConstants.STEP_COMPLETED,
-                    OrderStepConstants.STEP_DELIVERED
-                )
+                order.foodStepStage !in setOf(FoodStepStage.TO_MERCHANT, FoodStepStage.AT_MERCHANT)
             }
         }
     }
@@ -370,9 +363,16 @@ object RouteStopCalculator {
         val isMerchant = type == StopType.MERCHANT
         val name = resolveStopDisplayName(order, type)
 
+        val parcelContacts = if (order.isParcel) contactsOf(order) else null
         val targetTaxiStop = if (order.isTaxi && !isMerchant) order.currentTargetStop else null
 
-        val fullAddress = if (isMerchant) {
+        val fullAddress = if (order.isParcel && parcelContacts != null) {
+            if (isMerchant) {
+                parcelContacts.pickup.address.takeUnless { it == "Not provided" }.orEmpty()
+            } else {
+                parcelContacts.dropoff.address.takeUnless { it == "Not provided" }.orEmpty()
+            }
+        } else if (isMerchant) {
             if (order.isTaxi) {
                 deduplicateAddress(order.merchantAddress)
                     .ifBlank { order.displayPickupName }
@@ -405,10 +405,10 @@ object RouteStopCalculator {
                 }
             }
         } else {
-            val isRevealed = if (order.isPabili) {
-                order.pabiliStepStage !in setOf(PabiliStepStage.TO_VENDOR, PabiliStepStage.AT_VENDOR)
-            } else {
-                OrderStepConstants.isCustomerAddressRevealed(order.serviceType, order.riderStep)
+            val isRevealed = when {
+                order.isParcel -> OrderStepConstants.isCustomerAddressRevealed(order.serviceType, order.riderStep)
+                order.isPabili -> order.pabiliStepStage !in setOf(PabiliStepStage.TO_VENDOR, PabiliStepStage.AT_VENDOR)
+                else -> order.foodStepStage !in setOf(FoodStepStage.TO_MERCHANT, FoodStepStage.AT_MERCHANT)
             }
             if (isRevealed) {
                 fullAddress
@@ -422,10 +422,16 @@ object RouteStopCalculator {
             }
         }
 
-        val phone = if (isMerchant && !order.isPabili) {
-            order.merchantPhone
-        } else {
-            order.customerPhone
+        val phone = when {
+            order.isParcel && parcelContacts != null -> {
+                if (isMerchant) {
+                    parcelContacts.pickup.phone.takeUnless { it == "Not provided" }.orEmpty()
+                } else {
+                    parcelContacts.dropoff.phone.takeUnless { it == "Not provided" }.orEmpty()
+                }
+            }
+            isMerchant && !order.isPabili -> order.merchantPhone
+            else -> order.customerPhone
         }
 
         val lat = if (isMerchant) {
