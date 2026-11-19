@@ -228,13 +228,18 @@ fun IncomingOrderDialog(
                             }
                         }
 
-                        if (firstOrder.isTaxi) {
+                        if (firstOrder.isTaxi || firstOrder.isParcel) {
+                            val vehicleBadgeText = if (firstOrder.isParcel) {
+                                OrderStepConstants.getParcelVehicleDisplayName(firstOrder.vehicleType)
+                            } else {
+                                OrderStepConstants.getVehicleDisplayName(firstOrder.vehicleType)
+                            }
                             Surface(
                                 shape = RoundedCornerShape(8.dp),
                                 color = MaterialTheme.colorScheme.surfaceVariant
                             ) {
                                 Text(
-                                    text = OrderStepConstants.getVehicleDisplayName(firstOrder.vehicleType),
+                                    text = vehicleBadgeText,
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 10.sp,
                                     modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)

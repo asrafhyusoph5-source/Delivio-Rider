@@ -345,12 +345,14 @@ object OrderDocumentParser {
             vendorMapPre?.get("name"),
             fallback = ""
         )
+        val normServicePre = serviceType.lowercase(Locale.US).trim()
         val rawSenderName = firstValidDisplayName(
             pickupMap?.get("senderName"),
             data["senderName"],
             parcelMapPre?.get("senderName"),
             safeMap(data["sender"])?.get("name"),
             pickupMap?.get("contactName"),
+            if (normServicePre == OrderStepConstants.SERVICE_PARCEL) pickupMap?.get("name") else null,
             fallback = ""
         )
         val rawBranchName = sanitizeDisplayName(
@@ -502,7 +504,11 @@ object OrderDocumentParser {
                 ?: safeStringOrNull(data["recipientArea"])
                 ?: "Downtown"
         )
-        val customerNotes = safeStringOrNull(dropoffMap?.get("notes"))
+        val customerNotes = safeStringOrNull(dropoffMap?.get("note"))
+            ?: safeStringOrNull(dropoffMap?.get("notes"))
+            ?: safeStringOrNull(data["dropoffNote"])
+            ?: safeStringOrNull(data["dropoffNotes"])
+            ?: safeStringOrNull(data["deliveryNote"])
             ?: safeString(data["customerNotes"])
 
         // Items
@@ -587,14 +593,30 @@ object OrderDocumentParser {
         val cashCollectAt = safeString(data["cashCollectAt"])
         val codAmount = safeDouble(data["codAmount"]) ?: 0.0
         val codCollected = safeDouble(data["codCollected"]) ?: 0.0
+        val cashCollected = safeDouble(data["cashCollected"]) ?: codCollected
+        val cashCollectedStage = safeString(data["cashCollectedStage"])
+        val cashCollectedAtRaw = data["cashCollectedAt"]?.takeUnless { it is String && it.isBlank() }
+        parseTolerantTimeMillis(cashCollectedAtRaw, fieldName = "cashCollectedAt")
 
         // Parcel
         val parcelMap = safeMap(data["parcel"])
         val parcelSize = safeStringOrNull(parcelMap?.get("size")) ?: safeString(data["parcelSize"], "M")
         val parcelWeightKg = safeDouble(parcelMap?.get("weightKg")) ?: safeDouble(data["parcelWeightKg"]) ?: 1.0
-        val parcelItemDesc = safeStringOrNull(parcelMap?.get("itemDescription")) ?: safeString(data["parcelItemDescription"])
+        val parcelItemDesc = safeStringOrNull(parcelMap?.get("description"))
+            ?: safeStringOrNull(parcelMap?.get("itemDescription"))
+            ?: safeStringOrNull(data["parcelDescription"])
+            ?: safeString(data["parcelItemDescription"])
         val parcelFragile = safeBoolean(parcelMap?.get("fragile")) ?: safeBoolean(data["parcelFragile"]) ?: false
-        val parcelFeePayer = safeStringOrNull(parcelMap?.get("feePayer")) ?: safeString(data["parcelFeePayer"], "SENDER")
+        val rawParcelFeePayer = safeStringOrNull(data["feePayer"])
+            ?: safeStringOrNull(parcelMap?.get("feePayer"))
+            ?: safeStringOrNull(data["parcelFeePayer"])
+        val parcelFeePayer = when {
+            !rawParcelFeePayer.isNullOrBlank() -> rawParcelFeePayer.trim()
+            cashCollectAt.trim().equals("recipient", ignoreCase = true) ||
+                cashCollectAt.trim().equals("receiver", ignoreCase = true) -> "recipient"
+            cashCollectAt.trim().equals("sender", ignoreCase = true) -> "sender"
+            else -> "SENDER"
+        }
 
         // Pabili
         val pabiliMap = safeMap(data["pabili"])
@@ -637,9 +659,10 @@ object OrderDocumentParser {
         val riderReqMap = safeMap(data["riderRequest"])
         val riderReqStatus = safeStringOrNull(riderReqMap?.get("status")) ?: safeString(data["riderRequestStatus"])
 
-        // Taxi vehicleType fallback checks
+        // Taxi / Parcel vehicleType fallback checks
         val vehicleMap = safeMap(data["vehicle"])
         val vehicleType = safeStringOrNull(data["vehicleType"])?.takeIf { it.isNotBlank() }
+            ?: safeStringOrNull(parcelMap?.get("vehicleType"))?.takeIf { it.isNotBlank() }
             ?: safeStringOrNull(taxiMap?.get("vehicleType"))?.takeIf { it.isNotBlank() }
             ?: safeStringOrNull(vehicleMap?.get("type"))?.takeIf { it.isNotBlank() }
             ?: OrderStepConstants.VEHICLE_MOTORCYCLE
@@ -888,7 +911,10 @@ object OrderDocumentParser {
             splitOut = splitOut,
             splitOutInfo = splitOutInfo,
             splitParentOrderId = splitParentOrderId,
-            isSplitChild = isSplitChild
+            isSplitChild = isSplitChild,
+            cashCollected = cashCollected,
+            cashCollectedStage = cashCollectedStage,
+            cashCollectedAt = cashCollectedAtRaw
         )
     }
 

@@ -65,6 +65,7 @@ object OrderStepConstants {
     const val VEHICLE_TRICYCLE = "tricycle"
     const val VEHICLE_CAR4 = "car4"
     const val VEHICLE_CAR8 = "car8"
+    const val VEHICLE_SEDAN = "sedan"
 
     val ALL_VEHICLES = listOf(
         VEHICLE_MOTORCYCLE,
@@ -79,7 +80,15 @@ object OrderStepConstants {
             VEHICLE_TRICYCLE -> "Tricycle"
             VEHICLE_CAR4 -> "4 Seater Car"
             VEHICLE_CAR8 -> "8 Seater Car"
+            VEHICLE_SEDAN -> "Sedan"
             else -> vehicleType?.replaceFirstChar { it.uppercase() } ?: "Motorcycle"
+        }
+    }
+
+    fun getParcelVehicleDisplayName(vehicleType: String?): String {
+        return when (vehicleType?.lowercase()?.trim()) {
+            VEHICLE_SEDAN, VEHICLE_CAR4, VEHICLE_CAR8, "4 seater car", "8 seater car", "4-seater car", "8-seater car", "car", "car_4", "car_8" -> "Sedan"
+            else -> "Motorcycle"
         }
     }
 
@@ -223,7 +232,15 @@ object OrderStepConstants {
     fun isCustomerAddressRevealed(serviceType: String, riderStep: String): Boolean {
         val step = riderStep.lowercase().trim()
         return when (serviceType.lowercase().trim()) {
-            SERVICE_PARCEL -> step in listOf(STEP_TO_RECIPIENT, STEP_AT_RECIPIENT, STEP_HEADING_TO_CUSTOMER, STEP_ARRIVED_AT_CUSTOMER)
+            SERVICE_PARCEL -> step in listOf(
+                STEP_TO_RECIPIENT,
+                STEP_AT_RECIPIENT,
+                STEP_HEADING_TO_CUSTOMER,
+                STEP_ARRIVED_AT_CUSTOMER,
+                STEP_PICKED_UP,
+                STEP_COMPLETED,
+                STEP_DELIVERED
+            )
             SERVICE_PABILI -> step in listOf(
                 STEP_PICKED_UP,
                 STEP_TO_RECIPIENT,
@@ -307,11 +324,11 @@ object OrderStepConstants {
                 else -> "Slide to Complete Trip"
             }
             SERVICE_PARCEL -> when (step) {
-                STEP_TO_SENDER, STEP_HEADING_TO_MERCHANT -> "Slide to confirm Arrival at Sender"
+                STEP_TO_SENDER, STEP_HEADING_TO_MERCHANT -> "Arrived at the Sender"
                 STEP_AT_SENDER, STEP_ARRIVED_AT_MERCHANT -> "Slide to confirm Picked Up"
-                STEP_TO_RECIPIENT, STEP_HEADING_TO_CUSTOMER -> "Slide to confirm Arrival at Recipient"
-                STEP_AT_RECIPIENT, STEP_ARRIVED_AT_CUSTOMER -> "Slide to Complete Delivery"
-                else -> "Slide to Complete Delivery"
+                STEP_TO_RECIPIENT, STEP_HEADING_TO_CUSTOMER, STEP_PICKED_UP -> "Arrived at the Recipient"
+                STEP_AT_RECIPIENT, STEP_ARRIVED_AT_CUSTOMER -> "Slide to Confirm Delivery"
+                else -> "Slide to Confirm Delivery"
             }
             SERVICE_PABILI -> when (step) {
                 STEP_TO_VENDOR, STEP_HEADING_TO_MERCHANT -> "Arrived at the Merchant"

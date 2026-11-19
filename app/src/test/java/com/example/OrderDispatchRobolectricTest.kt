@@ -497,4 +497,224 @@ class OrderDispatchRobolectricTest {
         assertEquals("Restarting", restartingLabel)
         assertTrue(restartingDetail.contains("5s"))
     }
+
+    @Test
+    fun `parcel parser reads sender dropoff parcel metadata vehicleType feePayer and cashCollected`() {
+        val raw = mapOf<String, Any?>(
+            "orderNumber" to "P-408",
+            "serviceType" to "parcel",
+            "status" to "Placed Order",
+            "vehicleType" to "  Sedan ",
+            "feePayer" to "recipient",
+            "paymentMethod" to "cod",
+            "cashToCollect" to 185.0,
+            "pickup" to mapOf(
+                "name" to "Juan Dela Cruz",
+                "phone" to "09171112222",
+                "address" to "12 Rizal Ave, Brgy Tanglaw, Puerto Princesa",
+                "lat" to 9.7405,
+                "lng" to 118.7351,
+                "note" to "Call upon arrival at gate"
+            ),
+            "dropoff" to mapOf(
+                "name" to "Ana Reyes",
+                "phone" to "09183334444",
+                "address" to "88 Taft St, Brgy San Pedro, Puerto Princesa",
+                "lat" to 9.7512,
+                "lng" to 118.7420,
+                "note" to "Leave with lobby guard"
+            ),
+            "parcel" to mapOf(
+                "size" to "Large",
+                "weightKg" to 8.5,
+                "description" to "Glasswares and documents",
+                "fragile" to true
+            )
+        )
+
+        val order = OrderDocumentParser.parseOrderFromMap("ord_parcel_parse", raw)
+        assertTrue(order.isParcel)
+        assertEquals("Juan Dela Cruz", order.senderName)
+        assertEquals("09171112222", order.merchantPhone)
+        assertEquals("12 Rizal Ave, Brgy Tanglaw, Puerto Princesa", order.merchantAddress)
+        assertEquals("Call upon arrival at gate", order.resolvedPickupNote)
+
+        assertEquals("Ana Reyes", order.customerName)
+        assertEquals("09183334444", order.customerPhone)
+        assertEquals("88 Taft St, Brgy San Pedro, Puerto Princesa", order.customerAddress)
+        assertEquals("Leave with lobby guard", order.resolvedDropoffNote)
+
+        assertEquals("Large", order.parcelSize)
+        assertEquals(8.5, order.parcelWeightKg, 0.001)
+        assertEquals("Glasswares and documents", order.parcelItemDescription)
+        assertTrue(order.parcelFragile)
+        assertEquals("Sedan", order.resolvedParcelVehicleLabel)
+        assertTrue(order.isSedanParcel)
+        assertEquals("recipient", order.resolvedParcelFeePayer)
+        assertTrue(order.parcelCollectsAtDropoff)
+        assertFalse(order.parcelCollectsAtPickup)
+        assertEquals(185.0, order.cashAmountToCollect, 0.001)
+    }
+
+    @Test
+    fun `parcel flow rules enforce forward-only 4 transitions and rate formula uses parcelSedan vs single`() {
+        val t1 = com.example.data.models.ParcelFlowRules.transitionFor(com.example.data.models.ParcelStepStage.TO_SENDER)!!
+        assertEquals(OrderStepConstants.STATUS_RIDER_ON_WAY_SENDER, t1.expectedPrevStatus)
+        assertEquals(OrderStepConstants.STATUS_ARRIVED_AT_SENDER, t1.nextStatus)
+        assertEquals(OrderStepConstants.STEP_AT_SENDER, t1.nextStep)
+
+        val t2 = com.example.data.models.ParcelFlowRules.transitionFor(com.example.data.models.ParcelStepStage.AT_SENDER)!!
+        assertEquals(OrderStepConstants.STATUS_ARRIVED_AT_SENDER, t2.expectedPrevStatus)
+        assertEquals(OrderStepConstants.STATUS_RIDER_ON_WAY_RECIPIENT, t2.nextStatus)
+        assertEquals(OrderStepConstants.STEP_TO_RECIPIENT, t2.nextStep)
+
+        val t3 = com.example.data.models.ParcelFlowRules.transitionFor(com.example.data.models.ParcelStepStage.TO_RECIPIENT)!!
+        assertEquals(OrderStepConstants.STATUS_RIDER_ON_WAY_RECIPIENT, t3.expectedPrevStatus)
+        assertEquals(OrderStepConstants.STATUS_ARRIVED_AT_RECIPIENT, t3.nextStatus)
+        assertEquals(OrderStepConstants.STEP_AT_RECIPIENT, t3.nextStep)
+
+        val t4 = com.example.data.models.ParcelFlowRules.transitionFor(com.example.data.models.ParcelStepStage.AT_RECIPIENT)!!
+        assertEquals(OrderStepConstants.STATUS_ARRIVED_AT_RECIPIENT, t4.expectedPrevStatus)
+        assertEquals(OrderStepConstants.STATUS_DELIVERED, t4.nextStatus)
+        assertEquals(OrderStepConstants.STEP_COMPLETED, t4.nextStep)
+
+        assertNull(com.example.data.models.ParcelFlowRules.transitionFor(com.example.data.models.ParcelStepStage.COMPLETED))
+        assertTrue(com.example.data.models.ParcelFlowRules.isExpectedStatus(" Arrived at sender ", OrderStepConstants.STATUS_ARRIVED_AT_SENDER))
+        assertFalse(com.example.data.models.ParcelFlowRules.isExpectedStatus(OrderStepConstants.STATUS_DELIVERED, OrderStepConstants.STATUS_ARRIVED_AT_SENDER))
+
+        val paySettings = com.example.data.constants.RiderPaySettings(
+            single = com.example.data.constants.RiderPayRate(minFare = 45.0, includedKm = 2.0, perKmExtra = 10.0),
+            parcelSedan = com.example.data.constants.RiderPayRate(minFare = 110.0, includedKm = 3.0, perKmExtra = 20.0)
+        )
+        val motoParcel = Order(
+            id = "p_moto",
+            serviceType = OrderStepConstants.SERVICE_PARCEL,
+            vehicleType = "motorcycle",
+            deliveryDistanceKm = 5.0
+        )
+        val sedanParcel = Order(
+            id = "p_sedan",
+            serviceType = OrderStepConstants.SERVICE_PARCEL,
+            vehicleType = "sedan",
+            deliveryDistanceKm = 5.0
+        )
+        // Moto: 45 + (5 - 2)*10 = 75
+        assertEquals(75.0, com.example.data.constants.BatchConstants.calculateDeliveryFee(motoParcel, 1, false, paySettings), 0.001)
+        // Sedan: 110 + (5 - 3)*20 = 150
+        assertEquals(150.0, com.example.data.constants.BatchConstants.calculateDeliveryFee(sedanParcel, 1, false, paySettings), 0.001)
+    }
+
+    @Test
+    fun `parcel cash rule assigns collection to pickup or dropoff stop based on feePayer and paymentMethod`() {
+        val baseOrder = Order(
+            id = "p_cash",
+            orderNumber = "P500",
+            serviceType = OrderStepConstants.SERVICE_PARCEL,
+            status = OrderStepConstants.STATUS_RIDER_ON_WAY_SENDER,
+            riderStep = OrderStepConstants.STEP_TO_SENDER,
+            paymentMethod = "cod",
+            cashToCollect = 120.0,
+            merchantLat = 9.7400,
+            merchantLng = 118.7350,
+            customerLat = 9.7500,
+            customerLng = 118.7450
+        )
+
+        val senderPaysStops = com.example.data.models.RouteStopCalculator.computeBatchStops(
+            listOf(baseOrder.copy(parcelFeePayer = "sender", cashCollectAt = "sender")), 9.739, 118.735
+        )
+        assertEquals(120.0, senderPaysStops[0].cashToCollect, 0.001)
+        assertTrue(senderPaysStops[0].isCod)
+        assertEquals(0.0, senderPaysStops[1].cashToCollect, 0.001)
+        assertFalse(senderPaysStops[1].isCod)
+
+        val recipientPaysStops = com.example.data.models.RouteStopCalculator.computeBatchStops(
+            listOf(baseOrder.copy(parcelFeePayer = "recipient", cashCollectAt = "recipient")), 9.739, 118.735
+        )
+        assertEquals(0.0, recipientPaysStops[0].cashToCollect, 0.001)
+        assertFalse(recipientPaysStops[0].isCod)
+        assertEquals(120.0, recipientPaysStops[1].cashToCollect, 0.001)
+        assertTrue(recipientPaysStops[1].isCod)
+
+        val walletStops = com.example.data.models.RouteStopCalculator.computeBatchStops(
+            listOf(baseOrder.copy(paymentMethod = "wallet", parcelFeePayer = "sender", cashCollectAt = "sender")), 9.739, 118.735
+        )
+        assertEquals(0.0, walletStops[0].cashToCollect, 0.001)
+        assertEquals(0.0, walletStops[1].cashToCollect, 0.001)
+        assertFalse(walletStops[0].isCod)
+        assertFalse(walletStops[1].isCod)
+    }
+
+    @Test
+    fun `parcel vehicle matching allows car4 and car8 for sedan and motorcycle only for motorcycle`() {
+        val dispatch = DispatchSettings(searchRadiusKm = 8.0)
+        val riderLoc = Pair(9.7392, 118.7353)
+        val baseRider = Rider(
+            uid = "r_p",
+            isOnline = true,
+            status = "active",
+            cityId = "ppc",
+            allowedServices = OrderStepConstants.ALL_SERVICES,
+            activeServices = OrderStepConstants.ALL_SERVICES
+        )
+        val sedanOrder = Order(
+            id = "p_sed",
+            orderNumber = "P801",
+            serviceType = OrderStepConstants.SERVICE_PARCEL,
+            status = OrderStepConstants.STATUS_PLACED_ORDER,
+            vehicleType = " Sedan ",
+            cityId = "ppc",
+            pickupDistanceKm = 2.0
+        )
+        val motoOrder = sedanOrder.copy(id = "p_mot", vehicleType = " Motorcycle ")
+
+        // car4 & car8 match sedan parcel
+        val car4Match = GeneralDispatchEvaluator.evaluateSkipReason(
+            order = sedanOrder,
+            rider = baseRider.copy(vehicle = Vehicle(type = "car4")),
+            activeOrders = emptyList(),
+            riderLoc = riderLoc,
+            isPlatformServiceEnabled = true,
+            isCityServiceEnabled = true,
+            dispatch = dispatch
+        )
+        assertTrue("car4 should match sedan parcel: ${car4Match.skipReason}", car4Match.isEligible)
+
+        val car8Match = GeneralDispatchEvaluator.evaluateSkipReason(
+            order = sedanOrder,
+            rider = baseRider.copy(vehicle = Vehicle(type = "CAR8 ")),
+            activeOrders = emptyList(),
+            riderLoc = riderLoc,
+            isPlatformServiceEnabled = true,
+            isCityServiceEnabled = true,
+            dispatch = dispatch
+        )
+        assertTrue("car8 should match sedan parcel: ${car8Match.skipReason}", car8Match.isEligible)
+
+        // motorcycle rejected from sedan parcel with clear reason
+        val motoRejected = GeneralDispatchEvaluator.evaluateSkipReason(
+            order = sedanOrder,
+            rider = baseRider.copy(vehicle = Vehicle(type = "motorcycle")),
+            activeOrders = emptyList(),
+            riderLoc = riderLoc,
+            isPlatformServiceEnabled = true,
+            isCityServiceEnabled = true,
+            dispatch = dispatch
+        )
+        assertFalse(motoRejected.isEligible)
+        assertEquals("Parcel needs a Sedan (4 or 8 wheel car)", motoRejected.skipReason)
+
+        // car4 rejected from motorcycle parcel with clear reason
+        val carRejected = GeneralDispatchEvaluator.evaluateSkipReason(
+            order = motoOrder,
+            rider = baseRider.copy(vehicle = Vehicle(type = "car4")),
+            activeOrders = emptyList(),
+            riderLoc = riderLoc,
+            isPlatformServiceEnabled = true,
+            isCityServiceEnabled = true,
+            dispatch = dispatch
+        )
+        assertFalse(carRejected.isEligible)
+        assertEquals("Parcel needs a Motorcycle", carRejected.skipReason)
+    }
 }

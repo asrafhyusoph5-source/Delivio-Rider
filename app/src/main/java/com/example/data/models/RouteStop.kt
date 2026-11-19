@@ -124,12 +124,7 @@ object RouteStopCalculator {
         val step = order.riderStep.lowercase().trim()
         return when (order.serviceType.lowercase().trim()) {
             OrderStepConstants.SERVICE_PARCEL -> {
-                step in setOf(
-                    OrderStepConstants.STEP_TO_RECIPIENT,
-                    OrderStepConstants.STEP_AT_RECIPIENT,
-                    OrderStepConstants.STEP_COMPLETED,
-                    OrderStepConstants.STEP_DELIVERED
-                )
+                order.parcelStepStage !in setOf(ParcelStepStage.TO_SENDER, ParcelStepStage.AT_SENDER)
             }
             OrderStepConstants.SERVICE_PABILI -> {
                 order.pabiliStepStage !in setOf(PabiliStepStage.TO_VENDOR, PabiliStepStage.AT_VENDOR)
@@ -449,6 +444,26 @@ object RouteStopCalculator {
             if (order.customerLng != 0.0) order.customerLng else 118.7360
         }
 
+        val stopCashToCollect = if (order.isParcel) {
+            if (isMerchant) {
+                if (order.parcelCollectsAtPickup) order.cashAmountToCollect else 0.0
+            } else {
+                if (order.parcelCollectsAtDropoff) order.cashAmountToCollect else 0.0
+            }
+        } else {
+            if (!isMerchant) order.cashAmountToCollect else 0.0
+        }
+        val stopIsCod = if (order.isParcel) {
+            stopCashToCollect > 0.0
+        } else {
+            !isMerchant && order.isCod
+        }
+        val stopIsPaidOnline = if (order.isParcel) {
+            !order.isCod || stopCashToCollect <= 0.0
+        } else {
+            !isMerchant && order.isPaidOnline
+        }
+
         return RouteStop(
             stopNumber = number,
             type = type,
@@ -466,9 +481,9 @@ object RouteStopCalculator {
             isFinished = isFinished,
             phone = phone,
             items = order.items,
-            cashToCollect = if (!isMerchant) order.cashAmountToCollect else 0.0,
-            isCod = !isMerchant && order.isCod,
-            isPaidOnline = !isMerchant && order.isPaidOnline,
+            cashToCollect = stopCashToCollect,
+            isCod = stopIsCod,
+            isPaidOnline = stopIsPaidOnline,
             paymentProviderLabel = order.paymentProviderLabel,
             order = order
         )

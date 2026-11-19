@@ -15,12 +15,44 @@ data class RiderPayPickupRate(
     val perKmExtra: Double = 8.0
 )
 
+data class ParcelServiceFeeConfig(
+    val mode: String = "flat",
+    val value: Double = 0.0
+)
+
+data class ParcelVehicleRates(
+    val baseFare: Double = 55.0,
+    val includedKm: Double = 2.0,
+    val perKm: Double = 12.0,
+    val minFee: Double = 55.0,
+    val maxFee: Double = 0.0,
+    val serviceFee: ParcelServiceFeeConfig = ParcelServiceFeeConfig(),
+    val driverShare: Double = 0.8,
+    val maxWeightKg: Double = 20.0,
+    val peakEnabled: Boolean = false,
+    val peakMultiplier: Double = 1.0,
+    val peakExtra: Double = 0.0,
+    val nightEnabled: Boolean = false,
+    val nightMultiplier: Double = 1.0,
+    val nightExtra: Double = 0.0
+)
+
+data class ParcelRatesConfig(
+    val motorcycle: ParcelVehicleRates = ParcelVehicleRates(
+        baseFare = 55.0, includedKm = 2.0, perKm = 12.0, minFee = 55.0, maxWeightKg = 20.0
+    ),
+    val sedan: ParcelVehicleRates = ParcelVehicleRates(
+        baseFare = 120.0, includedKm = 3.0, perKm = 20.0, minFee = 120.0, maxWeightKg = 150.0
+    )
+)
+
 data class RiderPaySettings(
     val single: RiderPayRate = RiderPayRate(minFare = 45.0, includedKm = 2.0, perKmExtra = 10.0),
     val doubleFirst: RiderPayRate = RiderPayRate(minFare = 40.0, includedKm = 2.0, perKmExtra = 9.0),
     val doubleSecond: RiderPayRate = RiderPayRate(minFare = 35.0, includedKm = 2.0, perKmExtra = 8.0),
     val doubleThird: RiderPayRate = RiderPayRate(minFare = 30.0, includedKm = 2.0, perKmExtra = 8.0),
-    val pickup: RiderPayPickupRate = RiderPayPickupRate(minFare = 15.0, freeKm = 1.0, perKmExtra = 8.0)
+    val pickup: RiderPayPickupRate = RiderPayPickupRate(minFare = 15.0, freeKm = 1.0, perKmExtra = 8.0),
+    val parcelSedan: RiderPayRate = RiderPayRate(minFare = 90.0, includedKm = 3.0, perKmExtra = 18.0)
 )
 
 data class DispatchSettings(
@@ -352,7 +384,7 @@ object BatchConstants {
         }
 
         val rate = if (!isBatch) {
-            paySettings.single
+            if (order.isSedanParcel) paySettings.parcelSedan else paySettings.single
         } else {
             when (rank) {
                 1 -> paySettings.doubleFirst
@@ -746,6 +778,20 @@ object GeneralDispatchEvaluator {
             return InstantDispatchResult(false, "vehicle mismatch (not eligible for $riderVehicleType)")
         }
 
+        if (order.isParcel) {
+            val wantVehicle = order.vehicleType.trim().lowercase(java.util.Locale.US)
+            val haveVehicle = rider.vehicle.type.trim().lowercase(java.util.Locale.US)
+            val parcelVehicleMatched = isParcelVehicleMatch(wantVehicle, haveVehicle)
+            if (!parcelVehicleMatched) {
+                val reason = if (wantVehicle == OrderStepConstants.VEHICLE_SEDAN) {
+                    "Parcel needs a Sedan (4 or 8 wheel car)"
+                } else {
+                    "Parcel needs a Motorcycle"
+                }
+                return InstantDispatchResult(false, reason)
+            }
+        }
+
         // Non-merchant services (parcel & pabili) must NEVER be filtered out by merchant location,
         // merchant radius, or merchant status checks.
         if (order.isNonMerchantService) {
@@ -801,6 +847,24 @@ object GeneralDispatchEvaluator {
             return InstantDispatchResult(false, "waiting for merchant (${order.status})", distKm)
         }
         return InstantDispatchResult(true, null, distKm)
+    }
+
+    fun isParcelVehicleMatch(orderVehicleType: String?, riderVehicleType: String?): Boolean {
+        val want = orderVehicleType?.trim()?.lowercase(java.util.Locale.US).orEmpty()
+        val have = riderVehicleType?.trim()?.lowercase(java.util.Locale.US).orEmpty()
+        return when (want) {
+            OrderStepConstants.VEHICLE_SEDAN -> have in setOf(
+                OrderStepConstants.VEHICLE_CAR4,
+                OrderStepConstants.VEHICLE_CAR8,
+                OrderStepConstants.VEHICLE_SEDAN,
+                "4 seater car",
+                "8 seater car",
+                "4-seater car",
+                "8-seater car"
+            )
+            "", OrderStepConstants.VEHICLE_MOTORCYCLE -> have == OrderStepConstants.VEHICLE_MOTORCYCLE
+            else -> have == want
+        }
     }
 }
 

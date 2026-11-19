@@ -1129,7 +1129,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         triggerVibration()
         val step = order.riderStep.lowercase()
         val isFinal = when (order.serviceType.lowercase()) {
-            OrderStepConstants.SERVICE_PARCEL -> step in listOf(OrderStepConstants.STEP_AT_RECIPIENT, OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER)
+            OrderStepConstants.SERVICE_PARCEL -> order.parcelStepStage == com.example.data.models.ParcelStepStage.AT_RECIPIENT
             OrderStepConstants.SERVICE_PABILI -> order.pabiliStepStage == com.example.data.models.PabiliStepStage.AT_RECIPIENT
             OrderStepConstants.SERVICE_TAXI -> order.taxiStepStage == com.example.data.models.TaxiStepStage.AT_DROPOFF
             else -> step in listOf(OrderStepConstants.STEP_AT_CUSTOMER, OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER)
@@ -1143,10 +1143,17 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     // Show celebration delivery success dialog with accurate codCollected
                     val codAmountFinal = if (order.isCod) order.cashAmountToCollect else 0.0
                     val finalStatus = if (order.isTaxi) OrderStepConstants.STATUS_COMPLETED else OrderStepConstants.STATUS_DELIVERED
+                    val collectedStageFinal = when {
+                        order.isParcel && order.parcelCollectsAtDropoff -> "dropoff"
+                        order.isParcel && order.parcelCollectsAtPickup -> "pickup"
+                        else -> order.cashCollectedStage
+                    }
                     _completedDeliveryOrder.value = order.copy(
                         status = finalStatus,
                         riderStep = OrderStepConstants.STEP_COMPLETED,
-                        codCollected = codAmountFinal
+                        codCollected = codAmountFinal,
+                        cashCollected = if (order.isParcel) codAmountFinal else order.cashCollected,
+                        cashCollectedStage = collectedStageFinal
                     )
                 } else {
                     showSnackbar("Stage updated successfully")

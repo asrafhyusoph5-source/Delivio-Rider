@@ -4,6 +4,9 @@ import android.content.Context
 import com.example.data.constants.BatchConstants
 import com.example.data.constants.DispatchSettings
 import com.example.data.constants.OrderStepConstants
+import com.example.data.constants.ParcelRatesConfig
+import com.example.data.constants.ParcelServiceFeeConfig
+import com.example.data.constants.ParcelVehicleRates
 import com.example.data.constants.RiderPayPickupRate
 import com.example.data.constants.RiderPayRate
 import com.example.data.constants.RiderPaySettings
@@ -89,6 +92,9 @@ class RiderRepository(
 
     private val _riderPaySettings = MutableStateFlow(RiderPaySettings())
     val riderPaySettings: StateFlow<RiderPaySettings> = _riderPaySettings.asStateFlow()
+
+    private val _parcelRatesConfig = MutableStateFlow(ParcelRatesConfig())
+    val parcelRatesConfig: StateFlow<ParcelRatesConfig> = _parcelRatesConfig.asStateFlow()
 
     private val _deliveredOrders = MutableStateFlow<List<Order>>(emptyList())
     val deliveredOrders: StateFlow<List<Order>> = _deliveredOrders.asStateFlow()
@@ -321,6 +327,41 @@ class RiderRepository(
         private val LISTENER_BACKOFF_SECONDS = listOf(2, 5, 10)
     }
 
+    private fun parseParcelVehicleRates(
+        map: Map<*, *>?,
+        defaults: ParcelVehicleRates
+    ): ParcelVehicleRates {
+        if (map == null) return defaults
+        val feeMap = map["serviceFee"] as? Map<*, *>
+        val peakMap = map["peak"] as? Map<*, *>
+        val nightMap = map["night"] as? Map<*, *>
+        val feeMode = (feeMap?.get("mode") ?: map["serviceFeeMode"])?.toString()?.trim()?.ifBlank { defaults.serviceFee.mode } ?: defaults.serviceFee.mode
+        val feeValue = ((feeMap?.get("value") ?: map["serviceFeeValue"]) as? Number)?.toDouble() ?: defaults.serviceFee.value
+        val peakEnabled = (map["peakEnabled"] as? Boolean) ?: (peakMap?.get("enabled") as? Boolean) ?: defaults.peakEnabled
+        val peakMult = ((map["peakMultiplier"] ?: peakMap?.get("multiplier")) as? Number)?.toDouble() ?: defaults.peakMultiplier
+        val peakExtra = ((map["peakExtra"] ?: peakMap?.get("extra")) as? Number)?.toDouble() ?: defaults.peakExtra
+        val nightEnabled = (map["nightEnabled"] as? Boolean) ?: (nightMap?.get("enabled") as? Boolean) ?: defaults.nightEnabled
+        val nightMult = ((map["nightMultiplier"] ?: nightMap?.get("multiplier")) as? Number)?.toDouble() ?: defaults.nightMultiplier
+        val nightExtra = ((map["nightExtra"] ?: nightMap?.get("extra")) as? Number)?.toDouble() ?: defaults.nightExtra
+
+        return ParcelVehicleRates(
+            baseFare = (map["baseFare"] as? Number)?.toDouble() ?: defaults.baseFare,
+            includedKm = (map["includedKm"] as? Number)?.toDouble() ?: defaults.includedKm,
+            perKm = (map["perKm"] as? Number)?.toDouble() ?: defaults.perKm,
+            minFee = (map["minFee"] as? Number)?.toDouble() ?: defaults.minFee,
+            maxFee = (map["maxFee"] as? Number)?.toDouble() ?: defaults.maxFee,
+            serviceFee = ParcelServiceFeeConfig(mode = feeMode, value = feeValue),
+            driverShare = (map["driverShare"] as? Number)?.toDouble() ?: defaults.driverShare,
+            maxWeightKg = (map["maxWeightKg"] as? Number)?.toDouble() ?: defaults.maxWeightKg,
+            peakEnabled = peakEnabled,
+            peakMultiplier = peakMult,
+            peakExtra = peakExtra,
+            nightEnabled = nightEnabled,
+            nightMultiplier = nightMult,
+            nightExtra = nightExtra
+        )
+    }
+
     private fun syncDeliveryRates(cityId: String) {
         if (cityId.isBlank() || cityId == currentRatesCityId) return
         currentRatesCityId = cityId
@@ -336,6 +377,7 @@ class RiderRepository(
                         val secondMap = doubleMap?.get("second") as? Map<*, *>
                         val thirdMap = doubleMap?.get("third") as? Map<*, *>
                         val pickupMap = payMap["pickup"] as? Map<*, *>
+                        val parcelSedanMap = payMap["parcelSedan"] as? Map<*, *>
 
                         _riderPaySettings.value = RiderPaySettings(
                             single = RiderPayRate(
@@ -362,7 +404,21 @@ class RiderRepository(
                                 minFare = (pickupMap?.get("minFare") as? Number)?.toDouble() ?: 15.0,
                                 freeKm = (pickupMap?.get("freeKm") as? Number)?.toDouble() ?: 1.0,
                                 perKmExtra = (pickupMap?.get("perKmExtra") as? Number)?.toDouble() ?: 8.0
+                            ),
+                            parcelSedan = RiderPayRate(
+                                minFare = (parcelSedanMap?.get("minFare") as? Number)?.toDouble() ?: 90.0,
+                                includedKm = (parcelSedanMap?.get("includedKm") as? Number)?.toDouble() ?: 3.0,
+                                perKmExtra = (parcelSedanMap?.get("perKmExtra") as? Number)?.toDouble() ?: 18.0
                             )
+                        )
+                    }
+
+                    val parcelMap = doc.get("parcel") as? Map<*, *>
+                    if (parcelMap != null) {
+                        val defaultConfig = ParcelRatesConfig()
+                        _parcelRatesConfig.value = ParcelRatesConfig(
+                            motorcycle = parseParcelVehicleRates(parcelMap["motorcycle"] as? Map<*, *>, defaultConfig.motorcycle),
+                            sedan = parseParcelVehicleRates(parcelMap["sedan"] as? Map<*, *>, defaultConfig.sedan)
                         )
                     }
                 }
@@ -1532,14 +1588,15 @@ class RiderRepository(
                     throw FirebaseFirestoreException("Order not available", FirebaseFirestoreException.Code.ABORTED)
                 }
                 val docServiceType = (snapshot.getString("serviceType") ?: order.serviceType).lowercase().trim()
-                if (docServiceType == OrderStepConstants.SERVICE_PABILI) {
+                if (docServiceType == OrderStepConstants.SERVICE_PABILI || docServiceType == OrderStepConstants.SERVICE_PARCEL) {
                     val dbStatus = snapshot.getString("status")?.trim().orEmpty()
                     val isPlacedOrder = dbStatus.isBlank() ||
                         dbStatus.equals(OrderStepConstants.STATUS_PLACED_ORDER, ignoreCase = true)
                     if (!isPlacedOrder) {
+                        val serviceLabel = if (docServiceType == OrderStepConstants.SERVICE_PARCEL) "Parcel" else "Pabili"
                         android.util.Log.w(
                             "STATUS",
-                            "Skipped Pabili accept for order=${order.id}: expected='${OrderStepConstants.STATUS_PLACED_ORDER}', actual='$dbStatus'"
+                            "Skipped $serviceLabel accept for order=${order.id}: expected='${OrderStepConstants.STATUS_PLACED_ORDER}', actual='$dbStatus'"
                         )
                         throw FirebaseFirestoreException(
                             "Order already accepted (status: $dbStatus)",
@@ -1747,6 +1804,7 @@ class RiderRepository(
         val nextStatus: String
         var nextReqStatus: String? = null
         var pabiliExpectedPrevStatus: String? = null
+        var parcelExpectedPrevStatus: String? = null
 
         when (serviceType) {
             OrderStepConstants.SERVICE_TAXI -> {
@@ -1788,27 +1846,51 @@ class RiderRepository(
                 }
             }
             OrderStepConstants.SERVICE_PARCEL -> {
-                when (currentStep) {
-                    OrderStepConstants.STEP_TO_SENDER, OrderStepConstants.STEP_HEADING_TO_MERCHANT -> {
-                        nextStep = OrderStepConstants.STEP_AT_SENDER
-                        nextStatus = OrderStepConstants.STATUS_ARRIVED_AT_SENDER
+                val stage = order.parcelStepStage
+                val spec = ParcelFlowRules.transitionFor(stage)
+                if (spec == null) {
+                    android.util.Log.w("STATUS", "Skipped Parcel step update for order=${order.id}: already COMPLETED (status='${order.status}')")
+                    return
+                }
+                parcelExpectedPrevStatus = spec.expectedPrevStatus
+                nextStep = spec.nextStep
+                nextStatus = spec.nextStatus
+                when (stage) {
+                    ParcelStepStage.TO_SENDER -> {
+                        updates["arrivedAtPickupAt"] = FieldValue.serverTimestamp()
                         updates["arrivedMerchantAt"] = FieldValue.serverTimestamp()
                     }
-                    OrderStepConstants.STEP_AT_SENDER, OrderStepConstants.STEP_ARRIVED_AT_MERCHANT -> {
-                        nextStep = OrderStepConstants.STEP_TO_RECIPIENT
-                        nextStatus = OrderStepConstants.STATUS_RIDER_ON_WAY_RECIPIENT
+                    ParcelStepStage.AT_SENDER -> {
                         updates["pickedUpAt"] = FieldValue.serverTimestamp()
+                        if (order.parcelCollectsAtPickup) {
+                            val collectedAmount = order.cashAmountToCollect
+                            updates["cashCollected"] = collectedAmount
+                            updates["cashCollectedStage"] = "pickup"
+                            updates["cashCollectedAt"] = FieldValue.serverTimestamp()
+                            updates["codCollected"] = collectedAmount
+                        }
                     }
-                    OrderStepConstants.STEP_TO_RECIPIENT, OrderStepConstants.STEP_HEADING_TO_CUSTOMER, OrderStepConstants.STEP_PICKED_UP -> {
-                        nextStep = OrderStepConstants.STEP_AT_RECIPIENT
-                        nextStatus = OrderStepConstants.STATUS_ARRIVED_AT_RECIPIENT
+                    ParcelStepStage.TO_RECIPIENT -> {
+                        updates["arrivedAtDropoffAt"] = FieldValue.serverTimestamp()
                         updates["arrivedCustomerAt"] = FieldValue.serverTimestamp()
                     }
-                    else -> { // at_recipient -> completed
-                        nextStep = OrderStepConstants.STEP_COMPLETED
-                        nextStatus = OrderStepConstants.STATUS_DELIVERED
+                    ParcelStepStage.AT_RECIPIENT -> {
                         updates["deliveredAt"] = FieldValue.serverTimestamp()
+                        if (order.parcelCollectsAtDropoff) {
+                            val collectedAmount = order.cashAmountToCollect
+                            updates["cashCollected"] = collectedAmount
+                            updates["cashCollectedStage"] = "dropoff"
+                            updates["cashCollectedAt"] = FieldValue.serverTimestamp()
+                            updates["codCollected"] = collectedAmount
+                        } else if (!order.parcelCollectsAtPickup) {
+                            updates["cashCollected"] = 0.0
+                        }
                     }
+                    ParcelStepStage.COMPLETED -> {}
+                }
+                if (!inFlightAdvanceOrderIds.add(order.id)) {
+                    android.util.Log.w("STATUS", "Skipped duplicate in-flight Parcel tap for order=${order.id} (stage=$stage)")
+                    return
                 }
             }
             OrderStepConstants.SERVICE_PABILI -> {
@@ -2062,8 +2144,12 @@ class RiderRepository(
                     }
                 } else null
 
-                if (serviceType == OrderStepConstants.SERVICE_PABILI && pabiliExpectedPrevStatus != null) {
-                    val expectedStatus = pabiliExpectedPrevStatus!!
+                val expectedTxPrevStatus = when (serviceType) {
+                    OrderStepConstants.SERVICE_PABILI -> pabiliExpectedPrevStatus
+                    OrderStepConstants.SERVICE_PARCEL -> parcelExpectedPrevStatus
+                    else -> null
+                }
+                if (expectedTxPrevStatus != null) {
                     val nextOrderRef = nextOrderToPromote?.let { db.collection("orders").document(it.id) }
                     val promoteUpdates = if (nextOrderToPromote != null) {
                         mapOf<String, Any>(
@@ -2082,10 +2168,16 @@ class RiderRepository(
                         val snap = tx.get(orderRef)
                         val nextSnap = nextOrderRef?.let { tx.get(it) }
                         val actualDbStatus = snap.getString("status")?.trim().orEmpty()
-                        if (!PabiliFlowRules.isExpectedStatus(actualDbStatus, expectedStatus)) {
+                        val matches = if (serviceType == OrderStepConstants.SERVICE_PARCEL) {
+                            ParcelFlowRules.isExpectedStatus(actualDbStatus, expectedTxPrevStatus)
+                        } else {
+                            PabiliFlowRules.isExpectedStatus(actualDbStatus, expectedTxPrevStatus)
+                        }
+                        if (!matches) {
+                            val tagLabel = if (serviceType == OrderStepConstants.SERVICE_PARCEL) "Parcel" else "Pabili"
                             android.util.Log.w(
                                 "STATUS",
-                                "Skipped Pabili delivery write for order=${order.id}: expected='$expectedStatus', actual='$actualDbStatus', target='$nextStatus'"
+                                "Skipped $tagLabel delivery write for order=${order.id}: expected='$expectedTxPrevStatus', actual='$actualDbStatus', target='$nextStatus'"
                             )
                             throw FirebaseFirestoreException(
                                 "Skipped out-of-order status update (current: $actualDbStatus)",
@@ -2150,15 +2242,27 @@ class RiderRepository(
                         .addOnFailureListener { onError(it.localizedMessage ?: "Failed to complete delivery") }
                 }
             }
-        } else if (serviceType == OrderStepConstants.SERVICE_PABILI && pabiliExpectedPrevStatus != null) {
-            val expectedStatus = pabiliExpectedPrevStatus!!
+        } else if ((serviceType == OrderStepConstants.SERVICE_PABILI && pabiliExpectedPrevStatus != null) ||
+            (serviceType == OrderStepConstants.SERVICE_PARCEL && parcelExpectedPrevStatus != null)
+        ) {
+            val expectedStatus = if (serviceType == OrderStepConstants.SERVICE_PARCEL) {
+                parcelExpectedPrevStatus!!
+            } else {
+                pabiliExpectedPrevStatus!!
+            }
             db.runTransaction { tx ->
                 val snap = tx.get(orderRef)
                 val actualDbStatus = snap.getString("status")?.trim().orEmpty()
-                if (!PabiliFlowRules.isExpectedStatus(actualDbStatus, expectedStatus)) {
+                val matches = if (serviceType == OrderStepConstants.SERVICE_PARCEL) {
+                    ParcelFlowRules.isExpectedStatus(actualDbStatus, expectedStatus)
+                } else {
+                    PabiliFlowRules.isExpectedStatus(actualDbStatus, expectedStatus)
+                }
+                if (!matches) {
+                    val tagLabel = if (serviceType == OrderStepConstants.SERVICE_PARCEL) "Parcel" else "Pabili"
                     android.util.Log.w(
                         "STATUS",
-                        "Skipped Pabili step write for order=${order.id}: expected='$expectedStatus', actual='$actualDbStatus', target='$nextStatus'"
+                        "Skipped $tagLabel step write for order=${order.id}: expected='$expectedStatus', actual='$actualDbStatus', target='$nextStatus'"
                     )
                     throw FirebaseFirestoreException(
                         "Skipped out-of-order status update (current: $actualDbStatus)",
@@ -2174,13 +2278,19 @@ class RiderRepository(
                         it.copy(
                             riderStep = nextStep,
                             status = nextStatus,
+                            arrivedAtPickupAt = if (updates.containsKey("arrivedAtPickupAt")) nowTs else it.arrivedAtPickupAt,
                             arrivedMerchantAt = if (updates.containsKey("arrivedMerchantAt")) nowTs else it.arrivedMerchantAt,
                             pickedUpAt = if (updates.containsKey("pickedUpAt")) nowTs else it.pickedUpAt,
+                            arrivedAtDropoffAt = if (updates.containsKey("arrivedAtDropoffAt")) nowTs else it.arrivedAtDropoffAt,
                             arrivedCustomerAt = if (updates.containsKey("arrivedCustomerAt")) nowTs else it.arrivedCustomerAt,
                             paidOnMerchant = (updates["paidOnMerchant"] as? Double) ?: it.paidOnMerchant,
                             finalReceiptTotal = (updates["finalReceiptTotal"] as? Double) ?: it.finalReceiptTotal,
                             paidOnMerchantAt = if (updates.containsKey("paidOnMerchantAt")) nowTs else it.paidOnMerchantAt,
-                            overBudgetApproved = (updates["overBudgetApproved"] as? Boolean) ?: it.overBudgetApproved
+                            overBudgetApproved = (updates["overBudgetApproved"] as? Boolean) ?: it.overBudgetApproved,
+                            cashCollected = (updates["cashCollected"] as? Double) ?: it.cashCollected,
+                            cashCollectedStage = (updates["cashCollectedStage"] as? String) ?: it.cashCollectedStage,
+                            cashCollectedAt = if (updates.containsKey("cashCollectedAt")) nowTs else it.cashCollectedAt,
+                            codCollected = (updates["codCollected"] as? Double) ?: it.codCollected
                         )
                     } else it
                 }

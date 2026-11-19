@@ -793,5 +793,439 @@ class OrderDetailsSheetUiTest {
         composeRule.waitForIdle()
         assertTrue(completed)
     }
+
+    private fun sampleParcelOrder(
+        status: String = OrderStepConstants.STATUS_RIDER_ON_WAY_SENDER,
+        riderStep: String = OrderStepConstants.STEP_TO_SENDER,
+        vehicleType: String = OrderStepConstants.VEHICLE_SEDAN,
+        feePayer: String = "sender",
+        paymentMethod: String = "cod",
+        cashToCollect: Double = 120.0
+    ) = Order(
+        id = "ord_parcel_1",
+        orderNumber = "P902",
+        serviceType = OrderStepConstants.SERVICE_PARCEL,
+        status = status,
+        riderStep = riderStep,
+        vehicleType = vehicleType,
+        senderName = "Carlos Mendoza",
+        merchantName = "Carlos Mendoza",
+        merchantPhone = "09171110001",
+        merchantAddress = "14 Rizal Ave, Brgy Tanglaw, Brgy Tanglaw, Puerto Princesa",
+        merchantLat = 9.7405,
+        merchantLng = 118.7351,
+        pickupNote = "Call when at the gate",
+        customerName = "Lucia Santos",
+        customerPhone = "09182220002",
+        customerAddress = "99 Valencia St, Brgy San Pedro, Puerto Princesa",
+        customerArea = "San Pedro",
+        customerLat = 9.7510,
+        customerLng = 118.7425,
+        customerNotes = "Hand over to front desk guard",
+        parcelSize = "Medium",
+        parcelWeightKg = 4.5,
+        parcelItemDescription = "Framed painting and books",
+        parcelFragile = true,
+        parcelFeePayer = feePayer,
+        cashCollectAt = feePayer,
+        paymentMethod = paymentMethod,
+        cashToCollect = cashToCollect,
+        riderFeeEstimate = 110.0
+    )
+
+    @Test
+    fun parcelStep1_showsPickupOnlyCompactCardSenderPaymentInlineNavigateAndPressButton() {
+        val order = sampleParcelOrder(feePayer = "sender", paymentMethod = "cod", cashToCollect = 120.0)
+        val stops = RouteStopCalculator.computeBatchStops(listOf(order), 9.7392, 118.7353)
+        var advances = 0
+        var calledName = ""
+        var calledPhone = ""
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                OrderDetailsSheet(
+                    batchStops = stops,
+                    currentStop = stops.first { !it.isFinished },
+                    activeOrders = listOf(order),
+                    isOnline = true,
+                    walletBalance = 0.0,
+                    todayEarnings = 0.0,
+                    todayTrips = 0,
+                    currencySymbol = "₱",
+                    supportPhone = null,
+                    routeDistanceKm = 1.6,
+                    routeEtaMinutes = 7,
+                    sheetState = OrderSheetState.EXPANDED,
+                    onGoOnlineClick = {},
+                    onAdvanceStep = { _, _ -> advances += 1 },
+                    onReleaseOrder = {},
+                    onReportProblem = {},
+                    onCallClick = { name, phone ->
+                        calledName = name
+                        calledPhone = phone
+                    }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        // Step chip is clickable
+        composeRule.onNodeWithTag("parcel_trip_details_chip").assertIsDisplayed()
+        composeRule.onNodeWithText("Stop 1 of 2 - Pick up").assertIsDisplayed()
+
+        // Standalone top Navigate button is hidden; inline Navigate sits beside Help
+        composeRule.onNodeWithTag("navigate_stop_button").assertDoesNotExist()
+        composeRule.onNodeWithTag("parcel_inline_navigate_button").performScrollTo().assertIsDisplayed()
+
+        // Pickup-only card with deduplicated full address & pickup note (no dropoff address or items list)
+        composeRule.onNodeWithText("No item list provided").assertDoesNotExist()
+        composeRule.onNodeWithTag("parcel_stop_details_card").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("PICKUP").assertIsDisplayed()
+        composeRule.onNodeWithText("14 Rizal Ave, Brgy Tanglaw, Puerto Princesa").assertIsDisplayed()
+        composeRule.onNodeWithText("Call when at the gate").assertIsDisplayed()
+        composeRule.onNodeWithText("99 Valencia St, Brgy San Pedro, Puerto Princesa").assertDoesNotExist()
+
+        // Compact Parcel Info Card
+        composeRule.onNodeWithTag("parcel_info_card").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Medium").assertIsDisplayed()
+        composeRule.onNodeWithText("4.5 kg").assertIsDisplayed()
+        composeRule.onNodeWithTag("parcel_fragile_badge").assertIsDisplayed()
+        composeRule.onNodeWithText("Framed painting and books").assertIsDisplayed()
+
+        // Payment line for sender COD at pickup
+        composeRule.onNodeWithText("Collect ₱120 cash from the sender").performScrollTo().assertIsDisplayed()
+
+        // Call dials pickup.phone
+        composeRule.onNodeWithTag("sheet_call_button").performScrollTo().performClick()
+        composeRule.waitForIdle()
+        assertEquals("Carlos Mendoza", calledName)
+        assertEquals("09171110001", calledPhone)
+
+        // Full-width yellow press button "Arrived at the Sender"
+        composeRule.onNodeWithTag("sheet_slide_button").assertDoesNotExist()
+        composeRule.onNodeWithTag("parcel_press_action_button").assertIsDisplayed()
+        composeRule.onNodeWithText("Arrived at the Sender").assertIsDisplayed()
+        composeRule.onNodeWithTag("parcel_press_action_button").performClick()
+        composeRule.waitForIdle()
+        assertEquals(1, advances)
+    }
+
+    @Test
+    fun parcelStep2_slideOpensSenderCashDialogWithoutPickupChecklist() {
+        val senderPaysOrder = sampleParcelOrder(
+            status = OrderStepConstants.STATUS_ARRIVED_AT_SENDER,
+            riderStep = OrderStepConstants.STEP_AT_SENDER,
+            feePayer = "sender",
+            paymentMethod = "cod",
+            cashToCollect = 120.0
+        )
+        val stops = RouteStopCalculator.computeBatchStops(listOf(senderPaysOrder), 9.7405, 118.7351)
+        var pickedUpConfirmed = false
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                OrderDetailsSheet(
+                    batchStops = stops,
+                    currentStop = stops.first { !it.isFinished },
+                    activeOrders = listOf(senderPaysOrder),
+                    isOnline = true,
+                    walletBalance = 0.0,
+                    todayEarnings = 0.0,
+                    todayTrips = 0,
+                    currencySymbol = "₱",
+                    supportPhone = null,
+                    sheetState = OrderSheetState.EXPANDED,
+                    onGoOnlineClick = {},
+                    onAdvanceStep = { _, _ -> pickedUpConfirmed = true },
+                    onReleaseOrder = {},
+                    onReportProblem = {},
+                    onCallClick = { _, _ -> }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("Slide to confirm Picked Up").assertIsDisplayed()
+        composeRule.onNodeWithTag("slide_confirm_thumb", useUnmergedTree = true).performTouchInput {
+            swipeRight(startX = centerX, endX = centerX + 1500f, durationMillis = 300)
+        }
+        composeRule.waitForIdle()
+
+        // No Pick up Checklist dialog; ParcelCashDialog opens requiring checkbox
+        composeRule.onNodeWithText("Pick up Checklist").assertDoesNotExist()
+        composeRule.onNodeWithTag("parcel_cash_dialog").assertIsDisplayed()
+        composeRule.onNodeWithText("COD Cash Collection").assertIsDisplayed()
+        composeRule.onNodeWithText("₱120.00").assertIsDisplayed()
+        composeRule.onNodeWithTag("parcel_cash_confirm_button").assertIsNotEnabled()
+
+        composeRule.onNodeWithTag("cod_confirm_checkbox_row").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("parcel_cash_confirm_button").assertIsEnabled()
+        composeRule.onNodeWithTag("parcel_cash_confirm_button").performClick()
+        composeRule.waitForIdle()
+        assertTrue(pickedUpConfirmed)
+    }
+
+    @Test
+    fun parcelStep2_recipientPaysShowsNoCashCollectedFromSender() {
+        val recipientPaysOrder = sampleParcelOrder(
+            status = OrderStepConstants.STATUS_ARRIVED_AT_SENDER,
+            riderStep = OrderStepConstants.STEP_AT_SENDER,
+            feePayer = "recipient",
+            paymentMethod = "cod",
+            cashToCollect = 120.0
+        )
+        val stops = RouteStopCalculator.computeBatchStops(listOf(recipientPaysOrder), 9.7405, 118.7351)
+        var pickedUpConfirmed = false
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                OrderDetailsSheet(
+                    batchStops = stops,
+                    currentStop = stops.first { !it.isFinished },
+                    activeOrders = listOf(recipientPaysOrder),
+                    isOnline = true,
+                    walletBalance = 0.0,
+                    todayEarnings = 0.0,
+                    todayTrips = 0,
+                    currencySymbol = "₱",
+                    supportPhone = null,
+                    sheetState = OrderSheetState.EXPANDED,
+                    onGoOnlineClick = {},
+                    onAdvanceStep = { _, _ -> pickedUpConfirmed = true },
+                    onReleaseOrder = {},
+                    onReportProblem = {},
+                    onCallClick = { _, _ -> }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("No cash to collect").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("slide_confirm_thumb", useUnmergedTree = true).performTouchInput {
+            swipeRight(startX = centerX, endX = centerX + 1500f, durationMillis = 300)
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("No Cash Collected").assertIsDisplayed()
+        composeRule.onNodeWithText("No cash to collect from the sender").assertIsDisplayed()
+        composeRule.onNodeWithTag("parcel_cash_confirm_button").assertIsEnabled()
+        composeRule.onNodeWithTag("parcel_cash_confirm_button").performClick()
+        composeRule.waitForIdle()
+        assertTrue(pickedUpConfirmed)
+    }
+
+    @Test
+    fun parcelStep3AndStep4_showDropoffOnlyRecipientCallPressAndCashDialogs() {
+        // Step 3: recipient pays COD -> shows recipient drop-off details, dropoff Call, "Arrived at the Recipient"
+        val step3Order = sampleParcelOrder(
+            status = OrderStepConstants.STATUS_RIDER_ON_WAY_RECIPIENT,
+            riderStep = OrderStepConstants.STEP_TO_RECIPIENT,
+            feePayer = "recipient",
+            paymentMethod = "cod",
+            cashToCollect = 120.0
+        )
+        val step3Stops = RouteStopCalculator.computeBatchStops(listOf(step3Order), 9.7405, 118.7351)
+        var step3Advanced = false
+        var calledName = ""
+        var calledPhone = ""
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                OrderDetailsSheet(
+                    batchStops = step3Stops,
+                    currentStop = step3Stops.first { !it.isFinished },
+                    activeOrders = listOf(step3Order),
+                    isOnline = true,
+                    walletBalance = 0.0,
+                    todayEarnings = 0.0,
+                    todayTrips = 0,
+                    currencySymbol = "₱",
+                    supportPhone = null,
+                    sheetState = OrderSheetState.EXPANDED,
+                    onGoOnlineClick = {},
+                    onAdvanceStep = { _, _ -> step3Advanced = true },
+                    onReleaseOrder = {},
+                    onReportProblem = {},
+                    onCallClick = { name, phone ->
+                        calledName = name
+                        calledPhone = phone
+                    }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("Stop 2 of 2 - Drop off").assertIsDisplayed()
+        composeRule.onNodeWithText("DROP-OFF").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("99 Valencia St, Brgy San Pedro, Puerto Princesa").assertIsDisplayed()
+        composeRule.onNodeWithText("Hand over to front desk guard").assertIsDisplayed()
+        composeRule.onNodeWithText("14 Rizal Ave, Brgy Tanglaw, Puerto Princesa").assertDoesNotExist()
+        composeRule.onNodeWithText("Collect ₱120 cash from the recipient").performScrollTo().assertIsDisplayed()
+
+        composeRule.onNodeWithTag("sheet_call_button").performScrollTo().performClick()
+        composeRule.waitForIdle()
+        assertEquals("Lucia Santos", calledName)
+        assertEquals("09182220002", calledPhone)
+
+        composeRule.onNodeWithText("Arrived at the Recipient").assertIsDisplayed()
+        composeRule.onNodeWithTag("parcel_press_action_button").performClick()
+        composeRule.waitForIdle()
+        assertTrue(step3Advanced)
+    }
+
+    @Test
+    fun parcelStep4_walletOrSenderPaysShowsNoCashCollectedFromRecipient() {
+        val step4Order = sampleParcelOrder(
+            status = OrderStepConstants.STATUS_ARRIVED_AT_RECIPIENT,
+            riderStep = OrderStepConstants.STEP_AT_RECIPIENT,
+            feePayer = "sender",
+            paymentMethod = "cod",
+            cashToCollect = 120.0
+        )
+        val stops = RouteStopCalculator.computeBatchStops(listOf(step4Order), 9.7510, 118.7425)
+        var delivered = false
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                OrderDetailsSheet(
+                    batchStops = stops,
+                    currentStop = stops.first { !it.isFinished },
+                    activeOrders = listOf(step4Order),
+                    isOnline = true,
+                    walletBalance = 0.0,
+                    todayEarnings = 0.0,
+                    todayTrips = 0,
+                    currencySymbol = "₱",
+                    supportPhone = null,
+                    sheetState = OrderSheetState.EXPANDED,
+                    onGoOnlineClick = {},
+                    onAdvanceStep = { _, _ -> delivered = true },
+                    onReleaseOrder = {},
+                    onReportProblem = {},
+                    onCallClick = { _, _ -> }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("No cash to collect").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Slide to Confirm Delivery").assertIsDisplayed()
+        composeRule.onNodeWithTag("slide_confirm_thumb", useUnmergedTree = true).performTouchInput {
+            swipeRight(startX = centerX, endX = centerX + 1500f, durationMillis = 300)
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("No Cash Collected").assertIsDisplayed()
+        composeRule.onNodeWithText("No cash to collect from the recipient").assertIsDisplayed()
+        composeRule.onNodeWithText("Confirm Delivery").assertIsDisplayed()
+        composeRule.onNodeWithTag("parcel_cash_confirm_button").performClick()
+        composeRule.waitForIdle()
+        assertTrue(delivered)
+    }
+
+    @Test
+    fun parcelTripDetailsPage_opensFromStepChipShowsFourCardsAndDismissesOnBack() {
+        val order = sampleParcelOrder(
+            vehicleType = OrderStepConstants.VEHICLE_SEDAN,
+            feePayer = "recipient",
+            paymentMethod = "cod",
+            cashToCollect = 180.0
+        )
+        val stops = RouteStopCalculator.computeBatchStops(listOf(order), 9.7392, 118.7353)
+        var calledPhone = ""
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                OrderDetailsSheet(
+                    batchStops = stops,
+                    currentStop = stops.first { !it.isFinished },
+                    activeOrders = listOf(order),
+                    isOnline = true,
+                    walletBalance = 0.0,
+                    todayEarnings = 0.0,
+                    todayTrips = 0,
+                    currencySymbol = "₱",
+                    supportPhone = null,
+                    sheetState = OrderSheetState.EXPANDED,
+                    onGoOnlineClick = {},
+                    onAdvanceStep = { _, _ -> },
+                    onReleaseOrder = {},
+                    onReportProblem = {},
+                    onCallClick = { _, phone -> calledPhone = phone }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        // Tap clickable step chip
+        composeRule.onNodeWithTag("parcel_trip_details_chip").performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("parcel_trip_details_page").assertIsDisplayed()
+        composeRule.onNodeWithText("Trip details").assertIsDisplayed()
+        composeRule.onNodeWithTag("trip_details_order_number").assertIsDisplayed()
+
+        // 4 Cards: PICKUP, DROP-OFF, PARCEL, PAYMENT
+        composeRule.onNodeWithTag("trip_details_pickup_card").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("trip_details_dropoff_card").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("trip_details_parcel_card").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Sedan").assertIsDisplayed()
+        composeRule.onNodeWithTag("trip_details_payment_card").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Recipient").assertIsDisplayed()
+        composeRule.onNodeWithText("₱180").assertIsDisplayed()
+
+        // Call drop-off button dials recipient phone
+        composeRule.onNodeWithTag("trip_details_dropoff_call_button").performScrollTo().performClick()
+        composeRule.waitForIdle()
+        assertEquals("09182220002", calledPhone)
+
+        // Back button closes Trip details page
+        composeRule.onNodeWithTag("parcel_trip_details_back_button").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("parcel_trip_details_page").assertDoesNotExist()
+    }
+
+    @Test
+    fun parcelCollapsedState_showsOnlyStopPersonName() {
+        val order = sampleParcelOrder()
+        val stops = RouteStopCalculator.computeBatchStops(listOf(order), 9.7392, 118.7353)
+        var currentState = OrderSheetState.COLLAPSED
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                OrderDetailsSheet(
+                    batchStops = stops,
+                    currentStop = stops.first { !it.isFinished },
+                    activeOrders = listOf(order),
+                    isOnline = true,
+                    walletBalance = 0.0,
+                    todayEarnings = 0.0,
+                    todayTrips = 0,
+                    currencySymbol = "₱",
+                    supportPhone = null,
+                    sheetState = OrderSheetState.COLLAPSED,
+                    onSheetStateChange = { currentState = it },
+                    onGoOnlineClick = {},
+                    onAdvanceStep = { _, _ -> },
+                    onReleaseOrder = {},
+                    onReportProblem = {},
+                    onCallClick = { _, _ -> }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("collapsed_trip_bar").assertIsDisplayed()
+        composeRule.onNodeWithText("Carlos Mendoza").assertIsDisplayed()
+        composeRule.onNodeWithTag("parcel_press_action_button").assertDoesNotExist()
+        composeRule.onNodeWithTag("parcel_inline_navigate_button").assertDoesNotExist()
+        composeRule.onNodeWithTag("parcel_trip_details_chip").assertDoesNotExist()
+
+        composeRule.onNodeWithTag("collapsed_trip_bar").performClick()
+        composeRule.waitForIdle()
+        assertEquals(OrderSheetState.EXPANDED, currentState)
+    }
 }
+
 
