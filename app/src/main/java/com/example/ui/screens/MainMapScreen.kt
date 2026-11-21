@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.sp
 import com.example.data.constants.OrderStepConstants
 import com.example.data.models.OfferBundle
 import com.example.data.models.OfferType
+import com.example.data.models.Order
 import com.example.data.models.OrderPayBreakdown
 import com.example.data.models.OsrmManeuver
 import com.example.data.models.OsrmRouteResult
@@ -107,6 +108,7 @@ fun MainMapScreen(
     val lastTaxiDiagnostics by viewModel.lastTaxiDiagnostics.collectAsState()
     var showHeadsetMenuDialog by remember { mutableStateOf(false) }
     var showDispatchStatusSheet by remember { mutableStateOf(false) }
+    var pendingReleaseTarget by remember { mutableStateOf<Pair<Order, String>?>(null) }
 
     LaunchedEffect(isOnline) {
         if (!isOnline) {
@@ -634,7 +636,12 @@ fun MainMapScreen(
                     onAdvanceStepWithApproval = { receiptTotal, overBudgetApproved, orderId ->
                         viewModel.advanceCurrentOrderStep(receiptTotal, orderId, overBudgetApproved)
                     },
-                    onReleaseOrder = { reason -> viewModel.releaseOrder(reason) },
+                    onReleaseOrder = { reason ->
+                        viewModel.releaseOrder(reason = reason, orderId = currentStop?.orderId)
+                    },
+                    onReleaseOrderWithType = { orderId, reportType, reason ->
+                        viewModel.releaseOrder(reason = reason, reportType = reportType, orderId = orderId)
+                    },
                     onReportProblem = { reason ->
                         currentStop?.orderId?.let { viewModel.reportProblem(it, reason) }
                     },
@@ -825,7 +832,29 @@ fun MainMapScreen(
                             onOpenSupport()
                         }
                     },
+                    onOpenReleaseDialog = { order, initialReportType ->
+                        showHeadsetMenuDialog = false
+                        pendingReleaseTarget = order to initialReportType
+                    },
                     onDismiss = { showHeadsetMenuDialog = false }
+                )
+            }
+
+            // Release Order Dialog triggered from Headset menu
+            pendingReleaseTarget?.let { (targetOrder, initialReportType) ->
+                ReleaseOrderDialog(
+                    order = targetOrder,
+                    stopName = currentStop?.name ?: targetOrder.displayPickupName,
+                    initialReportType = initialReportType,
+                    onConfirmRelease = { reportType, reason ->
+                        pendingReleaseTarget = null
+                        viewModel.releaseOrder(
+                            reason = reason,
+                            reportType = reportType,
+                            orderId = targetOrder.id
+                        )
+                    },
+                    onDismiss = { pendingReleaseTarget = null }
                 )
             }
 

@@ -80,7 +80,8 @@ fun OrderDetailsSheet(
     onGoOnlineClick: () -> Unit,
     onAdvanceStep: (Double?, String?) -> Unit,
     onAdvanceStepWithApproval: ((Double?, Boolean, String?) -> Unit)? = null,
-    onReleaseOrder: (String) -> Unit,
+    onReleaseOrder: (String) -> Unit = {},
+    onReleaseOrderWithType: ((orderId: String, reportType: String, reason: String) -> Unit)? = null,
     onReportProblem: (String) -> Unit,
     onCallClick: (String, String) -> Unit,
     onChatClick: (Order) -> Unit = {},
@@ -114,6 +115,7 @@ fun OrderDetailsSheet(
 
     var showProblemDialog by remember { mutableStateOf(false) }
     var problemReason by remember { mutableStateOf("Merchant delay / waiting") }
+    var showReleaseOrderDialog by remember(currentStop?.orderId) { mutableStateOf(false) }
 
     // Dialogs for Slide / Press confirmations
     var showItemChecklistDialog by remember { mutableStateOf(false) }
@@ -414,6 +416,7 @@ fun OrderDetailsSheet(
                         onHeadsetClick = onHeadsetClick,
                         onCollapse = { transitionState(OrderSheetState.COLLAPSED) },
                         onReportProblemClick = { showProblemDialog = true },
+                        onReleaseOrderClick = { showReleaseOrderDialog = true },
                         onTaxiPressAction = {
                             val stage = currentStop.order.taxiStepStage
                             val needsFarCheck = stage == TaxiStepStage.TO_PICKUP ||
@@ -619,6 +622,288 @@ fun OrderDetailsSheet(
                 }
             }
         )
+    }
+
+    // Release Order Dialog (CR Cancellation / Close restaurant before pickup)
+    if (showReleaseOrderDialog && currentStop != null && OrderReleaseRules.canReleaseBeforePickup(currentStop.order)) {
+        ReleaseOrderDialog(
+            order = currentStop.order,
+            stopName = currentStop.name,
+            onConfirmRelease = { reportType, reason ->
+                showReleaseOrderDialog = false
+                if (onReleaseOrderWithType != null) {
+                    onReleaseOrderWithType(currentStop.order.id, reportType, reason)
+                } else {
+                    onReleaseOrder(reason)
+                }
+            },
+            onDismiss = { showReleaseOrderDialog = false }
+        )
+    }
+}
+
+@Composable
+fun ReleaseOrderDialog(
+    order: Order,
+    stopName: String,
+    initialReportType: String = OrderReleaseRules.REPORT_TYPE_CR_CANCELLATION,
+    onConfirmRelease: (reportType: String, reason: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val canCloseRestaurant = OrderReleaseRules.supportsCloseRestaurant(order)
+    var selectedReportType by remember(order.id, initialReportType) {
+        mutableStateOf(
+            if (initialReportType == OrderReleaseRules.REPORT_TYPE_CLOSE_RESTAURANT && canCloseRestaurant) {
+                OrderReleaseRules.REPORT_TYPE_CLOSE_RESTAURANT
+            } else {
+                OrderReleaseRules.REPORT_TYPE_CR_CANCELLATION
+            }
+        )
+    }
+    val crReasons = listOf(
+        "Long wait at pickup",
+        "Vehicle or safety issue",
+        "Wrong pin / Unreachable",
+        "Unable to fulfill order"
+    )
+    var selectedCrReason by remember(order.id) { mutableStateOf(crReasons.first()) }
+    var noteInput by remember(order.id) { mutableStateOf("") }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Card(
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+            modifier = Modifier
+                .fillMaxWidth(0.92f)
+                .wrapContentHeight()
+                .testTag("release_order_dialog")
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Cancel,
+                        contentDescription = "Release order",
+                        tint = DelivioRed,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Cancel / Release Order",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Black,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "${order.displayOrderNumber} • $stopName",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                Text(
+                    text = "Select action",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+
+                val isCrSelected = selectedReportType == OrderReleaseRules.REPORT_TYPE_CR_CANCELLATION
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = if (isCrSelected) DelivioYellow.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                    border = BorderStroke(
+                        1.5.dp,
+                        if (isCrSelected) DelivioYellowDark else MaterialTheme.colorScheme.outlineVariant
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .defaultMinSize(minHeight = 56.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .clickable { selectedReportType = OrderReleaseRules.REPORT_TYPE_CR_CANCELLATION }
+                        .testTag("release_type_cr_cancellation")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        RadioButton(
+                            selected = isCrSelected,
+                            onClick = { selectedReportType = OrderReleaseRules.REPORT_TYPE_CR_CANCELLATION }
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "CR Cancellation",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = "Release order immediately to another rider",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+
+                if (canCloseRestaurant) {
+                    val isCloseSelected = selectedReportType == OrderReleaseRules.REPORT_TYPE_CLOSE_RESTAURANT
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = if (isCloseSelected) DelivioRed.copy(alpha = 0.10f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                        border = BorderStroke(
+                            1.5.dp,
+                            if (isCloseSelected) DelivioRed else MaterialTheme.colorScheme.outlineVariant
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 56.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .clickable { selectedReportType = OrderReleaseRules.REPORT_TYPE_CLOSE_RESTAURANT }
+                            .testTag("release_type_close_restaurant")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            RadioButton(
+                                selected = isCloseSelected,
+                                onClick = { selectedReportType = OrderReleaseRules.REPORT_TYPE_CLOSE_RESTAURANT }
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Close restaurant",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "Merchant is closed; hold order for admin review",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (selectedReportType == OrderReleaseRules.REPORT_TYPE_CR_CANCELLATION) {
+                    Text(
+                        text = "Reason",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        crReasons.forEach { r ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .defaultMinSize(minHeight = 48.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable { selectedCrReason = r }
+                                    .padding(horizontal = 4.dp)
+                            ) {
+                                RadioButton(
+                                    selected = selectedCrReason == r,
+                                    onClick = { selectedCrReason = r }
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(r, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                            }
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = noteInput,
+                    onValueChange = { if (it.length <= 200) noteInput = it },
+                    label = { Text("Note (optional)") },
+                    placeholder = {
+                        Text(
+                            if (selectedReportType == OrderReleaseRules.REPORT_TYPE_CLOSE_RESTAURANT) {
+                                "e.g. Store lights off / posted hours"
+                            } else {
+                                "Optional details"
+                            }
+                        )
+                    },
+                    maxLines = 2,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("release_reason_input")
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp)
+                            .testTag("cancel_release_order_button")
+                    ) {
+                        Text("Keep Order", maxLines = 1)
+                    }
+
+                    Button(
+                        onClick = {
+                            val finalReason = when {
+                                noteInput.isNotBlank() && selectedReportType == OrderReleaseRules.REPORT_TYPE_CLOSE_RESTAURANT ->
+                                    "Store closed: ${noteInput.trim()}"
+                                selectedReportType == OrderReleaseRules.REPORT_TYPE_CLOSE_RESTAURANT ->
+                                    "Restaurant / store is closed"
+                                noteInput.isNotBlank() ->
+                                    "$selectedCrReason (${noteInput.trim()})"
+                                else -> selectedCrReason
+                            }
+                            onConfirmRelease(selectedReportType, finalReason)
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = DelivioRed,
+                            contentColor = Color.White
+                        ),
+                        modifier = Modifier
+                            .weight(1.2f)
+                            .heightIn(min = 48.dp)
+                            .testTag("confirm_release_order_button")
+                    ) {
+                        Text(
+                            text = if (selectedReportType == OrderReleaseRules.REPORT_TYPE_CLOSE_RESTAURANT) {
+                                "Report Closed"
+                            } else {
+                                "Release Order"
+                            },
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -975,6 +1260,7 @@ private fun ExpandedOrderSheetContent(
     onHeadsetClick: () -> Unit,
     onCollapse: () -> Unit,
     onReportProblemClick: () -> Unit,
+    onReleaseOrderClick: () -> Unit,
     onTaxiPressAction: () -> Unit,
     onPabiliPressAction: () -> Unit,
     onParcelPressAction: () -> Unit,
@@ -1361,18 +1647,54 @@ private fun ExpandedOrderSheetContent(
                 )
             }
 
-            OutlinedButton(
-                onClick = onReportProblemClick,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 48.dp)
-                    .testTag("report_problem_button"),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = DelivioRed)
-            ) {
-                Icon(Icons.Default.ReportProblem, contentDescription = null, modifier = Modifier.size(16.dp), tint = DelivioRed)
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("Report a Problem", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            val canRelease = OrderReleaseRules.canReleaseBeforePickup(currentStop.order)
+            if (canRelease) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onReportProblemClick,
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp)
+                            .testTag("report_problem_button"),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = DelivioRed)
+                    ) {
+                        Icon(Icons.Default.ReportProblem, contentDescription = null, modifier = Modifier.size(16.dp), tint = DelivioRed)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Report a Problem", fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+
+                    OutlinedButton(
+                        onClick = onReleaseOrderClick,
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp)
+                            .testTag("release_order_button"),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = DelivioRed)
+                    ) {
+                        Icon(Icons.Default.Cancel, contentDescription = null, modifier = Modifier.size(16.dp), tint = DelivioRed)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Release Order", fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            } else {
+                OutlinedButton(
+                    onClick = onReportProblemClick,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .testTag("report_problem_button"),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = DelivioRed)
+                ) {
+                    Icon(Icons.Default.ReportProblem, contentDescription = null, modifier = Modifier.size(16.dp), tint = DelivioRed)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Report a Problem", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                }
             }
         }
     }

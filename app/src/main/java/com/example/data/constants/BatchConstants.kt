@@ -466,7 +466,10 @@ object InstantDispatchEvaluator {
         if (OrderStepConstants.normalizeVehicleType(rider.vehicle.type) != OrderStepConstants.VEHICLE_MOTORCYCLE) {
             return InstantDispatchResult(false, "service off (motorcycle required)")
         }
-        if (declinedIds.contains(order.id) || releasedIds.contains(order.id) || order.excludeRiderIds.contains(rider.uid)) {
+        if (order.onHold) {
+            return InstantDispatchResult(false, "on hold")
+        }
+        if (declinedIds.contains(order.id) || releasedIds.contains(order.id) || order.excludeRiderIds.any { it.trim() == rider.uid }) {
             return InstantDispatchResult(false, "declined or excluded")
         }
         if (order.targetRiderId.isNotBlank() && order.targetRiderId != rider.uid) {
@@ -596,13 +599,15 @@ object TaxiDispatchEvaluator {
             "$formattedKm km > $limitText km limit"
         }
 
-        // 7. excluded list
+        // 7. excluded list & hold status
+        val isOnHold = order.onHold
         val inExcludeField = rider != null && order.excludeRiderIds.any { it.trim() == rider.uid }
         val inDeclined = declinedIds.contains(order.id)
         val inReleased = releasedIds.contains(order.id)
         val offeredOther = rider != null && order.targetRiderId.isNotBlank() && order.targetRiderId.trim() != rider.uid
-        val notExcluded = !inExcludeField && !inDeclined && !inReleased && !offeredOther
+        val notExcluded = !isOnHold && !inExcludeField && !inDeclined && !inReleased && !offeredOther
         val excludedDetail = when {
+            isOnHold -> "on hold"
             inExcludeField -> "in order excludeRiderIds"
             inDeclined -> "declined by rider"
             inReleased -> "released by rider"
@@ -655,6 +660,9 @@ object TaxiDispatchEvaluator {
         }
         if (!rider.status.trim().equals("active", ignoreCase = true)) {
             return InstantDispatchResult(false, "account ${rider.status}")
+        }
+        if (order.onHold) {
+            return InstantDispatchResult(false, "on hold")
         }
         if (declinedIds.contains(order.id) || releasedIds.contains(order.id) || order.excludeRiderIds.any { it.trim() == rider.uid }) {
             return InstantDispatchResult(false, "declined or excluded")
@@ -730,10 +738,13 @@ object GeneralDispatchEvaluator {
         if (!rider.status.equals("active", ignoreCase = true)) {
             return InstantDispatchResult(false, "account ${rider.status}")
         }
+        if (order.onHold) {
+            return InstantDispatchResult(false, "on hold")
+        }
         if (declinedIds.contains(order.id) || releasedIds.contains(order.id)) {
             return InstantDispatchResult(false, "declined or excluded")
         }
-        if (order.excludeRiderIds.contains(rider.uid)) {
+        if (order.excludeRiderIds.any { it.trim() == rider.uid }) {
             return InstantDispatchResult(false, "declined or excluded")
         }
         if (order.targetRiderId.isNotBlank() && order.targetRiderId != rider.uid) {

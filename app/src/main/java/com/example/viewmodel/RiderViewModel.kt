@@ -1163,11 +1163,28 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // RELEASE ORDER
-    fun releaseOrder(reason: String) {
-        val order = currentActiveOrder.value ?: return
-        riderRepository.releaseOrder(order, reason, prefsRepository,
+    fun releaseOrder(
+        reason: String,
+        reportType: String = com.example.data.models.OrderReleaseRules.REPORT_TYPE_CR_CANCELLATION,
+        orderId: String? = null
+    ) {
+        val order = if (!orderId.isNullOrBlank()) {
+            activeOrders.value.firstOrNull { it.id == orderId } ?: currentActiveOrder.value
+        } else {
+            currentActiveOrder.value
+        } ?: return
+        riderRepository.releaseOrder(
+            order = order,
+            reason = reason,
+            reportType = reportType,
+            userPrefs = prefsRepository,
             onSuccess = {
-                showSnackbar("Order released back to dispatch")
+                val message = if (reportType == com.example.data.models.OrderReleaseRules.REPORT_TYPE_CLOSE_RESTAURANT) {
+                    "Store closed reported; order placed on hold for review"
+                } else {
+                    "Order released back to dispatch"
+                }
+                showSnackbar(message)
             },
             onError = { showSnackbar(it) }
         )

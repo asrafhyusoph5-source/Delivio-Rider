@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.constants.OrderStepConstants
 import com.example.data.models.Order
+import com.example.data.models.OrderReleaseRules
 import com.example.ui.theme.DelivioGreen
 import com.example.ui.theme.DelivioRed
 import com.example.ui.theme.DelivioYellow
@@ -46,6 +47,7 @@ fun HeadsetMenuSheet(
     focusedOrderId: String? = null,
     onCreateSplitTicket: (order: Order, shortReason: String, onComplete: () -> Unit, onError: (String) -> Unit) -> Unit,
     onSelectStandardIssue: (orderId: String?, reasonKey: String) -> Unit,
+    onOpenReleaseDialog: ((order: Order, initialReportType: String) -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     val splitEligibleOrder = remember(activeOrders, focusedOrderId) {
@@ -53,6 +55,10 @@ fun HeadsetMenuSheet(
     }
     val defaultOrderId = remember(activeOrders, focusedOrderId) {
         focusedOrderId ?: activeOrders.firstOrNull()?.id
+    }
+    val releaseEligibleOrder = remember(activeOrders, defaultOrderId) {
+        val candidate = activeOrders.firstOrNull { it.id == defaultOrderId } ?: activeOrders.firstOrNull()
+        candidate?.takeIf { OrderReleaseRules.canReleaseBeforePickup(it) }
     }
 
     var showSplitReasonPrompt by remember { mutableStateOf(false) }
@@ -107,6 +113,34 @@ fun HeadsetMenuSheet(
                         testTag = "headset_option_split_delivery",
                         onClick = { showSplitReasonPrompt = true }
                     )
+                }
+
+                // 1b. Pre-pickup release options (CR Cancellation & Close restaurant)
+                if (releaseEligibleOrder != null && onOpenReleaseDialog != null) {
+                    HeadsetOptionRow(
+                        icon = Icons.Default.Cancel,
+                        iconTint = DelivioRed,
+                        title = "CR Cancellation",
+                        subtitle = "Cancel & release booking to another rider",
+                        testTag = "headset_option_cr_cancellation",
+                        onClick = {
+                            onDismiss()
+                            onOpenReleaseDialog(releaseEligibleOrder, OrderReleaseRules.REPORT_TYPE_CR_CANCELLATION)
+                        }
+                    )
+                    if (OrderReleaseRules.supportsCloseRestaurant(releaseEligibleOrder)) {
+                        HeadsetOptionRow(
+                            icon = Icons.Default.Store,
+                            iconTint = DelivioRed,
+                            title = "Close restaurant",
+                            subtitle = "Merchant is closed; hold order for admin review",
+                            testTag = "headset_option_close_restaurant",
+                            onClick = {
+                                onDismiss()
+                                onOpenReleaseDialog(releaseEligibleOrder, OrderReleaseRules.REPORT_TYPE_CLOSE_RESTAURANT)
+                            }
+                        )
+                    }
                 }
 
                 // 2. Problem with the booking at the merchant

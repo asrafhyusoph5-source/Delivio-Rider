@@ -906,6 +906,9 @@ object OrderDocumentParser {
         }
 
         val excludeRiderIds = safeList(data["excludeRiderIds"])?.mapNotNull { safeStringOrNull(it) } ?: emptyList()
+        val onHold = safeBoolean(data["onHold"]) ?: false
+        val holdReason = safeStringOrNull(data["holdReason"])?.takeIf { it.isNotBlank() }
+        val holdReportId = safeStringOrNull(data["holdReportId"])?.takeIf { it.isNotBlank() }
         val riderFeeFixed = safeDouble(data["riderFeeFixed"])
         val riderFeeEstimate = safeDouble(data["riderFeeEstimate"]) ?: 0.0
         val batchId = safeStringOrNull(data["batchId"])?.takeIf { it.isNotBlank() }
@@ -1016,6 +1019,9 @@ object OrderDocumentParser {
             addDebug("parcel.fragile", parcelMap?.get("fragile") ?: data["parcelFragile"])
             addDebug("pabili.budget", pabiliMap?.get("budgetLimit") ?: pabiliMap?.get("budget") ?: data["budgetLimit"] ?: data["pabiliBudget"])
             addDebug("riderRequest.status", riderReqMap?.get("status") ?: data["riderRequestStatus"])
+            addDebug("onHold", data["onHold"])
+            addDebug("holdReason", data["holdReason"])
+            addDebug("holdReportId", data["holdReportId"])
             for ((k, v) in rawContactFields) {
                 put(k, v)
             }
@@ -1120,6 +1126,9 @@ object OrderDocumentParser {
             endsWhenReady = endsWhenReadyOrder,
             specialRadiusExtra = specialExtra,
             excludeRiderIds = excludeRiderIds,
+            onHold = onHold,
+            holdReason = holdReason,
+            holdReportId = holdReportId,
             targetRiderId = targetRiderId,
             riderEarning = riderEarning,
             splitOut = splitOut,

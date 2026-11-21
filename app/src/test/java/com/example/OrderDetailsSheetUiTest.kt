@@ -1671,6 +1671,142 @@ class OrderDetailsSheetUiTest {
         assertEquals("Not provided", contacts.dropoff.phone)
         assertEquals("20 Second St, San Pedro", contacts.dropoff.address)
     }
+
+    @Test
+    fun releaseOrderDialog_supportsCrCancellationAndCloseRestaurantForFoodBeforePickup() {
+        val foodOrder = sampleFoodOrder(riderStep = OrderStepConstants.STEP_TO_MERCHANT)
+        val stops = RouteStopCalculator.computeBatchStops(listOf(foodOrder), 9.7392, 118.7353)
+        var capturedOrderId = ""
+        var capturedType = ""
+        var capturedReason = ""
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                OrderDetailsSheet(
+                    batchStops = stops,
+                    currentStop = stops.first { !it.isFinished },
+                    activeOrders = listOf(foodOrder),
+                    isOnline = true,
+                    walletBalance = 0.0,
+                    todayEarnings = 0.0,
+                    todayTrips = 0,
+                    currencySymbol = "₱",
+                    supportPhone = null,
+                    sheetState = OrderSheetState.EXPANDED,
+                    onGoOnlineClick = {},
+                    onAdvanceStep = { _, _ -> },
+                    onReleaseOrderWithType = { id, type, reason ->
+                        capturedOrderId = id
+                        capturedType = type
+                        capturedReason = reason
+                    },
+                    onReportProblem = {},
+                    onCallClick = { _, _ -> }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("release_order_button").assertIsDisplayed().performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("release_order_dialog").assertIsDisplayed()
+        composeRule.onNodeWithTag("release_type_cr_cancellation").assertIsDisplayed()
+        composeRule.onNodeWithTag("release_type_close_restaurant").assertIsDisplayed().performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("release_reason_input").performTextInput("Doors locked")
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("confirm_release_order_button").performClick()
+        composeRule.waitForIdle()
+
+        assertEquals("ord_food_1", capturedOrderId)
+        assertEquals("close_restaurant", capturedType)
+        assertTrue(capturedReason.contains("Doors locked"))
+    }
+
+    @Test
+    fun releaseOrderButton_hiddenAfterPickup() {
+        val pickedUpFood = sampleFoodOrder(riderStep = OrderStepConstants.STEP_TO_CUSTOMER)
+        val foodStops = RouteStopCalculator.computeBatchStops(listOf(pickedUpFood), 9.7392, 118.7353)
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                OrderDetailsSheet(
+                    batchStops = foodStops,
+                    currentStop = foodStops.first { !it.isFinished },
+                    activeOrders = listOf(pickedUpFood),
+                    isOnline = true,
+                    walletBalance = 0.0,
+                    todayEarnings = 0.0,
+                    todayTrips = 0,
+                    currencySymbol = "₱",
+                    supportPhone = null,
+                    sheetState = OrderSheetState.EXPANDED,
+                    onGoOnlineClick = {},
+                    onAdvanceStep = { _, _ -> },
+                    onReportProblem = {},
+                    onCallClick = { _, _ -> }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("release_order_button").assertDoesNotExist()
+        composeRule.onNodeWithTag("report_problem_button").assertIsDisplayed()
+    }
+
+    @Test
+    fun parcelReleaseDialog_showsOnlyCrCancellation() {
+        val parcelOrder = sampleParcelOrder(
+            status = OrderStepConstants.STATUS_RIDER_ON_WAY_SENDER,
+            riderStep = OrderStepConstants.STEP_TO_SENDER
+        )
+        val stops = RouteStopCalculator.computeBatchStops(listOf(parcelOrder), 9.7392, 118.7353)
+        var capturedOrderId = ""
+        var capturedType = ""
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                OrderDetailsSheet(
+                    batchStops = stops,
+                    currentStop = stops.first { !it.isFinished },
+                    activeOrders = listOf(parcelOrder),
+                    isOnline = true,
+                    walletBalance = 0.0,
+                    todayEarnings = 0.0,
+                    todayTrips = 0,
+                    currencySymbol = "₱",
+                    supportPhone = null,
+                    sheetState = OrderSheetState.EXPANDED,
+                    onGoOnlineClick = {},
+                    onAdvanceStep = { _, _ -> },
+                    onReleaseOrderWithType = { id, type, _ ->
+                        capturedOrderId = id
+                        capturedType = type
+                    },
+                    onReportProblem = {},
+                    onCallClick = { _, _ -> }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("release_order_button").assertIsDisplayed().performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("release_order_dialog").assertIsDisplayed()
+        composeRule.onNodeWithTag("release_type_cr_cancellation").assertIsDisplayed()
+        composeRule.onNodeWithTag("release_type_close_restaurant").assertDoesNotExist()
+
+        composeRule.onNodeWithTag("confirm_release_order_button").performClick()
+        composeRule.waitForIdle()
+
+        assertEquals(parcelOrder.id, capturedOrderId)
+        assertEquals("cr_cancellation", capturedType)
+    }
 }
+
+
 
 

@@ -612,7 +612,8 @@ object AcceptOrderRules {
         riderRequestStatusRaw: Any?,
         serviceTypeRaw: Any?,
         excludeRiderIds: List<String>,
-        myUid: String
+        myUid: String,
+        onHold: Boolean = false
     ): AcceptOrderEvalResult {
         val rawStatus = formatRawStatus(statusRaw)
         if (!exists) {
@@ -640,6 +641,13 @@ object AcceptOrderRules {
                 decision = AcceptOrderDecision.TAKEN_BY_OTHER,
                 rawStatus = rawStatus,
                 reason = "Another rider already took this order"
+            )
+        }
+        if (onHold) {
+            return AcceptOrderEvalResult(
+                decision = AcceptOrderDecision.UNAVAILABLE,
+                rawStatus = rawStatus,
+                reason = "This order is currently on hold"
             )
         }
         if (excludeRiderIds.any { it.trim() == myUid }) {
@@ -687,6 +695,235 @@ object AcceptOrderRules {
                 reason = "This order is no longer available"
             )
         }
+    }
+}
+
+object OrderReleaseRules {
+    const val REPORT_TYPE_CR_CANCELLATION = "cr_cancellation"
+    const val REPORT_TYPE_CLOSE_RESTAURANT = "close_restaurant"
+
+    const val REPORT_STATUS_PENDING = "Pending"
+    const val REPORT_STATUS_REVIEWING = "Reviewing"
+    const val REPORT_STATUS_RESOLVED = "Resolved"
+    const val REPORT_STATUS_REJECTED = "Rejected"
+    const val REPORT_STATUS_AUTO = "Auto"
+
+    fun canReleaseBeforePickup(order: Order): Boolean {
+        val normStatus = order.status.trim().lowercase(Locale.US)
+        if (normStatus in setOf(
+                OrderStepConstants.STATUS_DELIVERED.lowercase(Locale.US),
+                OrderStepConstants.STATUS_COMPLETED.lowercase(Locale.US),
+                "cancelled",
+                "canceled"
+            )
+        ) {
+            return false
+        }
+        return when (order.serviceType.trim().lowercase(Locale.US)) {
+            OrderStepConstants.SERVICE_TAXI -> {
+                order.taxiStepStage == TaxiStepStage.TO_PICKUP ||
+                    order.taxiStepStage == TaxiStepStage.AT_PICKUP
+            }
+            OrderStepConstants.SERVICE_PARCEL -> {
+                order.parcelStepStage == ParcelStepStage.TO_SENDER ||
+                    order.parcelStepStage == ParcelStepStage.AT_SENDER
+            }
+            OrderStepConstants.SERVICE_PABILI -> {
+                order.pabiliStepStage == PabiliStepStage.TO_VENDOR ||
+                    order.pabiliStepStage == PabiliStepStage.AT_VENDOR
+            }
+            else -> {
+                order.pickedUpAt == null &&
+                    (order.foodStepStage == FoodStepStage.TO_MERCHANT ||
+                        order.foodStepStage == FoodStepStage.AT_MERCHANT)
+            }
+        }
+    }
+
+    fun canReleaseSnapshotBeforePickup(
+        serviceType: String,
+        statusRaw: Any?,
+        riderStepRaw: Any?,
+        pickedUpAtRaw: Any?
+    ): Boolean {
+        val normService = serviceType.trim().lowercase(Locale.US)
+        val normStatus = OrderDocumentParser.safeStringOrNull(statusRaw)?.trim()?.lowercase(Locale.US).orEmpty()
+        val normStep = OrderDocumentParser.safeStringOrNull(riderStepRaw)?.trim()?.lowercase(Locale.US).orEmpty()
+        if (normStatus in setOf("delivered", "completed", "cancelled", "canceled")) return false
+        return when (normService) {
+            OrderStepConstants.SERVICE_TAXI -> {
+                if (normStatus == OrderStepConstants.STATUS_ON_TRIP.lowercase(Locale.US)) return false
+                if (pickedUpAtRaw != null) return false
+                if (normStep.startsWith(OrderStepConstants.STEP_TO_STOP_PREFIX) ||
+                    normStep.startsWith(OrderStepConstants.STEP_AT_STOP_PREFIX) ||
+                    normStep == OrderStepConstants.STEP_COMPLETED ||
+                    normStep == OrderStepConstants.STEP_DELIVERED
+                ) return false
+                true
+            }
+            OrderStepConstants.SERVICE_PARCEL -> {
+                if (normStatus == OrderStepConstants.STATUS_RIDER_ON_WAY_RECIPIENT.lowercase(Locale.US) ||
+                    normStatus == OrderStepConstants.STATUS_ARRIVED_AT_RECIPIENT.lowercase(Locale.US)
+                ) return false
+                if (normStep in setOf(
+                        OrderStepConstants.STEP_TO_RECIPIENT,
+                        OrderStepConstants.STEP_AT_RECIPIENT,
+                        OrderStepConstants.STEP_TO_CUSTOMER,
+                        OrderStepConstants.STEP_AT_CUSTOMER,
+                        OrderStepConstants.STEP_HEADING_TO_CUSTOMER,
+                        OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER,
+                        OrderStepConstants.STEP_PICKED_UP,
+                        OrderStepConstants.STEP_COMPLETED,
+                        OrderStepConstants.STEP_DELIVERED
+                    )
+                ) return false
+                true
+            }
+            OrderStepConstants.SERVICE_PABILI -> {
+                if (normStatus == OrderStepConstants.STATUS_RIDER_ON_WAY_RECIPIENT.lowercase(Locale.US) ||
+                    normStatus == OrderStepConstants.STATUS_ARRIVED_AT_RECIPIENT.lowercase(Locale.US)
+                ) return false
+                if (normStep in setOf(
+                        OrderStepConstants.STEP_TO_RECIPIENT,
+                        OrderStepConstants.STEP_AT_RECIPIENT,
+                        OrderStepConstants.STEP_TO_CUSTOMER,
+                        OrderStepConstants.STEP_AT_CUSTOMER,
+                        OrderStepConstants.STEP_HEADING_TO_CUSTOMER,
+                        OrderStepConstants.STEP_ARRIVED_AT_CUSTOMER,
+                        OrderStepConstants.STEP_PICKED_UP,
+                        OrderStepConstants.STEP_COMPLETED,
+                        OrderStepConstants.STEP_DELIVERED
+                    )
+                ) return false
+                true
+            }
+            else -> {
+                if (pickedUpAtRaw != null) return false
+                val stage = FoodFlowRules.resolveStage(normStep, normStatus)
+                stage == FoodStepStage.TO_MERCHANT || stage == FoodStepStage.AT_MERCHANT
+            }
+        }
+    }
+
+    fun supportsCloseRestaurant(order: Order): Boolean {
+        return !order.isTaxi && !order.isParcel
+    }
+
+    fun computeRevertStatus(serviceType: String, currentStatusRaw: String?): String {
+        val normService = serviceType.trim().lowercase(Locale.US)
+        return when (normService) {
+            OrderStepConstants.SERVICE_PARCEL,
+            OrderStepConstants.SERVICE_PABILI,
+            OrderStepConstants.SERVICE_TAXI,
+            OrderStepConstants.SERVICE_REQUEST -> OrderStepConstants.STATUS_PLACED_ORDER
+            OrderStepConstants.SERVICE_FOOD,
+            OrderStepConstants.SERVICE_MART,
+            "mart" -> {
+                when (currentStatusRaw?.trim()?.lowercase(Locale.US)) {
+                    "preparing" -> OrderStepConstants.STATUS_PREPARING
+                    "ready" -> OrderStepConstants.STATUS_READY
+                    "placed order", "placed_order" -> OrderStepConstants.STATUS_PLACED_ORDER
+                    else -> OrderStepConstants.STATUS_READY
+                }
+            }
+            else -> OrderStepConstants.STATUS_PLACED_ORDER
+        }
+    }
+
+    fun buildOrderReportPayload(
+        order: Order,
+        riderId: String,
+        riderName: String,
+        reportType: String,
+        reason: String = "",
+        createdAtValue: Any
+    ): Map<String, Any?> {
+        val normalizedType = if (reportType == REPORT_TYPE_CLOSE_RESTAURANT) {
+            REPORT_TYPE_CLOSE_RESTAURANT
+        } else {
+            REPORT_TYPE_CR_CANCELLATION
+        }
+        val reportStatus = if (normalizedType == REPORT_TYPE_CLOSE_RESTAURANT) {
+            REPORT_STATUS_PENDING
+        } else {
+            REPORT_STATUS_AUTO
+        }
+        val resolvedAmount = when {
+            order.feesTotal > 0.0 -> order.feesTotal
+            order.cashToCollect > 0.0 -> order.cashToCollect
+            else -> order.estimatedEarnings
+        }
+        val itemsPayload = order.items.map { item ->
+            mapOf(
+                "name" to item.name,
+                "qty" to item.quantity,
+                "variantLabel" to item.variantLabel
+            )
+        }
+        val payload = mutableMapOf<String, Any?>(
+            "type" to normalizedType,
+            "orderId" to order.id,
+            "orderNumber" to order.orderNumber.ifBlank { order.displayOrderNumber.removePrefix("#") },
+            "serviceType" to order.serviceType,
+            "merchantId" to order.merchantId,
+            "merchantName" to order.merchantName,
+            "branchName" to order.branchName,
+            "customerId" to order.customerId,
+            "customerName" to order.customerName,
+            "riderId" to riderId,
+            "riderName" to riderName,
+            "amount" to resolvedAmount,
+            "paymentMethod" to order.paymentMethod,
+            "items" to itemsPayload,
+            "status" to reportStatus,
+            "createdAt" to createdAtValue
+        )
+        if (reason.isNotBlank()) {
+            payload["reason"] = reason.trim()
+        }
+        return payload
+    }
+
+    fun buildOrderReleaseUpdates(
+        serviceType: String,
+        currentStatusRaw: String?,
+        reportType: String,
+        reportId: String,
+        excludeRiderIdsValue: Any,
+        updatedAtValue: Any,
+        reason: String = "",
+        existingRiderRequest: Map<String, Any?>? = null
+    ): Map<String, Any?> {
+        val revertStatus = computeRevertStatus(serviceType, currentStatusRaw)
+        val isCloseRestaurant = reportType == REPORT_TYPE_CLOSE_RESTAURANT
+        val updates = mutableMapOf<String, Any?>(
+            "riderId" to null,
+            "riderName" to null,
+            "riderPhone" to null,
+            "riderPhotoUrl" to null,
+            "riderStep" to null,
+            "riderVehicle" to null,
+            "batchId" to null,
+            "status" to revertStatus,
+            "excludeRiderIds" to excludeRiderIdsValue,
+            "onHold" to isCloseRestaurant,
+            "holdReason" to if (isCloseRestaurant) REPORT_TYPE_CLOSE_RESTAURANT else null,
+            "holdReportId" to if (isCloseRestaurant) reportId else null,
+            "updatedAt" to updatedAtValue
+        )
+        if (reason.isNotBlank()) {
+            updates["releaseReason"] = reason.trim()
+        }
+        val normService = serviceType.trim().lowercase(Locale.US)
+        if (normService == OrderStepConstants.SERVICE_REQUEST ||
+            normService == OrderStepConstants.SERVICE_TAXI ||
+            existingRiderRequest != null
+        ) {
+            val reqMap = existingRiderRequest?.toMutableMap() ?: mutableMapOf()
+            reqMap["status"] = OrderStepConstants.REQ_SEARCHING
+            updates["riderRequest"] = reqMap
+        }
+        return updates
     }
 }
 
@@ -820,6 +1057,9 @@ data class Order(
     val endsWhenReady: Boolean? = null,
     val specialRadiusExtra: Double = 0.0,
     val excludeRiderIds: List<String> = emptyList(),
+    val onHold: Boolean = false,
+    val holdReason: String? = null,
+    val holdReportId: String? = null,
     val targetRiderId: String = "",
     val riderEarning: RiderEarning? = null,
     val splitOut: List<String> = emptyList(),

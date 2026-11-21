@@ -1626,6 +1626,7 @@ class RiderRepository(
                 } else {
                     emptyList()
                 }
+                val isOnHold = if (exists) (snapshot.getBoolean("onHold") == true) else false
 
                 val eval = AcceptOrderRules.evaluateDocument(
                     exists = exists,
@@ -1634,7 +1635,8 @@ class RiderRepository(
                     riderRequestStatusRaw = rawReqStatus,
                     serviceTypeRaw = rawServiceType,
                     excludeRiderIds = excludes,
-                    myUid = authUid
+                    myUid = authUid,
+                    onHold = isOnHold
                 )
 
                 when (eval.decision) {
@@ -2423,59 +2425,110 @@ class RiderRepository(
         }
     }
 
-    // RELEASE ORDER
+    // RELEASE ORDER (Single atomic transaction on orders/{id} + orderReports/{id})
     fun releaseOrder(
         order: Order,
         reason: String,
+        reportType: String = OrderReleaseRules.REPORT_TYPE_CR_CANCELLATION,
         userPrefs: UserPreferencesRepository? = null,
         onSuccess: () -> Unit,
         onError: (String) -> Unit
     ) {
-        if (order.isTaxi) {
-            if (order.riderStep != OrderStepConstants.STEP_TO_PICKUP && order.riderStep != OrderStepConstants.STEP_AT_PICKUP) {
-                onError("Trip cannot be released once trip has started")
-                return
+        val authUid = auth.currentUser?.uid ?: _rider.value?.uid ?: ""
+        if (authUid.isBlank()) {
+            onError("Not logged in")
+            return
+        }
+        if (!OrderReleaseRules.canReleaseBeforePickup(order)) {
+            val msg = if (order.isTaxi) {
+                "Trip cannot be released once trip has started"
+            } else {
+                "Order cannot be released once items/packages are picked up"
             }
+            onError(msg)
+            return
+        }
+
+        val normalizedReportType = if (
+            reportType == OrderReleaseRules.REPORT_TYPE_CLOSE_RESTAURANT &&
+            OrderReleaseRules.supportsCloseRestaurant(order)
+        ) {
+            OrderReleaseRules.REPORT_TYPE_CLOSE_RESTAURANT
         } else {
-            if (order.riderStep != OrderStepConstants.STEP_HEADING_TO_MERCHANT && order.riderStep != OrderStepConstants.STEP_ARRIVED_AT_MERCHANT &&
-                order.riderStep != OrderStepConstants.STEP_TO_MERCHANT && order.riderStep != OrderStepConstants.STEP_AT_MERCHANT &&
-                order.riderStep != OrderStepConstants.STEP_TO_SENDER && order.riderStep != OrderStepConstants.STEP_AT_SENDER &&
-                order.riderStep != OrderStepConstants.STEP_TO_VENDOR && order.riderStep != OrderStepConstants.STEP_AT_VENDOR) {
-                onError("Order cannot be released once items/packages are picked up")
-                return
+            OrderReleaseRules.REPORT_TYPE_CR_CANCELLATION
+        }
+
+        val riderName = _rider.value?.name?.ifBlank { "Rider" } ?: "Rider"
+        val orderRef = db.collection("orders").document(order.id)
+        val reportRef = db.collection("orderReports").document()
+
+        db.runTransaction { tx ->
+            val snapshot = tx.get(orderRef)
+            if (!snapshot.exists()) {
+                throw FirebaseFirestoreException(
+                    "Order no longer exists",
+                    FirebaseFirestoreException.Code.ABORTED
+                )
             }
-        }
-
-        val revertStatus = when (order.serviceType.lowercase()) {
-            OrderStepConstants.SERVICE_TAXI -> OrderStepConstants.STATUS_PLACED_ORDER
-            OrderStepConstants.SERVICE_PARCEL, OrderStepConstants.SERVICE_PABILI -> OrderStepConstants.STATUS_PLACED_ORDER
-            OrderStepConstants.SERVICE_FOOD, OrderStepConstants.SERVICE_MART -> OrderStepConstants.STATUS_READY
-            OrderStepConstants.SERVICE_REQUEST -> OrderStepConstants.STATUS_PLACED_ORDER
-            else -> OrderStepConstants.STATUS_READY
-        }
-
-        val updates = mutableMapOf<String, Any?>(
-            "riderId" to null,
-            "riderName" to null,
-            "riderPhone" to null,
-            "riderPhotoUrl" to null,
-            "releaseReason" to reason,
-            "status" to revertStatus,
-            "updatedAt" to FieldValue.serverTimestamp()
-        )
-
-        if (order.serviceType == OrderStepConstants.SERVICE_REQUEST || order.serviceType == OrderStepConstants.SERVICE_TAXI) {
-            updates["riderRequest.status"] = OrderStepConstants.REQ_SEARCHING
-        }
-
-        db.collection("orders").document(order.id).update(updates)
-            .addOnSuccessListener {
-                setOfferFinalOutcome(order.id, "released")
-                _releasedOrderIds.value = _releasedOrderIds.value + order.id
-                userPrefs?.addDeclinedOrderId(order.id)
-                onSuccess()
+            val currentRiderId = OrderDocumentParser.safeStringOrNull(snapshot.get("riderId"))?.trim()
+            if (currentRiderId != authUid) {
+                throw FirebaseFirestoreException(
+                    "Order is no longer assigned to you",
+                    FirebaseFirestoreException.Code.ABORTED
+                )
             }
-            .addOnFailureListener { onError(it.localizedMessage ?: "Failed to release order") }
+            val liveServiceType = OrderDocumentParser.safeStringOrNull(snapshot.get("serviceType"))
+                ?: order.serviceType
+            val liveStatus = OrderDocumentParser.safeStringOrNull(snapshot.get("status"))
+            val liveStep = snapshot.get("riderStep")
+            val livePickedUpAt = snapshot.get("pickedUpAt")
+            if (!OrderReleaseRules.canReleaseSnapshotBeforePickup(
+                    serviceType = liveServiceType,
+                    statusRaw = liveStatus,
+                    riderStepRaw = liveStep,
+                    pickedUpAtRaw = livePickedUpAt
+                )
+            ) {
+                throw FirebaseFirestoreException(
+                    "Order cannot be released once picked up",
+                    FirebaseFirestoreException.Code.ABORTED
+                )
+            }
+
+            val existingRiderReq = (snapshot.get("riderRequest") as? Map<*, *>)
+                ?.mapKeys { it.key.toString() }
+
+            val reportData = OrderReleaseRules.buildOrderReportPayload(
+                order = order,
+                riderId = authUid,
+                riderName = riderName,
+                reportType = normalizedReportType,
+                reason = reason,
+                createdAtValue = FieldValue.serverTimestamp()
+            )
+            val orderUpdates = OrderReleaseRules.buildOrderReleaseUpdates(
+                serviceType = liveServiceType,
+                currentStatusRaw = liveStatus,
+                reportType = normalizedReportType,
+                reportId = reportRef.id,
+                excludeRiderIdsValue = FieldValue.arrayUnion(authUid),
+                updatedAtValue = FieldValue.serverTimestamp(),
+                reason = reason,
+                existingRiderRequest = existingRiderReq
+            )
+
+            tx.set(reportRef, reportData)
+            tx.update(orderRef, orderUpdates)
+        }.addOnSuccessListener {
+            setOfferFinalOutcome(order.id, "released")
+            _releasedOrderIds.value = _releasedOrderIds.value + order.id
+            _activeOrders.value = _activeOrders.value.filterNot { it.id == order.id }
+            RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
+            userPrefs?.addDeclinedOrderId(order.id)
+            onSuccess()
+        }.addOnFailureListener {
+            onError(it.localizedMessage ?: "Failed to release order")
+        }
     }
 
     // OFFER LOGGING & OUTCOME HELPERS

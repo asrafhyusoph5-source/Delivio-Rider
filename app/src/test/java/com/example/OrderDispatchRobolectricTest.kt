@@ -10,12 +10,14 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.constants.DispatchSettings
 import com.example.data.constants.GeneralDispatchEvaluator
+import com.example.data.constants.InstantDispatchEvaluator
 import com.example.data.constants.OrderStepConstants
 import com.example.data.constants.TaxiDispatchEvaluator
 import com.example.data.models.DispatchListenerStatus
 import com.example.data.models.ListenerConnectionState
 import com.example.data.models.Order
 import com.example.data.models.OrderDocumentParser
+import com.example.data.models.OrderItem
 import com.example.data.models.Rider
 import com.example.data.models.SkippedOrderRecord
 import com.example.data.models.Vehicle
@@ -717,4 +719,251 @@ class OrderDispatchRobolectricTest {
         assertFalse(carRejected.isEligible)
         assertEquals("Parcel needs a Motorcycle", carRejected.skipReason)
     }
+
+    @Test
+    fun `parser reads onHold holdReason and holdReportId and dispatch excludes onHold orders`() {
+        val raw = mapOf<String, Any?>(
+            "orderNumber" to "F900",
+            "serviceType" to "food",
+            "status" to "Ready",
+            "onHold" to true,
+            "holdReason" to "close_restaurant",
+            "holdReportId" to "rep_900",
+            "excludeRiderIds" to listOf("rider_old"),
+            "pickupDistanceKm" to 1.0
+        )
+        val parsed = OrderDocumentParser.parseOrderFromMap("ord_hold_1", raw)
+        assertTrue(parsed.onHold)
+        assertEquals("close_restaurant", parsed.holdReason)
+        assertEquals("rep_900", parsed.holdReportId)
+        assertEquals(listOf("rider_old"), parsed.excludeRiderIds)
+
+        val defaultParsed = OrderDocumentParser.parseOrderFromMap("ord_no_hold", mapOf("serviceType" to "food", "status" to "Ready"))
+        assertFalse(defaultParsed.onHold)
+        assertEquals(null, defaultParsed.holdReason)
+        assertEquals(null, defaultParsed.holdReportId)
+
+        val rider = Rider(
+            uid = "rider_new",
+            isOnline = true,
+            status = "active",
+            cityId = "",
+            allowedServices = OrderStepConstants.ALL_SERVICES,
+            activeServices = OrderStepConstants.ALL_SERVICES
+        )
+        val dispatch = DispatchSettings(searchRadiusKm = 10.0, taxiSearchRadiusKm = 10.0)
+        val riderLoc = Pair(9.7392, 118.7353)
+
+        // General dispatch rejects onHold=true
+        val generalSkip = GeneralDispatchEvaluator.evaluateSkipReason(
+            order = parsed,
+            rider = rider,
+            activeOrders = emptyList(),
+            riderLoc = riderLoc,
+            isPlatformServiceEnabled = true,
+            isCityServiceEnabled = true,
+            dispatch = dispatch
+        )
+        assertFalse(generalSkip.isEligible)
+        assertEquals("on hold", generalSkip.skipReason)
+
+        // Instant dispatch rejects onHold=true
+        val instantOrder = parsed.copy(
+            serviceType = OrderStepConstants.SERVICE_REQUEST,
+            status = OrderStepConstants.STATUS_PLACED_ORDER,
+            riderRequestStatus = OrderStepConstants.REQ_SEARCHING
+        )
+        val instantSkip = InstantDispatchEvaluator.evaluateSkipReason(
+            order = instantOrder,
+            rider = rider,
+            activeOrders = emptyList(),
+            riderLoc = riderLoc,
+            lastLocationTimeMs = 1_000_000L,
+            nowMs = 1_001_000L,
+            isPlatformServiceEnabled = true,
+            isCityServiceEnabled = true,
+            dispatch = dispatch
+        )
+        assertFalse(instantSkip.isEligible)
+        assertEquals("on hold", instantSkip.skipReason)
+
+        // Taxi dispatch & diagnostics reject onHold=true
+        val taxiOrder = parsed.copy(
+            serviceType = OrderStepConstants.SERVICE_TAXI,
+            status = OrderStepConstants.STATUS_PLACED_ORDER,
+            vehicleType = "motorcycle"
+        )
+        val taxiSkip = TaxiDispatchEvaluator.evaluateSkipReason(
+            order = taxiOrder,
+            rider = rider,
+            activeOrders = emptyList(),
+            riderLoc = riderLoc,
+            isPlatformServiceEnabled = true,
+            isCityServiceEnabled = true,
+            dispatch = dispatch
+        )
+        assertFalse(taxiSkip.isEligible)
+        assertEquals("on hold", taxiSkip.skipReason)
+        val diag = TaxiDispatchEvaluator.diagnoseTaxiOrder(
+            order = taxiOrder,
+            rider = rider,
+            activeOrders = emptyList(),
+            riderLoc = riderLoc,
+            isPlatformServiceEnabled = true,
+            isCityServiceEnabled = true,
+            dispatch = dispatch
+        )
+        val exclCond = diag.conditions.first { it.label == "excluded list" }
+        assertFalse(exclCond.passed)
+        assertEquals("on hold", exclCond.detail)
+
+        // Excluded rider id (even with surrounding whitespace) is rejected across dispatch
+        val releasedOrder = parsed.copy(onHold = false, excludeRiderIds = listOf(" rider_old "))
+        val excludedSkip = GeneralDispatchEvaluator.evaluateSkipReason(
+            order = releasedOrder,
+            rider = rider.copy(uid = "rider_old"),
+            activeOrders = emptyList(),
+            riderLoc = riderLoc,
+            isPlatformServiceEnabled = true,
+            isCityServiceEnabled = true,
+            dispatch = dispatch
+        )
+        assertFalse(excludedSkip.isEligible)
+        assertEquals("declined or excluded", excludedSkip.skipReason)
+
+        // AcceptOrderRules rejects onHold=true
+        val acceptHold = com.example.data.models.AcceptOrderRules.evaluateDocument(
+            exists = true,
+            riderIdRaw = null,
+            statusRaw = "Ready",
+            riderRequestStatusRaw = null,
+            serviceTypeRaw = "food",
+            excludeRiderIds = emptyList(),
+            myUid = "rider_new",
+            onHold = true
+        )
+        assertEquals(com.example.data.models.AcceptOrderDecision.UNAVAILABLE, acceptHold.decision)
+    }
+
+    @Test
+    fun `order release rules match contract for revert status nullable fields onHold and orderReports`() {
+        val foodPreparing = Order(
+            id = "ord_food_prep",
+            orderNumber = "F101",
+            serviceType = OrderStepConstants.SERVICE_FOOD,
+            status = OrderStepConstants.STATUS_PREPARING,
+            riderStep = OrderStepConstants.STEP_TO_MERCHANT,
+            riderId = "rider_1",
+            merchantId = "m_1",
+            merchantName = "Jollibee",
+            branchName = "Rizal",
+            customerId = "c_1",
+            customerName = "Ana Reyes",
+            paymentMethod = "cod",
+            feesTotal = 320.0,
+            items = listOf(OrderItem(name = "Burger", quantity = 2, variantLabel = "Spicy"))
+        )
+        assertTrue(com.example.data.models.OrderReleaseRules.canReleaseBeforePickup(foodPreparing))
+        assertTrue(com.example.data.models.OrderReleaseRules.supportsCloseRestaurant(foodPreparing))
+        assertFalse(
+            com.example.data.models.OrderReleaseRules.canReleaseBeforePickup(
+                foodPreparing.copy(riderStep = OrderStepConstants.STEP_TO_CUSTOMER)
+            )
+        )
+
+        // Close restaurant sets onHold=true, holdReason="close_restaurant", holdReportId, keeps Preparing, nulls 7 rider fields
+        val closeUpdates = com.example.data.models.OrderReleaseRules.buildOrderReleaseUpdates(
+            serviceType = OrderStepConstants.SERVICE_FOOD,
+            currentStatusRaw = OrderStepConstants.STATUS_PREPARING,
+            reportType = com.example.data.models.OrderReleaseRules.REPORT_TYPE_CLOSE_RESTAURANT,
+            reportId = "rep_close_1",
+            excludeRiderIdsValue = listOf("rider_1"),
+            updatedAtValue = "ts",
+            reason = "Store closed"
+        )
+        assertEquals(OrderStepConstants.STATUS_PREPARING, closeUpdates["status"])
+        assertEquals(true, closeUpdates["onHold"])
+        assertEquals("close_restaurant", closeUpdates["holdReason"])
+        assertEquals("rep_close_1", closeUpdates["holdReportId"])
+        assertTrue(closeUpdates.containsKey("riderId") && closeUpdates["riderId"] == null)
+        assertTrue(closeUpdates.containsKey("riderName") && closeUpdates["riderName"] == null)
+        assertTrue(closeUpdates.containsKey("riderPhone") && closeUpdates["riderPhone"] == null)
+        assertTrue(closeUpdates.containsKey("riderPhotoUrl") && closeUpdates["riderPhotoUrl"] == null)
+        assertTrue(closeUpdates.containsKey("riderStep") && closeUpdates["riderStep"] == null)
+        assertTrue(closeUpdates.containsKey("riderVehicle") && closeUpdates["riderVehicle"] == null)
+        assertTrue(closeUpdates.containsKey("batchId") && closeUpdates["batchId"] == null)
+
+        // CR Cancellation on parcel sets status to Placed Order, onHold=false, null holdReason/holdReportId
+        val parcelUpdates = com.example.data.models.OrderReleaseRules.buildOrderReleaseUpdates(
+            serviceType = OrderStepConstants.SERVICE_PARCEL,
+            currentStatusRaw = OrderStepConstants.STATUS_ARRIVED_AT_SENDER,
+            reportType = com.example.data.models.OrderReleaseRules.REPORT_TYPE_CR_CANCELLATION,
+            reportId = "rep_cr_1",
+            excludeRiderIdsValue = listOf("rider_1"),
+            updatedAtValue = "ts"
+        )
+        assertEquals(OrderStepConstants.STATUS_PLACED_ORDER, parcelUpdates["status"])
+        assertEquals(false, parcelUpdates["onHold"])
+        assertEquals(null, parcelUpdates["holdReason"])
+        assertEquals(null, parcelUpdates["holdReportId"])
+
+        // Convenience keeps "Ready", pabili/taxi/instant restore "Placed Order"
+        assertEquals(
+            OrderStepConstants.STATUS_READY,
+            com.example.data.models.OrderReleaseRules.computeRevertStatus(OrderStepConstants.SERVICE_MART, "Ready")
+        )
+        assertEquals(
+            OrderStepConstants.STATUS_PLACED_ORDER,
+            com.example.data.models.OrderReleaseRules.computeRevertStatus(OrderStepConstants.SERVICE_PABILI, OrderStepConstants.STATUS_ARRIVED_AT_VENDOR)
+        )
+        assertEquals(
+            OrderStepConstants.STATUS_PLACED_ORDER,
+            com.example.data.models.OrderReleaseRules.computeRevertStatus(OrderStepConstants.SERVICE_TAXI, OrderStepConstants.STATUS_DRIVER_ARRIVED)
+        )
+        assertEquals(
+            OrderStepConstants.STATUS_PLACED_ORDER,
+            com.example.data.models.OrderReleaseRules.computeRevertStatus(OrderStepConstants.SERVICE_REQUEST, "Preparing")
+        )
+
+        // orderReports payload verification
+        val reportClose = com.example.data.models.OrderReleaseRules.buildOrderReportPayload(
+            order = foodPreparing,
+            riderId = "rider_1",
+            riderName = "Juan",
+            reportType = com.example.data.models.OrderReleaseRules.REPORT_TYPE_CLOSE_RESTAURANT,
+            reason = "Lights out",
+            createdAtValue = "server_ts"
+        )
+        assertEquals("close_restaurant", reportClose["type"])
+        assertEquals("Pending", reportClose["status"])
+        assertEquals("ord_food_prep", reportClose["orderId"])
+        assertEquals("F101", reportClose["orderNumber"])
+        assertEquals("food", reportClose["serviceType"])
+        assertEquals("m_1", reportClose["merchantId"])
+        assertEquals("Jollibee", reportClose["merchantName"])
+        assertEquals("Rizal", reportClose["branchName"])
+        assertEquals("c_1", reportClose["customerId"])
+        assertEquals("Ana Reyes", reportClose["customerName"])
+        assertEquals("rider_1", reportClose["riderId"])
+        assertEquals("Juan", reportClose["riderName"])
+        assertEquals(320.0, reportClose["amount"] as Double, 0.001)
+        assertEquals("cod", reportClose["paymentMethod"])
+        @Suppress("UNCHECKED_CAST")
+        val items = reportClose["items"] as List<Map<String, Any?>>
+        assertEquals(1, items.size)
+        assertEquals("Burger", items[0]["name"])
+        assertEquals(2, items[0]["qty"])
+        assertEquals("Spicy", items[0]["variantLabel"])
+
+        val reportCr = com.example.data.models.OrderReleaseRules.buildOrderReportPayload(
+            order = foodPreparing,
+            riderId = "rider_1",
+            riderName = "Juan",
+            reportType = com.example.data.models.OrderReleaseRules.REPORT_TYPE_CR_CANCELLATION,
+            createdAtValue = "server_ts"
+        )
+        assertEquals("cr_cancellation", reportCr["type"])
+        assertEquals("Auto", reportCr["status"])
+    }
 }
+
