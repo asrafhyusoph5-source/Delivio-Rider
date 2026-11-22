@@ -58,7 +58,6 @@ fun ResourcesScreen(
     val currencySymbol by viewModel.currencySymbol.collectAsState()
     val earningsSummary by viewModel.earningsSummary.collectAsState()
     val tierStatus by viewModel.tierStatus.collectAsState()
-    val activeCall by viewModel.activeCall.collectAsState()
     val avgRating by viewModel.averageCustomerRating.collectAsState()
     val reviewCount by viewModel.customerReviewCount.collectAsState()
     val context = LocalContext.current
@@ -130,8 +129,8 @@ fun ResourcesScreen(
                 3 -> RatingsAndReviewsTab(viewModel = viewModel)
                 4 -> RiderSafetyTab(
                     onSosClick = {
-                        viewModel.openDialer("911", "Emergency Services (911)")
-                        viewModel.showToast("Emergency SOS triggered. Connecting to 911...")
+                        viewModel.openDialer("911")
+                        viewModel.showToast("Emergency SOS triggered. Opening dialer for 911...")
                     },
                     onShareTrip = {
                         val sendIntent = Intent().apply {
@@ -152,15 +151,6 @@ fun ResourcesScreen(
                 })
             }
         }
-    }
-
-    // Safe in-app call overlay
-    activeCall?.let { callInfo ->
-        com.example.ui.components.InAppCallDialog(
-            callInfo = callInfo,
-            onEndCall = { viewModel.endActiveCall() },
-            onOpenSystemDialer = { phone -> viewModel.launchExternalDialer(phone) }
-        )
     }
 }
 

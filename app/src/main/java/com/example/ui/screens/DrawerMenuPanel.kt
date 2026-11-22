@@ -2,8 +2,10 @@ package com.example.ui.screens
 
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -20,6 +22,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -40,6 +43,8 @@ fun DrawerMenuPanel(
     isServiceOn: (String) -> Boolean = { true },
     getServiceLockReason: (String) -> String? = { null },
     cityName: String = "",
+    hasActiveOrders: Boolean = false,
+    onToggleOnline: () -> Unit = {},
     onToggleService: (String, Boolean) -> Unit,
     onClose: () -> Unit,
     onNavigate: (String) -> Unit
@@ -71,7 +76,7 @@ fun DrawerMenuPanel(
                     .fillMaxHeight()
                     .fillMaxWidth(0.75f)
                     .background(MaterialTheme.colorScheme.surface)
-                    .clickable(enabled = false) {}
+                    .pointerInput(Unit) { detectTapGestures { } }
                     .windowInsetsPadding(WindowInsets.statusBars)
                     .testTag("drawer_menu_content")
             ) {
@@ -167,7 +172,74 @@ fun DrawerMenuPanel(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    val isOnline = rider?.isOnline ?: false
+                    val isOfflineLocked = isOnline && hasActiveOrders
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = if (isOnline) DelivioGreen.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceVariant,
+                        border = BorderStroke(
+                            1.dp,
+                            if (isOnline) DelivioGreen.copy(alpha = 0.35f) else MaterialTheme.colorScheme.outlineVariant
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp)
+                            .testTag("drawer_online_status_card")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .clip(CircleShape)
+                                        .background(if (isOnline) DelivioGreen else DelivioRed)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column {
+                                    Text(
+                                        text = if (isOnline) "Online" else "Offline",
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = when {
+                                            isOfflineLocked -> "Going offline locked during active order"
+                                            isOnline -> "Receiving dispatch offers"
+                                            else -> "Tap switch to go online"
+                                        },
+                                        fontSize = 11.sp,
+                                        color = if (isOfflineLocked) DelivioRed else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            Switch(
+                                checked = isOnline,
+                                onCheckedChange = {
+                                    if (!isOfflineLocked) {
+                                        onToggleOnline()
+                                    }
+                                },
+                                enabled = !isOfflineLocked,
+                                modifier = Modifier
+                                    .scale(0.85f)
+                                    .testTag("drawer_online_switch")
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
 
                     // 2x2 Grid of rounded tiles (Inbox, Schedule, Wallet, Earnings)
                     Column(

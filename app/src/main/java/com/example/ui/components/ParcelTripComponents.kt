@@ -33,6 +33,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.data.models.*
 import com.example.ui.theme.*
+import com.example.util.PhoneUtils
 import java.util.Locale
 
 private fun formatParcelAmount(amount: Double): String {
@@ -50,11 +51,6 @@ private fun formatParcelWeightKg(weightKg: Double): String {
     } else {
         "${String.format(Locale.US, "%.1f", weightKg)} kg"
     }
-}
-
-private fun isUsablePhone(phone: String): Boolean {
-    val trimmed = phone.trim()
-    return trimmed.isNotEmpty() && !trimmed.equals("Not provided", ignoreCase = true)
 }
 
 @Composable
@@ -646,7 +642,7 @@ private fun ParcelTripDetailsBody(
         cardTag = "trip_details_pickup_card",
         callTag = "trip_details_pickup_call_button",
         navigateTag = "trip_details_pickup_navigate_button",
-        onCall = { onCallClick(contacts.pickup.name, contacts.pickup.phone) },
+        onCall = { cleaned -> onCallClick(contacts.pickup.name, cleaned) },
         onNavigate = {
             onNavigateToLocation(
                 contacts.pickup.name,
@@ -668,7 +664,7 @@ private fun ParcelTripDetailsBody(
         cardTag = "trip_details_dropoff_card",
         callTag = "trip_details_dropoff_call_button",
         navigateTag = "trip_details_dropoff_navigate_button",
-        onCall = { onCallClick(contacts.dropoff.name, contacts.dropoff.phone) },
+        onCall = { cleaned -> onCallClick(contacts.dropoff.name, cleaned) },
         onNavigate = {
             onNavigateToLocation(
                 contacts.dropoff.name,
@@ -819,18 +815,24 @@ private fun TaxiTripDetailsBody(
     val dropoffLat = targetStop?.lat?.takeIf { it != 0.0 } ?: if (order.customerLat != 0.0) order.customerLat else 9.7400
     val dropoffLng = targetStop?.lng?.takeIf { it != 0.0 } ?: if (order.customerLng != 0.0) order.customerLng else 118.7360
 
+    val passengerPhoneRaw = if (PhoneUtils.isUsablePhone(order.customerPhone)) {
+        order.customerPhone
+    } else {
+        order.merchantPhone
+    }
+
     TripDetailsEndpointCard(
         badgeText = "PICKUP",
         badgeColor = DelivioGreenDark,
         name = passengerName,
         address = pickupAddr,
-        phone = order.customerPhone.ifBlank { order.merchantPhone },
+        phone = passengerPhoneRaw,
         note = order.resolvedPickupNote,
         showCall = true,
         cardTag = "trip_details_pickup_card",
         callTag = "trip_details_pickup_call_button",
         navigateTag = "trip_details_pickup_navigate_button",
-        onCall = { onCallClick(passengerName, order.customerPhone.ifBlank { order.merchantPhone }) },
+        onCall = { cleaned -> onCallClick(passengerName, cleaned) },
         onNavigate = {
             onNavigateToLocation(
                 passengerName,
@@ -845,13 +847,13 @@ private fun TaxiTripDetailsBody(
         badgeColor = DelivioRed,
         name = passengerName,
         address = dropoffAddr,
-        phone = order.customerPhone.ifBlank { order.merchantPhone },
+        phone = passengerPhoneRaw,
         note = order.resolvedDropoffNote,
         showCall = true,
         cardTag = "trip_details_dropoff_card",
         callTag = "trip_details_dropoff_call_button",
         navigateTag = "trip_details_dropoff_navigate_button",
-        onCall = { onCallClick(passengerName, order.customerPhone.ifBlank { order.merchantPhone }) },
+        onCall = { cleaned -> onCallClick(passengerName, cleaned) },
         onNavigate = {
             onNavigateToLocation(passengerName, dropoffLat, dropoffLng)
         }
@@ -942,7 +944,7 @@ private fun PabiliTripDetailsBody(
         cardTag = "trip_details_vendor_card",
         callTag = "trip_details_vendor_call_button",
         navigateTag = "trip_details_vendor_navigate_button",
-        onCall = {},
+        onCall = { _ -> },
         onNavigate = {
             onNavigateToLocation(
                 vendorName,
@@ -965,7 +967,7 @@ private fun PabiliTripDetailsBody(
         cardTag = "trip_details_customer_card",
         callTag = "trip_details_customer_call_button",
         navigateTag = "trip_details_customer_navigate_button",
-        onCall = { onCallClick(customerName, order.customerPhone) },
+        onCall = { cleaned -> onCallClick(customerName, cleaned) },
         onNavigate = {
             onNavigateToLocation(
                 customerName,
@@ -1015,7 +1017,7 @@ private fun FoodInstantTripDetailsBody(
         cardTag = "trip_details_merchant_card",
         callTag = "trip_details_merchant_call_button",
         navigateTag = "trip_details_merchant_navigate_button",
-        onCall = { onCallClick(merchantName, order.merchantPhone) },
+        onCall = { cleaned -> onCallClick(merchantName, cleaned) },
         onNavigate = {
             onNavigateToLocation(
                 merchantName,
@@ -1038,7 +1040,7 @@ private fun FoodInstantTripDetailsBody(
         cardTag = "trip_details_customer_card",
         callTag = "trip_details_customer_call_button",
         navigateTag = "trip_details_customer_navigate_button",
-        onCall = { onCallClick(customerName, order.customerPhone) },
+        onCall = { cleaned -> onCallClick(customerName, cleaned) },
         onNavigate = {
             onNavigateToLocation(
                 customerName,
@@ -1269,10 +1271,11 @@ private fun TripDetailsEndpointCard(
     cardTag: String,
     callTag: String,
     navigateTag: String,
-    onCall: () -> Unit,
+    onCall: (String) -> Unit,
     onNavigate: () -> Unit
 ) {
-    val canCall = showCall && isUsablePhone(phone)
+    val cleanedPhone = PhoneUtils.cleanPhoneNumber(phone)
+    val canCall = showCall && cleanedPhone.isNotEmpty()
     Surface(
         shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.surface,
@@ -1331,16 +1334,29 @@ private fun TripDetailsEndpointCard(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = phone.ifBlank { "No phone number" },
+                        text = if (canCall) phone.trim() else "Phone unavailable",
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = if (canCall) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 8.dp)
                     )
 
                     OutlinedButton(
-                        onClick = onCall,
+                        onClick = { onCall(cleanedPhone) },
                         enabled = canCall,
                         shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = if (canCall) Color.Transparent else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                            contentColor = DelivioGreenDark,
+                            disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                            disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f)
+                        ),
+                        border = BorderStroke(
+                            1.dp,
+                            if (canCall) DelivioGreen.copy(alpha = 0.55f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                        ),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                         modifier = Modifier
                             .heightIn(min = 48.dp)
@@ -1348,7 +1364,11 @@ private fun TripDetailsEndpointCard(
                     ) {
                         Icon(Icons.Default.Phone, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Call", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        Text(
+                            text = if (canCall) "Call" else "No phone number",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
                     }
                 }
             }

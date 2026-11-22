@@ -44,6 +44,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -53,6 +54,7 @@ import com.example.data.constants.BatchConstants
 import com.example.data.constants.OrderStepConstants
 import com.example.data.models.*
 import com.example.ui.theme.*
+import com.example.util.PhoneUtils
 import java.util.Locale
 
 enum class OrderSheetState {
@@ -78,6 +80,7 @@ fun OrderDetailsSheet(
     sheetState: OrderSheetState = OrderSheetState.EXPANDED,
     onSheetStateChange: (OrderSheetState) -> Unit = {},
     onGoOnlineClick: () -> Unit,
+    onOnlineStatusClick: () -> Unit = {},
     onAdvanceStep: (Double?, String?) -> Unit,
     onAdvanceStepWithApproval: ((Double?, Boolean, String?) -> Unit)? = null,
     onReleaseOrder: (String) -> Unit = {},
@@ -86,7 +89,6 @@ fun OrderDetailsSheet(
     onCallClick: (String, String) -> Unit,
     onChatClick: (Order) -> Unit = {},
     hasUnreadChat: (String) -> Boolean = { false },
-    onHeadsetClick: () -> Unit = {},
     onFocusStop: (RouteStop) -> Unit = {},
     onOpenEarnings: () -> Unit = {},
     onHeightChangedPx: (Int) -> Unit = {},
@@ -127,6 +129,9 @@ fun OrderDetailsSheet(
         mutableStateOf<ParcelStepStage?>(null)
     }
     var showTripDetails by remember(currentStop?.orderId) {
+        mutableStateOf(false)
+    }
+    var showMoreMenu by remember(currentStop?.orderId) {
         mutableStateOf(false)
     }
     var pabiliReceiptInput by remember(currentStop?.orderId) {
@@ -257,6 +262,30 @@ fun OrderDetailsSheet(
                         ) {
                             Text("Go Online", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                         }
+                    } else {
+                        Spacer(modifier = Modifier.width(12.dp))
+                        OutlinedButton(
+                            onClick = onOnlineStatusClick,
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.dp, DelivioGreen.copy(alpha = 0.55f)),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = DelivioGreen.copy(alpha = 0.12f),
+                                contentColor = DelivioGreenDark
+                            ),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .testTag("idle_online_status_button")
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(DelivioGreen)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Online", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        }
                     }
                 }
 
@@ -345,64 +374,11 @@ fun OrderDetailsSheet(
                         onTripDetailsClick = {
                             showTripDetails = true
                         },
-                        onCallClick = {
-                            val target = selectedStop ?: currentStop
-                            val isPabiliOrder = target.order.isPabili
-                            val isParcelOrder = target.order.isParcel
-                            val isTaxiOrder = target.order.isTaxi
-                            val phoneRaw = when {
-                                isParcelOrder -> {
-                                    val contacts = contactsOf(target.order)
-                                    val stage = target.order.parcelStepStage
-                                    if (stage == ParcelStepStage.TO_SENDER || stage == ParcelStepStage.AT_SENDER) {
-                                        contacts.pickup.phone
-                                    } else {
-                                        contacts.dropoff.phone
-                                    }
-                                }
-                                isPabiliOrder -> target.order.customerPhone
-                                isTaxiOrder -> target.order.customerPhone
-                                else -> {
-                                    val isMerchantStop = if (activeOrders.size <= 1) {
-                                        val foodStage = target.order.foodStepStage
-                                        foodStage == FoodStepStage.TO_MERCHANT || foodStage == FoodStepStage.AT_MERCHANT
-                                    } else {
-                                        target.isMerchant
-                                    }
-                                    if (isMerchantStop) target.order.merchantPhone else target.order.customerPhone
-                                }
-                            }.trim()
-                            val phone = if (phoneRaw.equals("Not provided", ignoreCase = true)) "" else phoneRaw
-                            val callName = when {
-                                isParcelOrder -> {
-                                    val contacts = contactsOf(target.order)
-                                    val stage = target.order.parcelStepStage
-                                    if (stage == ParcelStepStage.TO_SENDER || stage == ParcelStepStage.AT_SENDER) {
-                                        contacts.pickup.name
-                                    } else {
-                                        contacts.dropoff.name
-                                    }
-                                }
-                                isPabiliOrder -> target.order.customerName.ifBlank { "Customer" }
-                                isTaxiOrder -> target.name
-                                else -> {
-                                    val isMerchantStop = if (activeOrders.size <= 1) {
-                                        val foodStage = target.order.foodStepStage
-                                        foodStage == FoodStepStage.TO_MERCHANT || foodStage == FoodStepStage.AT_MERCHANT
-                                    } else {
-                                        target.isMerchant
-                                    }
-                                    if (isMerchantStop) {
-                                        resolveStopDisplayName(target.order, StopType.MERCHANT)
-                                    } else {
-                                        resolveStopDisplayName(target.order, StopType.CUSTOMER)
-                                    }
-                                }
-                            }
-                            if (phone.isNotBlank()) {
-                                onCallClick(callName, phone)
+                        onCallClick = { callName, cleanedPhone ->
+                            if (cleanedPhone.isNotBlank()) {
+                                onCallClick(callName, cleanedPhone)
                             } else {
-                                Toast.makeText(context, "No phone number available", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "No phone number", Toast.LENGTH_SHORT).show()
                             }
                         },
                         onChatClick = { order ->
@@ -413,7 +389,7 @@ fun OrderDetailsSheet(
                             }
                         },
                         hasUnreadChat = hasUnreadChat,
-                        onHeadsetClick = onHeadsetClick,
+                        onMoreClick = { showMoreMenu = true },
                         onCollapse = { transitionState(OrderSheetState.COLLAPSED) },
                         onReportProblemClick = { showProblemDialog = true },
                         onReleaseOrderClick = { showReleaseOrderDialog = true },
@@ -537,16 +513,41 @@ fun OrderDetailsSheet(
             order = tripOrder,
             currencySymbol = currencySymbol,
             onCallClick = { name, phone ->
-                if (phone.isNotBlank() && !phone.equals("Not provided", ignoreCase = true)) {
-                    onCallClick(name, phone)
+                val cleaned = PhoneUtils.cleanPhoneNumber(phone)
+                if (cleaned.isNotEmpty()) {
+                    onCallClick(name, cleaned)
                 } else {
-                    Toast.makeText(context, "No phone number available", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "No phone number", Toast.LENGTH_SHORT).show()
                 }
             },
             onNavigateToLocation = { name, lat, lng ->
                 launchExternalCoordinatesNavigation(context, name, lat, lng)
             },
             onDismiss = { showTripDetails = false }
+        )
+    }
+
+    // More Actions Bottom Sheet
+    if (showMoreMenu && currentStop != null) {
+        SheetMoreActionsModal(
+            canRelease = OrderReleaseRules.canReleaseBeforePickup(currentStop.order),
+            onTripDetails = {
+                showMoreMenu = false
+                showTripDetails = true
+            },
+            onNavigate = {
+                showMoreMenu = false
+                launchExternalNavigation(context, currentStop)
+            },
+            onReportProblem = {
+                showMoreMenu = false
+                showProblemDialog = true
+            },
+            onReleaseOrder = {
+                showMoreMenu = false
+                showReleaseOrderDialog = true
+            },
+            onDismiss = { showMoreMenu = false }
         )
     }
 
@@ -1254,10 +1255,10 @@ private fun ExpandedOrderSheetContent(
     onSelectStop: (RouteStop) -> Unit,
     onNavigateClick: () -> Unit,
     onTripDetailsClick: () -> Unit = {},
-    onCallClick: () -> Unit,
+    onCallClick: (String, String) -> Unit,
     onChatClick: (Order) -> Unit,
     hasUnreadChat: (String) -> Boolean,
-    onHeadsetClick: () -> Unit,
+    onMoreClick: () -> Unit,
     onCollapse: () -> Unit,
     onReportProblemClick: () -> Unit,
     onReleaseOrderClick: () -> Unit,
@@ -1446,13 +1447,18 @@ private fun ExpandedOrderSheetContent(
                 currencySymbol = currencySymbol
             )
 
-            // Row of labeled buttons: Call, Chat, Help, and yellow Navigate button (all services)
+            // Row of labeled buttons: Call, Chat, More, and yellow Navigate button (all services)
+            val actionStop = if (isTaxi || isParcel || (!isPabili && activeOrders.size <= 1)) currentStop else selectedStop
+            val (callTargetName, cleanedCallPhone) = remember(actionStop, activeOrders.size) {
+                resolveStopCallTarget(actionStop, activeOrders.size)
+            }
             SheetQuickActionIconsRow(
-                currentStop = if (isTaxi || isParcel || (!isPabili && activeOrders.size <= 1)) currentStop else selectedStop,
-                onCallClick = onCallClick,
+                currentStop = actionStop,
+                hasPhone = cleanedCallPhone.isNotEmpty(),
+                onCallClick = { onCallClick(callTargetName, cleanedCallPhone) },
                 onChatClick = onChatClick,
                 hasUnreadChat = hasUnreadChat,
-                onHeadsetClick = onHeadsetClick,
+                onMoreClick = onMoreClick,
                 onNavigateClick = onNavigateClick
             )
 
@@ -2210,13 +2216,197 @@ private fun OnePaymentLineBar(
     }
 }
 
+private fun resolveStopCallTarget(target: RouteStop, activeOrdersCount: Int): Pair<String, String> {
+    val isPabiliOrder = target.order.isPabili
+    val isParcelOrder = target.order.isParcel
+    val isTaxiOrder = target.order.isTaxi
+    val phoneRaw = when {
+        isParcelOrder -> {
+            val contacts = contactsOf(target.order)
+            val stage = target.order.parcelStepStage
+            if (stage == ParcelStepStage.TO_SENDER || stage == ParcelStepStage.AT_SENDER) {
+                contacts.pickup.phone
+            } else {
+                contacts.dropoff.phone
+            }
+        }
+        isPabiliOrder -> target.order.customerPhone
+        isTaxiOrder -> if (PhoneUtils.isUsablePhone(target.order.customerPhone)) {
+            target.order.customerPhone
+        } else {
+            target.order.merchantPhone
+        }
+        else -> {
+            val isMerchantStop = if (activeOrdersCount <= 1) {
+                val foodStage = target.order.foodStepStage
+                foodStage == FoodStepStage.TO_MERCHANT || foodStage == FoodStepStage.AT_MERCHANT
+            } else {
+                target.isMerchant
+            }
+            if (isMerchantStop) target.order.merchantPhone else target.order.customerPhone
+        }
+    }
+    val callName = when {
+        isParcelOrder -> {
+            val contacts = contactsOf(target.order)
+            val stage = target.order.parcelStepStage
+            if (stage == ParcelStepStage.TO_SENDER || stage == ParcelStepStage.AT_SENDER) {
+                contacts.pickup.name
+            } else {
+                contacts.dropoff.name
+            }
+        }
+        isPabiliOrder -> target.order.customerName.ifBlank { "Customer" }
+        isTaxiOrder -> target.name
+        else -> {
+            val isMerchantStop = if (activeOrdersCount <= 1) {
+                val foodStage = target.order.foodStepStage
+                foodStage == FoodStepStage.TO_MERCHANT || foodStage == FoodStepStage.AT_MERCHANT
+            } else {
+                target.isMerchant
+            }
+            if (isMerchantStop) {
+                resolveStopDisplayName(target.order, StopType.MERCHANT)
+            } else {
+                resolveStopDisplayName(target.order, StopType.CUSTOMER)
+            }
+        }
+    }
+    return callName to PhoneUtils.cleanPhoneNumber(phoneRaw)
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SheetMoreActionsModal(
+    canRelease: Boolean,
+    onTripDetails: () -> Unit,
+    onNavigate: () -> Unit,
+    onReportProblem: () -> Unit,
+    onReleaseOrder: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        modifier = Modifier.testTag("sheet_more_menu")
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = "Trip options",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Black,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+
+            MoreMenuOptionRow(
+                icon = Icons.Default.Info,
+                iconTint = MaterialTheme.colorScheme.primary,
+                title = "Trip details",
+                subtitle = "View addresses, items, and contact details",
+                testTag = "more_option_trip_details",
+                onClick = onTripDetails
+            )
+
+            MoreMenuOptionRow(
+                icon = Icons.Default.Navigation,
+                iconTint = DelivioYellowDark,
+                title = "Navigate in maps app",
+                subtitle = "Launch turn-by-turn navigation for this stop",
+                testTag = "more_option_navigate",
+                onClick = onNavigate
+            )
+
+            MoreMenuOptionRow(
+                icon = Icons.Default.ReportProblem,
+                iconTint = DelivioRed,
+                title = "Report a Problem",
+                subtitle = "Notify dispatch of an issue on this stop",
+                testTag = "more_option_report_problem",
+                onClick = onReportProblem
+            )
+
+            if (canRelease) {
+                MoreMenuOptionRow(
+                    icon = Icons.Default.Cancel,
+                    iconTint = DelivioRed,
+                    title = "Release Order",
+                    subtitle = "Cancel or report store closed before pickup",
+                    testTag = "more_option_release_order",
+                    onClick = onReleaseOrder
+                )
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+        }
+    }
+}
+
+@Composable
+private fun MoreMenuOptionRow(
+    icon: ImageVector,
+    iconTint: Color,
+    title: String,
+    subtitle: String,
+    testTag: String,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        modifier = Modifier
+            .fillMaxWidth()
+            .defaultMinSize(minHeight = 56.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(onClick = onClick)
+            .testTag(testTag)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = iconTint,
+                modifier = Modifier.size(22.dp)
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = subtitle,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Icon(
+                imageVector = Icons.Default.ChevronRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
 @Composable
 private fun SheetQuickActionIconsRow(
     currentStop: RouteStop,
+    hasPhone: Boolean,
     onCallClick: () -> Unit,
     onChatClick: (Order) -> Unit,
     hasUnreadChat: (String) -> Boolean,
-    onHeadsetClick: () -> Unit,
+    onMoreClick: () -> Unit,
     onNavigateClick: () -> Unit = {}
 ) {
     Row(
@@ -2228,9 +2418,23 @@ private fun SheetQuickActionIconsRow(
     ) {
         RoundLabeledActionButton(
             icon = Icons.Default.Call,
-            label = "Call",
-            containerColor = DelivioGreen.copy(alpha = 0.16f),
-            iconTint = DelivioGreen,
+            label = if (hasPhone) "Call" else "No phone number",
+            containerColor = if (hasPhone) {
+                DelivioGreen.copy(alpha = 0.16f)
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+            },
+            iconTint = if (hasPhone) {
+                DelivioGreen
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
+            },
+            labelColor = if (hasPhone) {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+            },
+            enabled = hasPhone,
             showUnreadDot = false,
             onClick = onCallClick,
             testTag = "sheet_call_button"
@@ -2247,13 +2451,13 @@ private fun SheetQuickActionIconsRow(
         )
 
         RoundLabeledActionButton(
-            icon = Icons.Default.HeadsetMic,
-            label = "Help",
+            icon = Icons.Default.MoreHoriz,
+            label = "More",
             containerColor = MaterialTheme.colorScheme.surfaceVariant,
             iconTint = MaterialTheme.colorScheme.onSurface,
             showUnreadDot = false,
-            onClick = onHeadsetClick,
-            testTag = "sheet_headset_button"
+            onClick = onMoreClick,
+            testTag = "sheet_more_button"
         )
 
         Button(
@@ -2282,6 +2486,8 @@ private fun RoundLabeledActionButton(
     label: String,
     containerColor: Color,
     iconTint: Color,
+    labelColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    enabled: Boolean = true,
     showUnreadDot: Boolean,
     onClick: () -> Unit,
     testTag: String
@@ -2297,7 +2503,7 @@ private fun RoundLabeledActionButton(
                 modifier = Modifier
                     .size(48.dp)
                     .clip(CircleShape)
-                    .clickable(onClick = onClick)
+                    .clickable(enabled = enabled, onClick = onClick)
                     .testTag(testTag)
             ) {
                 Box(contentAlignment = Alignment.Center) {
@@ -2323,8 +2529,13 @@ private fun RoundLabeledActionButton(
         Text(
             text = label,
             fontSize = 11.sp,
+            lineHeight = 13.sp,
             fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = labelColor,
+            textAlign = TextAlign.Center,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 68.dp)
         )
     }
 }

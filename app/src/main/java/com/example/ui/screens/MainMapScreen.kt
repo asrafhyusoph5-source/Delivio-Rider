@@ -1,8 +1,6 @@
 package com.example.ui.screens
 
 import android.Manifest
-import android.content.Intent
-import android.net.Uri
 import android.os.Build
 import android.view.HapticFeedbackConstants
 import androidx.activity.compose.BackHandler
@@ -18,7 +16,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -26,7 +23,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -42,12 +38,9 @@ import com.example.data.models.OfferBundle
 import com.example.data.models.OfferType
 import com.example.data.models.Order
 import com.example.data.models.OrderPayBreakdown
-import com.example.data.models.OsrmManeuver
-import com.example.data.models.OsrmRouteResult
 import com.example.ui.components.*
 import com.example.ui.theme.*
 import com.example.viewmodel.RiderViewModel
-import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -73,14 +66,12 @@ fun MainMapScreen(
     val currentStop by viewModel.currentRouteStop.collectAsState()
     val focusedStop by viewModel.focusedStopOnMap.collectAsState()
     val driverHeading by viewModel.heading.collectAsState()
-    val driverSpeedKmh by viewModel.speedKmh.collectAsState()
 
     val incomingOffer by viewModel.incomingOffer.collectAsState()
     val incomingOfferBundle by viewModel.incomingOfferBundle.collectAsState()
     val deliveredOrders by viewModel.deliveredOrders.collectAsState()
     val currencySymbol by viewModel.currencySymbol.collectAsState()
     val supportPhone by viewModel.supportPhone.collectAsState()
-    val activeCall by viewModel.activeCall.collectAsState()
     val newlyReachedTier by viewModel.newlyReachedTier.collectAsState()
     val completedOrder by viewModel.completedDeliveryOrder.collectAsState()
     val rateShopOrder by viewModel.rateShopOrder.collectAsState()
@@ -123,7 +114,6 @@ fun MainMapScreen(
     var recenterTrigger by remember { mutableIntStateOf(0) }
     var isSatelliteLayer by remember { mutableStateOf(false) }
     var sheetState by remember { mutableStateOf(OrderSheetState.EXPANDED) }
-    var routeResult by remember { mutableStateOf<OsrmRouteResult?>(null) }
     var routeDistanceKm by remember { mutableDoubleStateOf(0.0) }
     var routeEtaMinutes by remember { mutableIntStateOf(0) }
 
@@ -194,8 +184,6 @@ fun MainMapScreen(
 
     val topBannerClearanceDp = if (topOverlayHeightPx > 0) {
         with(density) { topOverlayHeightPx.toDp() } + 8.dp
-    } else if (activeOrders.isNotEmpty() && currentStop != null) {
-        86.dp
     } else {
         76.dp
     }
@@ -239,14 +227,13 @@ fun MainMapScreen(
                 topBannerPaddingDp = topBannerClearanceDp,
                 bottomAttributionPaddingDp = animatedSheetHeight,
                 onRouteCalculated = { result ->
-                    routeResult = result
                     routeDistanceKm = result.currentLegDistanceKm
                     routeEtaMinutes = result.currentLegEtaMinutes
                 },
                 modifier = Modifier.fillMaxSize()
             )
 
-            // 2. TOP OVERLAY COLUMN: Top Navigation Card / Idle Bar + Stacked Notification Banners (zero overlap)
+            // 2. TOP OVERLAY COLUMN: Hamburger on top left, Headset on top right (both main screen and active trip) + Stacked Notification Banners
             Column(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
@@ -255,179 +242,12 @@ fun MainMapScreen(
                     .onSizeChanged { topOverlayHeightPx = it.height },
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                val activeStop = currentStop
-                if (isTripActive && activeStop != null) {
-                    val maneuver = routeResult?.nextManeuver
-                    Card(
-                        shape = RoundedCornerShape(20.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f)),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 6.dp)
-                            .testTag("top_navigation_card")
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 12.dp, vertical = 10.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            // Maneuver Info: Arrow, Distance, Street Name
-                            Row(
-                                modifier = Modifier.weight(1f),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Surface(
-                                    shape = CircleShape,
-                                    color = Color(0xFF1E88E5),
-                                    modifier = Modifier.size(42.dp)
-                                ) {
-                                    Box(contentAlignment = Alignment.Center) {
-                                        Icon(
-                                            imageVector = getManeuverIcon(maneuver),
-                                            contentDescription = maneuver?.instruction ?: "Maneuver",
-                                            tint = Color.White,
-                                            modifier = Modifier.size(24.dp)
-                                        )
-                                    }
-                                }
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = maneuver?.distanceText ?: "${String.format(Locale.US, "%.1f", routeDistanceKm)} km",
-                                        fontWeight = FontWeight.ExtraBold,
-                                        fontSize = 15.sp,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                    Text(
-                                        text = maneuver?.instruction ?: "Head to Stop ${activeStop.stopNumber}",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
-
-                            Spacer(modifier = Modifier.width(8.dp))
-
-                            // Speed Chip + Support Headset (>= 48.dp touch target)
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Surface(
-                                    shape = RoundedCornerShape(10.dp),
-                                    color = MaterialTheme.colorScheme.surfaceVariant,
-                                    border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant)
-                                ) {
-                                    Text(
-                                        text = "$driverSpeedKmh km/h",
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 11.sp,
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
-                                    )
-                                }
-
-                                Box(contentAlignment = Alignment.TopEnd) {
-                                    Surface(
-                                        shape = CircleShape,
-                                        color = MaterialTheme.colorScheme.surfaceVariant,
-                                        modifier = Modifier
-                                            .size(48.dp)
-                                            .clip(CircleShape)
-                                            .clickable { showHeadsetMenuDialog = true }
-                                            .testTag("nav_support_headset_button")
-                                    ) {
-                                        Box(contentAlignment = Alignment.Center) {
-                                            Icon(
-                                                imageVector = Icons.Default.Headphones,
-                                                contentDescription = "Support",
-                                                tint = MaterialTheme.colorScheme.onSurface,
-                                                modifier = Modifier.size(20.dp)
-                                            )
-                                        }
-                                    }
-                                    if (hasUnreadAdminMessage) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(11.dp)
-                                                .clip(CircleShape)
-                                                .background(DelivioRed)
-                                                .border(1.5.dp, Color.White, CircleShape)
-                                        )
-                                    } else if (hasUnresolvedTicket) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(11.dp)
-                                                .clip(CircleShape)
-                                                .background(Color(0xFFFFA000))
-                                                .border(1.5.dp, Color.White, CircleShape)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // IDLE TOP BAR: Hamburger Menu, Online/Offline Pill, Support Headset
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        CircularFloatingButton(
-                            icon = Icons.Default.Menu,
-                            contentDescription = "Menu",
-                            onClick = onOpenDrawer,
-                            testTag = "hamburger_menu_button"
-                        )
-
-                        OnlineOfflinePill(
-                            isOnline = isOnline,
-                            onClick = {
-                                if (isOnline) {
-                                    showDispatchStatusSheet = true
-                                } else {
-                                    viewModel.toggleOnline(context)
-                                }
-                            }
-                        )
-
-                        Box(contentAlignment = Alignment.TopEnd) {
-                            CircularFloatingButton(
-                                icon = Icons.Default.Headphones,
-                                contentDescription = "Support",
-                                onClick = { showHeadsetMenuDialog = true },
-                                testTag = "support_headset_button"
-                            )
-                            if (hasUnreadAdminMessage) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(12.dp)
-                                        .clip(CircleShape)
-                                        .background(DelivioRed)
-                                        .border(1.5.dp, Color.White, CircleShape)
-                                )
-                            } else if (hasUnresolvedTicket) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(12.dp)
-                                        .clip(CircleShape)
-                                        .background(Color(0xFFFFA000))
-                                        .border(1.5.dp, Color.White, CircleShape)
-                                )
-                            }
-                        }
-                    }
-                }
+                MainMapTopBar(
+                    hasUnreadAdminMessage = hasUnreadAdminMessage,
+                    hasUnresolvedTicket = hasUnresolvedTicket,
+                    onOpenDrawer = onOpenDrawer,
+                    onHeadsetClick = { showHeadsetMenuDialog = true }
+                )
 
                 // In-App Admin Message Notification Banner (cleanly stacked below top bar)
                 adminMessageBanner?.let { banner ->
@@ -630,6 +450,7 @@ fun MainMapScreen(
                     sheetState = sheetState,
                     onSheetStateChange = { sheetState = it },
                     onGoOnlineClick = { viewModel.toggleOnline(context) },
+                    onOnlineStatusClick = { showDispatchStatusSheet = true },
                     onAdvanceStep = { receiptTotal, orderId ->
                         viewModel.advanceCurrentOrderStep(receiptTotal, orderId)
                     },
@@ -645,10 +466,9 @@ fun MainMapScreen(
                     onReportProblem = { reason ->
                         currentStop?.orderId?.let { viewModel.reportProblem(it, reason) }
                     },
-                    onCallClick = { name, phone -> viewModel.startCall(name, phone) },
+                    onCallClick = { _, phone -> viewModel.launchExternalDialer(phone) },
                     onChatClick = { order -> viewModel.openChatForOrder(order) },
                     hasUnreadChat = { orderId -> viewModel.hasUnreadChat(orderId) },
-                    onHeadsetClick = { showHeadsetMenuDialog = true },
                     onFocusStop = { viewModel.focusStopOnMap(it) },
                     onOpenEarnings = onOpenEarnings,
                     onHeightChangedPx = { sheetHeightPx = it },
@@ -784,15 +604,6 @@ fun MainMapScreen(
                 )
             }
 
-            // In-App Call Dialog
-            activeCall?.let { call ->
-                InAppCallDialog(
-                    callInfo = call,
-                    onEndCall = { viewModel.endCall() },
-                    onOpenSystemDialer = { phone -> viewModel.launchExternalDialer(phone) }
-                )
-            }
-
             // Accept Order Error Dialog
             acceptOrderError?.let { err ->
                 AcceptOrderErrorDialog(
@@ -883,18 +694,53 @@ fun MainMapScreen(
     }
 }
 
-private fun getManeuverIcon(maneuver: OsrmManeuver?): ImageVector {
-    if (maneuver == null) return Icons.Default.Navigation
-    val modifier = maneuver.modifier.lowercase()
-    val type = maneuver.type.lowercase()
-    return when {
-        modifier.contains("u-turn") || modifier.contains("uturn") -> Icons.AutoMirrored.Filled.Undo
-        modifier.contains("sharp right") || modifier.contains("right") -> Icons.Default.TurnRight
-        modifier.contains("sharp left") || modifier.contains("left") -> Icons.Default.TurnLeft
-        modifier.contains("slight right") -> Icons.Default.TurnSlightRight
-        modifier.contains("slight left") -> Icons.Default.TurnSlightLeft
-        type.contains("roundabout") || type.contains("rotary") -> Icons.Default.RoundaboutRight
-        type.contains("arrive") -> Icons.Default.Place
-        else -> Icons.Default.Straight
+@Composable
+fun MainMapTopBar(
+    hasUnreadAdminMessage: Boolean = false,
+    hasUnresolvedTicket: Boolean = false,
+    onOpenDrawer: () -> Unit,
+    onHeadsetClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 10.dp)
+            .testTag("main_top_bar"),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        CircularFloatingButton(
+            icon = Icons.Default.Menu,
+            contentDescription = "Menu",
+            onClick = onOpenDrawer,
+            testTag = "hamburger_menu_button"
+        )
+
+        Box(contentAlignment = Alignment.TopEnd) {
+            CircularFloatingButton(
+                icon = Icons.Default.Headphones,
+                contentDescription = "Support",
+                onClick = onHeadsetClick,
+                testTag = "support_headset_button"
+            )
+            if (hasUnreadAdminMessage) {
+                Box(
+                    modifier = Modifier
+                        .size(12.dp)
+                        .clip(CircleShape)
+                        .background(DelivioRed)
+                        .border(1.5.dp, Color.White, CircleShape)
+                )
+            } else if (hasUnresolvedTicket) {
+                Box(
+                    modifier = Modifier
+                        .size(12.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFFFFA000))
+                        .border(1.5.dp, Color.White, CircleShape)
+                )
+            }
+        }
     }
 }

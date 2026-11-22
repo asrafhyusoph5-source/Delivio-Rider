@@ -42,7 +42,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36], qualifiers = "w411dp-h891dp")
+@Config(sdk = [34], qualifiers = "w411dp-h891dp")
 class OrderDetailsSheetUiTest {
 
     @get:Rule
@@ -239,14 +239,15 @@ class OrderDetailsSheetUiTest {
         composeRule.onNodeWithText("2 passengers").assertIsDisplayed()
         composeRule.onNodeWithText("At the main mall entrance").assertIsDisplayed()
 
-        // Call, Chat, Help
+        // Call, Chat, More (Help removed from quick action row)
         composeRule.onNodeWithTag("quick_actions_row").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag("sheet_call_button").assertIsDisplayed()
         composeRule.onNodeWithText("Call").assertIsDisplayed()
         composeRule.onNodeWithTag("customer_chat_button").assertIsDisplayed()
         composeRule.onNodeWithText("Chat").assertIsDisplayed()
-        composeRule.onNodeWithTag("sheet_headset_button").assertIsDisplayed()
-        composeRule.onNodeWithText("Help").assertIsDisplayed()
+        composeRule.onNodeWithTag("sheet_more_button").assertIsDisplayed()
+        composeRule.onNodeWithText("More").assertIsDisplayed()
+        composeRule.onNodeWithTag("sheet_headset_button").assertDoesNotExist()
 
         composeRule.onNodeWithTag("earnings_details_toggle").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Earnings details (₱127.50)").assertIsDisplayed()
@@ -1804,6 +1805,239 @@ class OrderDetailsSheetUiTest {
 
         assertEquals(parcelOrder.id, capturedOrderId)
         assertEquals("cr_cancellation", capturedType)
+    }
+
+    @Test
+    fun phoneUtils_cleansSpacesDashesBracketsAndKeepsLeadingPlus() {
+        assertEquals("+639171234567", com.example.util.PhoneUtils.cleanPhoneNumber(" +63 917-123 (4567) "))
+        assertEquals("0281234567", com.example.util.PhoneUtils.cleanPhoneNumber("(02) 8123-4567"))
+        assertEquals("09182220002", com.example.util.PhoneUtils.cleanPhoneNumber("[0918] 222-{0002}"))
+        assertEquals("", com.example.util.PhoneUtils.cleanPhoneNumber(""))
+        assertEquals("", com.example.util.PhoneUtils.cleanPhoneNumber("   "))
+        assertEquals("", com.example.util.PhoneUtils.cleanPhoneNumber("Not provided"))
+        assertEquals("", com.example.util.PhoneUtils.cleanPhoneNumber("() - "))
+    }
+
+    @Test
+    fun sheetCallButton_missingPhoneIsDisabledWithNoPhoneNumberLabel() {
+        val foodOrder = sampleFoodOrder().copy(merchantPhone = "Not provided")
+        val stops = RouteStopCalculator.computeBatchStops(listOf(foodOrder), 9.7392, 118.7353)
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                OrderDetailsSheet(
+                    batchStops = stops,
+                    currentStop = stops.first(),
+                    activeOrders = listOf(foodOrder),
+                    isOnline = true,
+                    walletBalance = 0.0,
+                    todayEarnings = 0.0,
+                    todayTrips = 0,
+                    currencySymbol = "₱",
+                    supportPhone = null,
+                    sheetState = OrderSheetState.EXPANDED,
+                    onGoOnlineClick = {},
+                    onAdvanceStep = { _, _ -> },
+                    onReleaseOrder = {},
+                    onReportProblem = {},
+                    onCallClick = { _, _ -> }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("quick_actions_row").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("sheet_call_button").assertIsDisplayed().assertIsNotEnabled()
+        composeRule.onNodeWithText("No phone number").assertIsDisplayed()
+    }
+
+    @Test
+    fun sheetCallButton_cleansFormattedNumberBeforeForwardingCall() {
+        val foodOrder = sampleFoodOrder().copy(merchantPhone = "+63 (917) 555-12 34")
+        val stops = RouteStopCalculator.computeBatchStops(listOf(foodOrder), 9.7392, 118.7353)
+        var calledPhone = ""
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                OrderDetailsSheet(
+                    batchStops = stops,
+                    currentStop = stops.first(),
+                    activeOrders = listOf(foodOrder),
+                    isOnline = true,
+                    walletBalance = 0.0,
+                    todayEarnings = 0.0,
+                    todayTrips = 0,
+                    currencySymbol = "₱",
+                    supportPhone = null,
+                    sheetState = OrderSheetState.EXPANDED,
+                    onGoOnlineClick = {},
+                    onAdvanceStep = { _, _ -> },
+                    onReleaseOrder = {},
+                    onReportProblem = {},
+                    onCallClick = { _, phone -> calledPhone = phone }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("sheet_call_button").performScrollTo().assertIsEnabled().performClick()
+        composeRule.waitForIdle()
+        assertEquals("+639175551234", calledPhone)
+    }
+
+    @Test
+    fun tripDetailsDialog_missingPhoneDisablesButtonWithNoPhoneNumberAndCleansFormattedNumber() {
+        val foodOrder = sampleFoodOrder().copy(
+            merchantPhone = "+63 (48) 433-9900",
+            customerPhone = ""
+        )
+        val stops = RouteStopCalculator.computeBatchStops(listOf(foodOrder), 9.7392, 118.7353)
+        var calledPhone = ""
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                OrderDetailsSheet(
+                    batchStops = stops,
+                    currentStop = stops.first(),
+                    activeOrders = listOf(foodOrder),
+                    isOnline = true,
+                    walletBalance = 0.0,
+                    todayEarnings = 0.0,
+                    todayTrips = 0,
+                    currencySymbol = "₱",
+                    supportPhone = null,
+                    sheetState = OrderSheetState.EXPANDED,
+                    onGoOnlineClick = {},
+                    onAdvanceStep = { _, _ -> },
+                    onReleaseOrder = {},
+                    onReportProblem = {},
+                    onCallClick = { _, phone -> calledPhone = phone }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("trip_details_chip").performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("trip_details_merchant_call_button")
+            .performScrollTo()
+            .assertIsEnabled()
+            .performClick()
+        composeRule.waitForIdle()
+        assertEquals("+63484339900", calledPhone)
+
+        composeRule.onNodeWithTag("trip_details_customer_call_button")
+            .performScrollTo()
+            .assertIsNotEnabled()
+        composeRule.onNode(
+            hasTestTag("trip_details_customer_call_button") and hasText("No phone number")
+        ).assertIsDisplayed()
+    }
+
+    @Test
+    fun sheetMoreButton_opensMoreMenuAndNavigatesToTripDetails() {
+        val foodOrder = sampleFoodOrder()
+        val stops = RouteStopCalculator.computeBatchStops(listOf(foodOrder), 9.7392, 118.7353)
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                OrderDetailsSheet(
+                    batchStops = stops,
+                    currentStop = stops.first(),
+                    activeOrders = listOf(foodOrder),
+                    isOnline = true,
+                    walletBalance = 0.0,
+                    todayEarnings = 0.0,
+                    todayTrips = 0,
+                    currencySymbol = "₱",
+                    supportPhone = null,
+                    sheetState = OrderSheetState.EXPANDED,
+                    onGoOnlineClick = {},
+                    onAdvanceStep = { _, _ -> },
+                    onReleaseOrder = {},
+                    onReportProblem = {},
+                    onCallClick = { _, _ -> }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("sheet_more_button").performScrollTo().performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("sheet_more_menu").assertIsDisplayed()
+        composeRule.onNodeWithTag("more_option_trip_details").performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("trip_details_page").assertIsDisplayed()
+    }
+
+    @Test
+    fun drawerMenuPanel_locksOfflineSwitchDuringActiveOrder() {
+        val onlineRider = com.example.data.models.Rider(
+            uid = "r1",
+            name = "Juan Dela Cruz",
+            isOnline = true
+        )
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                com.example.ui.screens.DrawerMenuPanel(
+                    isOpen = true,
+                    rider = onlineRider,
+                    unreadInboxCount = 0,
+                    hasActiveOrders = true,
+                    onToggleOnline = {},
+                    onToggleService = { _, _ -> },
+                    onClose = {},
+                    onNavigate = {}
+                )
+            }
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("drawer_online_status_card").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("drawer_online_switch").assertIsNotEnabled()
+        composeRule.onNodeWithText("Going offline locked during active order").assertIsDisplayed()
+    }
+
+    @Test
+    fun mainMapTopBar_showsOnlyHamburgerOnLeftAndHeadsetOnRight() {
+        var drawerOpened = false
+        var headsetOpened = false
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                com.example.ui.screens.MainMapTopBar(
+                    hasUnreadAdminMessage = false,
+                    hasUnresolvedTicket = false,
+                    onOpenDrawer = { drawerOpened = true },
+                    onHeadsetClick = { headsetOpened = true }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("main_top_bar").assertIsDisplayed()
+        composeRule.onNodeWithTag("hamburger_menu_button").assertIsDisplayed().performClick()
+        composeRule.onNodeWithTag("support_headset_button").assertIsDisplayed().performClick()
+        composeRule.onNodeWithTag("top_navigation_card").assertDoesNotExist()
+        composeRule.onNodeWithTag("nav_support_headset_button").assertDoesNotExist()
+
+        assertTrue(drawerOpened)
+        assertTrue(headsetOpened)
+    }
+
+    @Test
+    fun phoneUtils_openSystemDialerStartsActionDialWithCleanedTelUri() {
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val started = com.example.util.PhoneUtils.openSystemDialer(context, "+63 (917) 123-4567")
+        assertTrue(started)
+
+        val shadowApp = org.robolectric.Shadows.shadowOf(context as android.app.Application)
+        val launchedIntent = shadowApp.nextStartedActivity
+        assertEquals(android.content.Intent.ACTION_DIAL, launchedIntent.action)
+        assertEquals("tel:+639171234567", launchedIntent.dataString)
     }
 }
 

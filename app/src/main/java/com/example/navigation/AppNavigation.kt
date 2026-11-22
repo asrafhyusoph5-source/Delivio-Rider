@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -44,9 +45,11 @@ fun AppNavigation(
 ) {
     val isLoggedIn by viewModel.isLoggedIn.collectAsState()
     val rider by viewModel.rider.collectAsState()
+    val activeOrders by viewModel.activeOrders.collectAsState()
     val unreadCount by viewModel.unreadNotificationCount.collectAsState()
     val avgRating by viewModel.averageCustomerRating.collectAsState()
     val reviewCount by viewModel.customerReviewCount.collectAsState()
+    val context = LocalContext.current
 
     var isDrawerOpen by remember { mutableStateOf(false) }
 
@@ -259,6 +262,8 @@ fun AppNavigation(
             isServiceOn = { viewModel.isServiceOn(it) },
             getServiceLockReason = { viewModel.getServiceLockReason(it) },
             cityName = viewModel.getCityDisplayName(),
+            hasActiveOrders = activeOrders.isNotEmpty(),
+            onToggleOnline = { viewModel.toggleOnline(context) },
             onToggleService = { serviceKey, enabled ->
                 viewModel.toggleService(serviceKey, enabled)
             },

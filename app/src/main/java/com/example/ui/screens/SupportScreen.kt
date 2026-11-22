@@ -42,8 +42,6 @@ fun SupportScreen(
         Pair("How do I update my vehicle plate number?", "Open My Profile > Edit (top-right pencil icon) and enter your updated plate number or submit newly registered OR/CR.")
     )
 
-    val activeCall by viewModel.activeCall.collectAsState()
-
     Scaffold(
         topBar = {
             TopAppBar(
@@ -54,7 +52,7 @@ fun SupportScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { viewModel.openDialer("+63 48 433 0000", "Delivio 24/7 Driver Support") }) {
+                    IconButton(onClick = { viewModel.openDialer("+63 48 433 0000") }) {
                         Icon(Icons.Default.Phone, contentDescription = "Call Support", tint = DelivioGreen)
                     }
                 },
@@ -169,14 +167,5 @@ fun SupportScreen(
                 }
             }
         }
-    }
-
-    // Safe in-app call overlay
-    activeCall?.let { callInfo ->
-        com.example.ui.components.InAppCallDialog(
-            callInfo = callInfo,
-            onEndCall = { viewModel.endActiveCall() },
-            onOpenSystemDialer = { phone -> viewModel.launchExternalDialer(phone) }
-        )
     }
 }

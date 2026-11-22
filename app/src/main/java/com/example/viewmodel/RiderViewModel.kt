@@ -590,10 +590,6 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private val _completedDeliveryOrder = MutableStateFlow<Order?>(null)
     val completedDeliveryOrder: StateFlow<Order?> = _completedDeliveryOrder.asStateFlow()
 
-    // Active in-app call info
-    private val _activeCall = MutableStateFlow<ActiveCallInfo?>(null)
-    val activeCall: StateFlow<ActiveCallInfo?> = _activeCall.asStateFlow()
-
     init {
         try {
             auth.currentUser?.let { user ->
@@ -660,22 +656,19 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         riderRepository.markAllInboxRead()
     }
 
-    fun endActiveCall() {
-        endCall()
-    }
-
-    fun openDialer(phone: String, label: String = "") {
+    fun openDialer(phone: String, @Suppress("UNUSED_PARAMETER") label: String = "") {
         launchExternalDialer(phone)
     }
 
     fun launchExternalDialer(phoneNumber: String) {
-        try {
-            val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$phoneNumber")).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            }
-            getApplication<Application>().startActivity(intent)
-        } catch (_: Exception) {
-            showSnackbar("Cannot open dialer for $phoneNumber")
+        val cleaned = com.example.util.PhoneUtils.cleanPhoneNumber(phoneNumber)
+        if (cleaned.isEmpty()) {
+            showSnackbar("No phone number")
+            return
+        }
+        val started = com.example.util.PhoneUtils.openSystemDialer(getApplication<Application>(), cleaned)
+        if (!started) {
+            showSnackbar("Cannot open dialer for $cleaned")
         }
     }
 
@@ -1326,31 +1319,15 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    // IN-APP CALL & SUPPORT
-    fun startCall(name: String, phone: String) {
-        if (phone.isBlank()) {
-            showSnackbar("Phone number not available")
-            return
-        }
-        _activeCall.value = ActiveCallInfo(recipientName = name, phoneNumber = phone)
-    }
-
-    fun endCall() {
-        _activeCall.value = null
-    }
-
     fun contactSupport(context: Context) {
-        val phone = supportPhone.value
-        if (!phone.isNullOrBlank()) {
-            val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$phone"))
-            intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            try {
-                context.startActivity(intent)
-            } catch (_: Exception) {
-                showSnackbar("Unable to open dialer for support: $phone")
+        val cleaned = com.example.util.PhoneUtils.cleanPhoneNumber(supportPhone.value)
+        if (cleaned.isNotEmpty()) {
+            val started = com.example.util.PhoneUtils.openSystemDialer(context, cleaned)
+            if (!started) {
+                showSnackbar("Unable to open dialer for support: $cleaned")
             }
         } else {
-            showSnackbar("Support line is currently offline")
+            showSnackbar("No phone number")
         }
     }
 

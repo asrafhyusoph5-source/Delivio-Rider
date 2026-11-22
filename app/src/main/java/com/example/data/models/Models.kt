@@ -1586,13 +1586,6 @@ data class DocumentItem(
     val documentNumber: String = ""
 )
 
-data class ActiveCallInfo(
-    val recipientName: String,
-    val phoneNumber: String,
-    val callType: String = "Delivio Voice Call",
-    val isConnected: Boolean = true
-)
-
 enum class TierLevel(
     val title: String,
     val monthlyRidesRequired: Int,
