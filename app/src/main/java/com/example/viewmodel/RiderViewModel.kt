@@ -804,12 +804,24 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             }
     }
 
+    private fun ensureFirebaseConfigured(): Boolean {
+        val ctx = getApplication<Application>().applicationContext
+        com.example.DelivioApplication.ensureFirebase(ctx)
+        if (com.google.firebase.FirebaseApp.getApps(ctx).isEmpty()) {
+            _isAuthLoading.value = false
+            showSnackbar("Firebase is not configured. Please add app/google-services.json.")
+            return false
+        }
+        return true
+    }
+
     // LOGIN (Email/Password Auth)
     fun login(email: String, pass: String, onSuccess: () -> Unit) {
         if (email.isBlank() || pass.isBlank()) {
             showSnackbar("Please enter your email and password")
             return
         }
+        if (!ensureFirebaseConfigured()) return
 
         _isAuthLoading.value = true
         auth.signInWithEmailAndPassword(email.trim(), pass.trim())
@@ -838,6 +850,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             showSnackbar("Please enter your email to reset password")
             return
         }
+        if (!ensureFirebaseConfigured()) return
         auth.sendPasswordResetEmail(email.trim())
             .addOnSuccessListener {
                 showSnackbar("Password reset email sent to $email")
@@ -871,6 +884,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         selfieUrl: String,
         onSuccess: () -> Unit
     ) {
+        if (!ensureFirebaseConfigured()) return
         _isAuthLoading.value = true
         auth.createUserWithEmailAndPassword(email.trim(), pass.trim())
             .addOnSuccessListener { authResult ->
