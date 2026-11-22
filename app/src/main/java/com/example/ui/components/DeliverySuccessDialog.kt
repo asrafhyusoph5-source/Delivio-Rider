@@ -21,6 +21,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.data.models.Order
 import com.example.ui.theme.*
+import java.util.Locale
+import kotlin.math.abs
 
 @Composable
 fun DeliverySuccessDialog(
@@ -116,7 +118,7 @@ fun DeliverySuccessDialog(
                             color = Color(0xFF795548)
                         )
                         Text(
-                            text = "$currencySymbol${String.format("%.2f", order.estimatedEarnings)}",
+                            text = "$currencySymbol${String.format(Locale.US, "%.2f", order.estimatedEarnings)}",
                             fontSize = 32.sp,
                             fontWeight = FontWeight.Black,
                             color = TextOnYellow
@@ -143,62 +145,53 @@ fun DeliverySuccessDialog(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Breakdown list
+                // Breakdown list (Schema 2 riderQuote or compatible fallback)
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
+                    val quote = order.riderQuote
                     val earning = order.riderEarning
-                    if (earning != null) {
-                        FareRow("Booking Fee (Rank ${earning.rank})", "$currencySymbol${String.format("%.2f", earning.bookingFee)}")
-                        if (earning.pickupFee > 0.0) {
-                            FareRow("Stop 1 Pickup Fee", "$currencySymbol${String.format("%.2f", earning.pickupFee)}")
+                    val delivFee = quote?.deliveryFee
+                        ?: order.pricing?.deliveryFee?.takeIf { it > 0.0 }
+                        ?: earning?.bookingFee?.takeIf { it > 0.0 }
+                        ?: order.feesDeliveryFee.takeIf { it > 0.0 }
+                        ?: order.deliveryFee.takeIf { it > 0.0 }
+                        ?: order.feesTotal
+                    val pickupFee = quote?.pickupFee ?: earning?.pickupFee ?: 0.0
+                    val commRate = quote?.commissionRate ?: 0.0
+                    val commAmount = quote?.commissionAmount ?: 0.0
+                    val totalTip = order.tip + order.lateTipAmount
+                    val rateLabel = if (commRate > 0.0) {
+                        val pct = if (abs(commRate - commRate.toInt().toDouble()) < 0.01) {
+                            commRate.toInt().toString()
+                        } else {
+                            String.format(Locale.US, "%.1f", commRate)
                         }
-                        if (earning.extra > 0.0) {
-                            FareRow("Special Radius Extra", "+$currencySymbol${String.format("%.2f", earning.extra)}", isPositive = true)
-                        }
-                        if (earning.tip > 0.0) {
-                            FareRow("Tip (100% to Driver)", "+$currencySymbol${String.format("%.2f", earning.tip)}", isPositive = true)
-                        }
-                        FareRow("Total Net Earned", "$currencySymbol${String.format("%.2f", earning.total)}", isBold = true, isPositive = true)
-                    } else if (order.isTaxi) {
-                        FareRow("Total Fare", "$currencySymbol${String.format("%.2f", order.feesTotal)}")
-                        val commRate = if (order.platformCommission > 0.0) order.platformCommission else 15.0
-                        val commAmount = order.feesTotal * (commRate / 100.0)
-                        FareRow("Platform Commission (${commRate.toInt()}%)", "-$currencySymbol${String.format("%.2f", commAmount)}")
-                        if (order.tip > 0) {
-                            FareRow("Tip (100% to Driver)", "+$currencySymbol${String.format("%.2f", order.tip)}", isPositive = true)
-                        }
-                    } else {
-                        FareRow("Base Pay", "$currencySymbol${String.format("%.2f", order.baseFare)}")
-                        FareRow("Per-km Pay (${String.format("%.1f", order.deliveryDistanceKm)} km)", "$currencySymbol${String.format("%.2f", order.distanceFare)}")
-                        if (order.waitingPay > 0) {
-                            FareRow("Waiting-time Pay", "+$currencySymbol${String.format("%.2f", order.waitingPay)}", isPositive = true)
-                        }
-                        if (order.extraStopPay > 0) {
-                            FareRow("Extra-stop Pay", "+$currencySymbol${String.format("%.2f", order.extraStopPay)}", isPositive = true)
-                        }
-                        if (order.returnTripPay > 0) {
-                            FareRow("Return-trip Pay", "+$currencySymbol${String.format("%.2f", order.returnTripPay)}", isPositive = true)
-                        }
-                        if (order.urgentBonus > 0) {
-                            FareRow("Urgent Request Bonus", "+$currencySymbol${String.format("%.2f", order.urgentBonus)}", isPositive = true)
-                        }
-                        if (order.surgeBonus > 0) {
-                            FareRow("Peak Surge Bonus", "+$currencySymbol${String.format("%.2f", order.surgeBonus)}", isPositive = true)
-                        }
-                        if (order.tip > 0) {
-                            FareRow("Tip", "+$currencySymbol${String.format("%.2f", order.tip)}", isPositive = true)
-                        }
-                        FareRow("Platform Commission", "-$currencySymbol${String.format("%.2f", order.platformCommission)}")
-                    }
+                        " (-$pct%)"
+                    } else ""
+
+                    FareRow("Delivery fee", "$currencySymbol${String.format(Locale.US, "%.2f", delivFee)}")
+                    FareRow("Pick up fee", "$currencySymbol${String.format(Locale.US, "%.2f", pickupFee)}")
+                    FareRow("Commission fee$rateLabel", "-$currencySymbol${String.format(Locale.US, "%.2f", commAmount)}")
+                    FareRow(
+                        "Tip",
+                        "+$currencySymbol${String.format(Locale.US, "%.2f", totalTip)}",
+                        isPositive = totalTip > 0.0
+                    )
+                    FareRow(
+                        "Total",
+                        "$currencySymbol${String.format(Locale.US, "%.2f", order.estimatedEarnings)}",
+                        isBold = true,
+                        isPositive = true
+                    )
 
                     HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
                     if (order.isSplitChild || order.badge.equals("split", ignoreCase = true)) {
                         FareRow("Cash Collected", "No Cash Collected", isBold = true)
                     } else if (order.isCod && (!order.isRequestRider || order.cashAmountToCollect > 0.0)) {
                         val collected = if (order.codCollected > 0) order.codCollected else order.cashAmountToCollect
-                        FareRow("COD Cash Collected", "$currencySymbol${String.format("%.2f", collected)}", isBold = true)
+                        FareRow("COD Cash Collected", "$currencySymbol${String.format(Locale.US, "%.2f", collected)}", isBold = true)
                     } else if (order.isRequestRider) {
                         FareRow("Payment", "No cash to collect (paid)", isBold = true)
                     } else {

@@ -816,8 +816,8 @@ class ExampleRobolectricTest {
             cityId = "puerto_princesa",
             merchantLat = 9.7390,
             merchantLng = 118.7350,
-            customerLat = 9.7400,
-            customerLng = 118.7360,
+            customerLat = 9.7600,
+            customerLng = 118.7560,
             isPoolable = true,
             riderStep = OrderStepConstants.STEP_HEADING_TO_MERCHANT
         )
@@ -832,13 +832,17 @@ class ExampleRobolectricTest {
             cityId = "puerto_princesa",
             merchantLat = 9.7395,
             merchantLng = 118.7355,
-            customerLat = 9.7405,
-            customerLng = 118.7365,
+            customerLat = 9.7605,
+            customerLng = 118.7565,
             isPoolable = true
         )
+        // Food and Mart never mix even when martBatching = true
         assertFalse(com.example.data.constants.BatchConstants.canJoin(activeBatch, candidateOrder, dispatch))
         val dispatchMartOn = dispatch.copy(martBatching = true)
-        assertTrue(com.example.data.constants.BatchConstants.canJoin(activeBatch, candidateOrder, dispatchMartOn))
+        assertFalse(com.example.data.constants.BatchConstants.canJoin(activeBatch, candidateOrder, dispatchMartOn))
+        // Mart + Mart allowed when martBatching = true
+        val martBatch = listOf(batchOrder.copy(id = "m_active", serviceType = "convenience"))
+        assertTrue(com.example.data.constants.BatchConstants.canJoin(martBatch, candidateOrder, dispatchMartOn))
 
         // Close food order: allowed even when martBatching = false
         val candidateFoodOrder = candidateOrder.copy(id = "c2", serviceType = "food")
@@ -2366,10 +2370,11 @@ class ExampleRobolectricTest {
             )
         )
 
-        // When martBatching == true (behaves as before: Mart can hold and batch with Food):
+        // When martBatching == true: Mart can hold and batch with Mart, but NEVER mix with Food:
         assertTrue(com.example.data.constants.BatchConstants.isPoolable(martSaverReady, dispatchOn))
         assertTrue(com.example.data.constants.BatchConstants.isHolding(martSaverReady, dispatchOn, now))
-        assertTrue(com.example.data.constants.BatchConstants.isPairable(martStandardPreparing, foodOrder1, dispatchOn))
+        assertFalse(com.example.data.constants.BatchConstants.isPairable(martStandardPreparing, foodOrder1, dispatchOn))
+        assertTrue(com.example.data.constants.BatchConstants.isPairable(martStandardPreparing, martSaverReady, dispatchOn))
         assertTrue(
             com.example.data.constants.BatchConstants.canReceiveMoreOffers(
                 activeList = listOf(martStandardPreparing),
@@ -2377,7 +2382,7 @@ class ExampleRobolectricTest {
                 isPriorityRider = true
             )
         )
-        assertTrue(
+        assertFalse(
             com.example.data.constants.BatchConstants.isCandidateCompatibleWithActive(
                 activeList = listOf(foodOrder1),
                 candidate = martSaverReady,
@@ -2385,8 +2390,23 @@ class ExampleRobolectricTest {
             )
         )
         assertTrue(
+            com.example.data.constants.BatchConstants.isCandidateCompatibleWithActive(
+                activeList = listOf(martStandardPreparing),
+                candidate = martSaverReady,
+                dispatch = dispatchOn
+            )
+        )
+        assertFalse(
             com.example.data.constants.BatchConstants.canJoin(
                 batch = listOf(foodOrder1),
+                order = martSaverReady,
+                dispatch = dispatchOn,
+                isPriorityRider = true
+            )
+        )
+        assertTrue(
+            com.example.data.constants.BatchConstants.canJoin(
+                batch = listOf(martStandardPreparing),
                 order = martSaverReady,
                 dispatch = dispatchOn,
                 isPriorityRider = true

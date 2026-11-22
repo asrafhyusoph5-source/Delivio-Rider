@@ -40,6 +40,8 @@ import com.example.data.models.OrderPayBreakdown
 import com.example.data.models.deduplicateAddress
 import com.example.ui.theme.*
 import kotlinx.coroutines.delay
+import java.util.Locale
+import kotlin.math.abs
 
 @Composable
 fun IncomingOrderDialog(
@@ -299,13 +301,13 @@ fun IncomingOrderDialog(
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             Text(
-                                text = "ESTIMATED EARNINGS",
-                                fontSize = 11.sp,
+                                text = "Estimated earnings",
+                                fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = TextOnYellow.copy(alpha = 0.8f)
+                                color = TextOnYellow.copy(alpha = 0.85f)
                             )
                             Text(
-                                text = "$currencySymbol${String.format("%.2f", bundle.totalDriverPay)}",
+                                text = "$currencySymbol${String.format(Locale.US, "%.2f", bundle.totalDriverPay)}",
                                 fontSize = 32.sp,
                                 fontWeight = FontWeight.Black,
                                 color = TextOnYellow
@@ -431,7 +433,7 @@ fun IncomingOrderDialog(
                         }
                     }
 
-                    // Collapsed Pay Breakdown Toggle
+                    // Collapsed Earnings Details Toggle
                     Surface(
                         shape = RoundedCornerShape(12.dp),
                         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
@@ -448,69 +450,81 @@ fun IncomingOrderDialog(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = "Pay breakdown",
+                                    text = "Earnings details",
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
                                 Icon(
                                     imageVector = if (showPayBreakdown) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                                    contentDescription = if (showPayBreakdown) "Hide pay breakdown" else "Show pay breakdown",
+                                    contentDescription = if (showPayBreakdown) "Hide earnings details" else "Show earnings details",
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
 
                             AnimatedVisibility(visible = showPayBreakdown) {
+                                val totalDeliveryFee = bundle.breakdowns.sumOf { it.deliveryFee }
+                                val totalPickupFee = bundle.breakdowns.sumOf { it.pickupFee }
+                                    .let { if (it > 0.0) it else bundle.pickupFee }
+                                val totalCommission = bundle.breakdowns.sumOf { it.commissionAmount }
+                                val totalTip = bundle.breakdowns.sumOf { it.tip }
+                                val distinctRates = bundle.breakdowns.map { it.commissionRate }.filter { it > 0.0 }.distinct()
+                                val rateSuffix = when {
+                                    distinctRates.isEmpty() -> ""
+                                    distinctRates.size == 1 -> " (-${formatRatePercent(distinctRates.first())}%)"
+                                    else -> " (${distinctRates.joinToString("/") { "-${formatRatePercent(it)}%" }})"
+                                }
                                 Column(
                                     modifier = Modifier.padding(top = 8.dp),
                                     verticalArrangement = Arrangement.spacedBy(5.dp)
                                 ) {
                                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
-                                    if (bundle.pickupFee > 0.0) {
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween
-                                        ) {
-                                            Text("Pickup Fee (Stop 1)", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                            Text("$currencySymbol${String.format("%.2f", bundle.pickupFee)}", fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                                        }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text("Delivery fee", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text("$currencySymbol${String.format(Locale.US, "%.2f", totalDeliveryFee)}", fontWeight = FontWeight.Bold, fontSize = 12.sp)
                                     }
-                                    bundle.breakdowns.forEachIndexed { idx, bk ->
-                                        val orderLabel = if (bundle.orders.size > 1) "Order ${idx + 1} Delivery Fee" else "Delivery Fee"
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween
-                                        ) {
-                                            Text(orderLabel, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                            Text("$currencySymbol${String.format("%.2f", bk.deliveryFee)}", fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                                        }
-                                        if (bk.tip > 0.0) {
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                horizontalArrangement = Arrangement.SpaceBetween
-                                            ) {
-                                                Text(
-                                                    if (bundle.orders.size > 1) "Order ${idx + 1} Tip" else "Customer Tip",
-                                                    fontSize = 12.sp,
-                                                    color = DelivioGreenDark
-                                                )
-                                                Text(
-                                                    "+$currencySymbol${String.format("%.2f", bk.tip)}",
-                                                    fontWeight = FontWeight.Bold,
-                                                    fontSize = 12.sp,
-                                                    color = DelivioGreenDark
-                                                )
-                                            }
-                                        }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text("Pick up fee", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text("$currencySymbol${String.format(Locale.US, "%.2f", totalPickupFee)}", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                    }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text("Commission fee$rateSuffix", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text(
+                                            "-$currencySymbol${String.format(Locale.US, "%.2f", totalCommission)}",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp,
+                                            color = if (totalCommission > 0.0) DelivioRed else MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text("Tip", fontSize = 12.sp, color = if (totalTip > 0.0) DelivioGreenDark else MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text(
+                                            "+$currencySymbol${String.format(Locale.US, "%.2f", totalTip)}",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp,
+                                            color = if (totalTip > 0.0) DelivioGreenDark else MaterialTheme.colorScheme.onSurface
+                                        )
                                     }
                                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
-                                        Text("Total Driver Pay", fontWeight = FontWeight.Black, fontSize = 13.sp)
+                                        Text("Total", fontWeight = FontWeight.Black, fontSize = 13.sp)
                                         Text(
-                                            "$currencySymbol${String.format("%.2f", bundle.totalDriverPay)}",
+                                            "$currencySymbol${String.format(Locale.US, "%.2f", bundle.totalDriverPay)}",
                                             fontWeight = FontWeight.Black,
                                             fontSize = 13.sp,
                                             color = DelivioYellowDark
@@ -574,6 +588,14 @@ fun IncomingOrderDialog(
     }
 }
 
+private fun formatRatePercent(rate: Double): String {
+    return if (abs(rate - rate.toInt().toDouble()) < 0.01) {
+        rate.toInt().toString()
+    } else {
+        String.format(Locale.US, "%.1f", rate)
+    }
+}
+
 // Single order backward-compatible wrapper
 @Composable
 fun IncomingOrderDialog(
@@ -586,29 +608,40 @@ fun IncomingOrderDialog(
     onMissed: () -> Unit = onDecline,
     onDisplayed: () -> Unit = {}
 ) {
+    val quote = order.riderQuote
+    val delivFee = quote?.deliveryFee ?: order.pricing?.deliveryFee?.takeIf { it > 0.0 } ?: order.deliveryFee
+    val pickupFee = quote?.pickupFee ?: 0.0
+    val commRate = quote?.commissionRate ?: 0.0
+    val commAmount = quote?.commissionAmount ?: 0.0
+    val netTotal = quote?.net ?: order.estimatedEarnings
     val breakdown = OrderPayBreakdown(
         orderId = order.id,
         orderNumber = order.orderNumber,
-        rank = 1,
-        deliveryFee = order.deliveryFee,
-        pickupFee = 0.0,
+        rank = quote?.batchIndex ?: order.batchIndex.coerceAtLeast(1),
+        deliveryFee = delivFee,
+        pickupFee = pickupFee,
+        commissionRate = commRate,
+        commissionAmount = commAmount,
         tip = order.tip,
-        totalPay = order.estimatedEarnings,
+        gross = quote?.gross ?: (delivFee + pickupFee + order.tip),
+        totalPay = netTotal,
         isCod = order.isCod,
         codAmount = order.cashAmountToCollect,
         badge = order.badge,
-        customerArea = order.customerArea
+        customerArea = order.customerArea,
+        pickupKm = quote?.pickupKm ?: order.pickupDistanceKm,
+        riderQuote = quote
     )
     val timerSecs = if (order.serviceType.equals(OrderStepConstants.SERVICE_REQUEST, ignoreCase = true)) 20 else 30
     val bundle = OfferBundle(
         id = order.id,
         type = OfferType.SINGLE,
         orders = listOf(order),
-        firstPickupDistanceKm = order.pickupDistanceKm,
+        firstPickupDistanceKm = quote?.pickupKm ?: order.pickupDistanceKm,
         totalTripDistanceKm = order.deliveryDistanceKm,
-        pickupFee = 0.0,
+        pickupFee = pickupFee,
         breakdowns = listOf(breakdown),
-        totalDriverPay = order.estimatedEarnings,
+        totalDriverPay = netTotal,
         eligibleSince = System.currentTimeMillis(),
         waveDelaySeconds = 0,
         badge = order.badge,

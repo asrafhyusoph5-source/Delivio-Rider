@@ -86,6 +86,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     val incomingOffer = riderRepository.incomingOffer
     val incomingOfferBundle = riderRepository.incomingOfferBundle
     val deliveredOrders = riderRepository.deliveredOrders
+    val sessionClaims = riderRepository.sessionClaims
+    val commissionSettings = riderRepository.commissionSettings
+    val deliveryRatesV2 = riderRepository.deliveryRatesV2
     val tierConfigs = riderRepository.tierConfigs
     val inboxMessages = riderRepository.inboxMessages
     val supportPhone = riderRepository.supportPhone
@@ -358,14 +361,76 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         )
     }.stateIn(viewModelScope, SharingStarted.Lazily, RiderTierStatus())
 
-    val earningsSummary: StateFlow<EarningSummary> = deliveredOrders.map { orders ->
-        val totalNet = orders.sumOf { it.estimatedEarnings }
+    val earningsSummary: StateFlow<EarningSummary> = combine(
+        deliveredOrders,
+        riderRepository.questClaims,
+        sessionClaims
+    ) { orders, qClaims, sClaims ->
+        val tz = java.util.TimeZone.getTimeZone("Asia/Manila")
+        val nowMs = System.currentTimeMillis()
+        val nowCal = java.util.Calendar.getInstance(tz).apply { timeInMillis = nowMs }
+        val todayYear = nowCal.get(java.util.Calendar.YEAR)
+        val todayDoy = nowCal.get(java.util.Calendar.DAY_OF_YEAR)
+        val todayMonth = nowCal.get(java.util.Calendar.MONTH)
+        val weekCal = java.util.Calendar.getInstance(tz).apply {
+            firstDayOfWeek = java.util.Calendar.MONDAY
+            timeInMillis = nowMs
+        }
+        val currentWeek = weekCal.get(java.util.Calendar.WEEK_OF_YEAR)
+        val currentWeekYear = weekCal.get(java.util.Calendar.YEAR)
+
+        fun isSameDay(tsMs: Long): Boolean {
+            if (tsMs <= 0L) return false
+            val c = java.util.Calendar.getInstance(tz).apply { timeInMillis = tsMs }
+            return c.get(java.util.Calendar.YEAR) == todayYear && c.get(java.util.Calendar.DAY_OF_YEAR) == todayDoy
+        }
+
+        fun isSameWeek(tsMs: Long): Boolean {
+            if (tsMs <= 0L) return false
+            val c = java.util.Calendar.getInstance(tz).apply {
+                firstDayOfWeek = java.util.Calendar.MONDAY
+                timeInMillis = tsMs
+            }
+            return c.get(java.util.Calendar.YEAR) == currentWeekYear && c.get(java.util.Calendar.WEEK_OF_YEAR) == currentWeek
+        }
+
+        fun isSameMonth(tsMs: Long): Boolean {
+            if (tsMs <= 0L) return false
+            val c = java.util.Calendar.getInstance(tz).apply { timeInMillis = tsMs }
+            return c.get(java.util.Calendar.YEAR) == todayYear && c.get(java.util.Calendar.MONTH) == todayMonth
+        }
+
+        fun orderTs(order: Order): Long {
+            val d = order.deliveredAtMillis
+            if (d > 0L) return d
+            val c = OrderDocumentParser.parseTolerantTimeMillisOrZero(order.completedAt)
+            if (c > 0L) return c
+            val u = OrderDocumentParser.parseTolerantTimeMillisOrZero(order.updatedAt)
+            if (u > 0L) return u
+            return OrderChatConstants.getOrderClosedTimeMillis(order) ?: 0L
+        }
+
+        val creditedStatuses = setOf("credited", "approved", "paid")
+        val bonusItems: List<Pair<Long, Double>> =
+            qClaims.values.filter { it.status.trim().lowercase() in creditedStatuses && it.rewardAmount > 0.0 }
+                .map { (it.createdAt?.toDate()?.time ?: 0L) to it.rewardAmount } +
+            sClaims.filter { it.status.trim().lowercase() in creditedStatuses && it.rewardAmount > 0.0 }
+                .map { it.createdAtMillis to it.rewardAmount }
+
+        val todayOrders = orders.filter { isSameDay(orderTs(it)) }
+        val weekOrders = orders.filter { isSameWeek(orderTs(it)) }
+        val monthOrders = orders.filter { isSameMonth(orderTs(it)) }
+
+        val todayNet = todayOrders.sumOf { it.estimatedEarnings } + bonusItems.filter { isSameDay(it.first) }.sumOf { it.second }
+        val weekNet = weekOrders.sumOf { it.estimatedEarnings } + bonusItems.filter { isSameWeek(it.first) }.sumOf { it.second }
+        val monthNet = monthOrders.sumOf { it.estimatedEarnings } + bonusItems.filter { isSameMonth(it.first) }.sumOf { it.second }
+
         EarningSummary(
-            todayNet = totalNet,
-            weekNet = totalNet,
-            monthNet = totalNet,
-            jobsCompletedToday = orders.size,
-            onlineHoursToday = 6.5
+            todayNet = todayNet,
+            weekNet = weekNet,
+            monthNet = monthNet,
+            jobsCompletedToday = todayOrders.size,
+            onlineHoursToday = 0.0
         )
     }.stateIn(viewModelScope, SharingStarted.Lazily, EarningSummary())
 
@@ -382,8 +447,19 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         }
     }.stateIn(viewModelScope, SharingStarted.Lazily, 0.0)
 
-    val earningsAvailableToWithdraw: StateFlow<Double> = deliveredOrders.map { orders ->
-        orders.sumOf { it.estimatedEarnings }
+    val earningsAvailableToWithdraw: StateFlow<Double> = combine(
+        deliveredOrders,
+        riderRepository.questClaims,
+        sessionClaims
+    ) { orders, qClaims, sClaims ->
+        val creditedStatuses = setOf("credited", "approved", "paid")
+        val questBonuses = qClaims.values
+            .filter { it.status.trim().lowercase() in creditedStatuses }
+            .sumOf { it.rewardAmount }
+        val sessionBonuses = sClaims
+            .filter { it.status.trim().lowercase() in creditedStatuses }
+            .sumOf { it.rewardAmount }
+        orders.sumOf { it.estimatedEarnings } + questBonuses + sessionBonuses
     }.stateIn(viewModelScope, SharingStarted.Lazily, 0.0)
 
     // Real COD cash collected and Remittance due
@@ -1154,12 +1230,27 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                         order.isParcel && order.parcelCollectsAtPickup -> "pickup"
                         else -> order.cashCollectedStage
                     }
+                    val finalQuote = order.riderQuote ?: run {
+                        val rates = deliveryRatesV2.value
+                        if (rates?.isSchema2 == true || order.pricing?.schema == 2) {
+                            PricingEngine.computeRiderQuote(
+                                order = order,
+                                pickupKm = order.pickupDistanceKm,
+                                batchIndex = order.batchIndex.coerceAtLeast(1),
+                                rates = rates,
+                                commission = commissionSettings.value,
+                                legacyPaySettings = riderRepository.riderPaySettings.value,
+                                legacySpecialRadiusExtra = riderRepository.dispatchSettings.value.specialRadiusRiderExtra
+                            )
+                        } else null
+                    }
                     _completedDeliveryOrder.value = order.copy(
                         status = finalStatus,
                         riderStep = OrderStepConstants.STEP_COMPLETED,
                         codCollected = codAmountFinal,
                         cashCollected = if (order.isParcel) codAmountFinal else order.cashCollected,
-                        cashCollectedStage = collectedStageFinal
+                        cashCollectedStage = collectedStageFinal,
+                        riderQuote = finalQuote
                     )
                 } else {
                     showSnackbar("Stage updated successfully")

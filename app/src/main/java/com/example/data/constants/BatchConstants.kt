@@ -60,6 +60,8 @@ data class DispatchSettings(
     val maxBatch: Int = 2,
     val poolMaxPickupGapKm: Double = 2.0,
     val poolMaxDropoffGapKm: Double = 2.5,
+    val batchDirectionToleranceDeg: Double = 45.0,
+    val batchMaxDetourPercent: Double = 40.0,
     val searchRadiusKm: Double = 8.0,
     val waveSeconds: Int = 5,
     val specialRadiusRiderExtra: Double = 0.0,
@@ -75,6 +77,14 @@ fun formatKmLimit(km: Double): String {
 
 object BatchConstants {
 
+    private fun logBatchReject(reason: String) {
+        try {
+            android.util.Log.d("BATCH", reason)
+        } catch (_: Throwable) {
+            // Safe when running in pure JVM without Android Log mock
+        }
+    }
+
     // Helper: Haversine distance in km
     fun distanceKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
         if (lat1 == 0.0 || lon1 == 0.0 || lat2 == 0.0 || lon2 == 0.0) return 0.0
@@ -86,6 +96,91 @@ object BatchConstants {
                 sin(dLon / 2).pow(2)
         val c = 2 * atan2(sqrt(a), sqrt(1 - a))
         return earthRadius * c
+    }
+
+    /** Forward azimuth bearing in degrees [0, 360). */
+    fun bearingDeg(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val phi1 = Math.toRadians(lat1)
+        val phi2 = Math.toRadians(lat2)
+        val dLon = Math.toRadians(lon2 - lon1)
+        val y = sin(dLon) * cos(phi2)
+        val x = cos(phi1) * sin(phi2) - sin(phi1) * cos(phi2) * cos(dLon)
+        val theta = atan2(y, x)
+        return (Math.toDegrees(theta) + 360.0) % 360.0
+    }
+
+    /** Smallest angular difference between two bearings in degrees [0, 180]. */
+    fun angleDiffDeg(b1: Double, b2: Double): Double {
+        val diff = ((b1 - b2 + 540.0) % 360.0) - 180.0
+        return abs(diff)
+    }
+
+    fun hasValidRouteCoords(order: Order): Boolean {
+        return order.merchantLat != 0.0 && order.merchantLng != 0.0 &&
+            order.customerLat != 0.0 && order.customerLng != 0.0
+    }
+
+    /**
+     * Computes nearest-to-nearest stop-by-stop distance across unvisited pickups followed by drop-offs.
+     */
+    fun computeNearestRouteDistanceKm(
+        orders: List<Order>,
+        riderLoc: Pair<Double, Double>? = null
+    ): Double {
+        val validOrders = orders.filter { hasValidRouteCoords(it) }
+        if (validOrders.isEmpty()) return 0.0
+
+        val prePickupSteps = setOf(
+            OrderStepConstants.STEP_TO_MERCHANT,
+            OrderStepConstants.STEP_AT_MERCHANT,
+            OrderStepConstants.STEP_HEADING_TO_MERCHANT,
+            OrderStepConstants.STEP_ARRIVED_AT_MERCHANT
+        )
+
+        val remainingPickups = validOrders
+            .filter { it.riderStep.lowercase().trim() in prePickupSteps }
+            .toMutableList()
+        val remainingDropoffs = validOrders.toMutableList()
+
+        val hasRiderLoc = riderLoc != null && riderLoc.first != 0.0 && riderLoc.second != 0.0
+        var totalKm = 0.0
+        var curLat: Double
+        var curLng: Double
+
+        if (hasRiderLoc) {
+            curLat = riderLoc!!.first
+            curLng = riderLoc.second
+        } else if (remainingPickups.isNotEmpty()) {
+            val firstPickup = remainingPickups.removeAt(0)
+            curLat = firstPickup.merchantLat
+            curLng = firstPickup.merchantLng
+        } else {
+            val firstOrder = validOrders.first()
+            curLat = firstOrder.merchantLat
+            curLng = firstOrder.merchantLng
+        }
+
+        while (remainingPickups.isNotEmpty()) {
+            val nearest = remainingPickups.minByOrNull {
+                distanceKm(curLat, curLng, it.merchantLat, it.merchantLng)
+            } ?: break
+            remainingPickups.remove(nearest)
+            totalKm += distanceKm(curLat, curLng, nearest.merchantLat, nearest.merchantLng)
+            curLat = nearest.merchantLat
+            curLng = nearest.merchantLng
+        }
+
+        while (remainingDropoffs.isNotEmpty()) {
+            val nearest = remainingDropoffs.minByOrNull {
+                distanceKm(curLat, curLng, it.customerLat, it.customerLng)
+            } ?: break
+            remainingDropoffs.remove(nearest)
+            totalKm += distanceKm(curLat, curLng, nearest.customerLat, nearest.customerLng)
+            curLat = nearest.customerLat
+            curLng = nearest.customerLng
+        }
+
+        return totalKm
     }
 
     /**
@@ -117,6 +212,17 @@ object BatchConstants {
         return s == OrderStepConstants.SERVICE_MART || s == "mart"
     }
 
+    fun isFoodService(serviceType: String?): Boolean {
+        val s = serviceType?.trim()?.lowercase() ?: ""
+        return s == "food" || s == OrderStepConstants.SERVICE_FOOD
+    }
+
+    /** Food joins Food only; Mart/Convenience joins Mart/Convenience only. Never mix Food and Mart. */
+    fun isSameBatchServiceFamily(s1: String?, s2: String?): Boolean {
+        return (isFoodService(s1) && isFoodService(s2)) ||
+            (isMartService(s1) && isMartService(s2))
+    }
+
     /**
      * poolable(order) = order.dispatch.poolable == true, serviceType is food (or convenience when martBatching is true),
      * fulfillment is not pickup. Priority orders and Mart orders (when martBatching is false) are never pooled.
@@ -128,7 +234,7 @@ object BatchConstants {
         if (!order.isPoolable) return false
         val s = order.serviceType.trim().lowercase()
         if (isMartService(s) && !dispatch.martBatching) return false
-        if (s != "food" && s != "convenience" && s != "mart" && s != OrderStepConstants.SERVICE_FOOD) return false
+        if (!isFoodService(s) && !isMartService(s)) return false
         if (order.isPickup) return false
         return true
     }
@@ -144,7 +250,7 @@ object BatchConstants {
             if (!dispatch.martBatching && isMartService(s)) {
                 true
             } else {
-                s !in listOf("food", "convenience", "mart", OrderStepConstants.SERVICE_FOOD)
+                !isFoodService(s) && !isMartService(s)
             }
         }
         if (hasSingleOnlyActive) return false
@@ -164,7 +270,8 @@ object BatchConstants {
     }
 
     /**
-     * Returns true if a candidate order is compatible with the rider's active orders under current martBatching rules.
+     * Returns true if a candidate order is compatible with the rider's active orders under current martBatching
+     * and same-service-family (never mix Food and Mart) rules.
      */
     fun isCandidateCompatibleWithActive(activeList: List<Order>, candidate: Order, dispatch: DispatchSettings): Boolean {
         if (activeList.isEmpty()) return true
@@ -174,11 +281,15 @@ object BatchConstants {
 
         val s = candidate.serviceType.lowercase().trim()
         val isBatchableCandidate = if (dispatch.martBatching) {
-            s in listOf("food", "convenience", "mart", OrderStepConstants.SERVICE_FOOD)
+            isFoodService(s) || isMartService(s)
         } else {
-            !isMartService(s) && s in listOf("food", OrderStepConstants.SERVICE_FOOD)
+            isFoodService(s)
         }
-        return isBatchableCandidate
+        if (!isBatchableCandidate) return false
+
+        // Never mix Food and Mart in a batch
+        val activeService = activeList.first().serviceType
+        return isSameBatchServiceFamily(activeService, candidate.serviceType)
     }
 
     /**
@@ -262,14 +373,81 @@ object BatchConstants {
         return true
     }
 
+    private fun checkDirectionAndDetour(
+        batch: List<Order>,
+        candidate: Order,
+        dispatch: DispatchSettings,
+        riderLoc: Pair<Double, Double>?
+    ): String? {
+        if (!hasValidRouteCoords(candidate)) return null
+        val refOrders = batch.filter { hasValidRouteCoords(it) }
+        if (refOrders.isEmpty()) return null
+
+        val firstOrder = refOrders.first()
+        val refBearing = bearingDeg(firstOrder.merchantLat, firstOrder.merchantLng, firstOrder.customerLat, firstOrder.customerLng)
+        val candBearing = bearingDeg(candidate.merchantLat, candidate.merchantLng, candidate.customerLat, candidate.customerLng)
+
+        val dirDiff = angleDiffDeg(refBearing, candBearing)
+        if (dirDiff > dispatch.batchDirectionToleranceDeg) {
+            return "direction diff ${String.format(java.util.Locale.US, "%.1f", dirDiff)}deg > ${dispatch.batchDirectionToleranceDeg}deg"
+        }
+
+        // Candidate drop-off must lie ahead along the batch direction (not behind the first pickup)
+        val distFromFirstPickupToCandDrop = distanceKm(
+            firstOrder.merchantLat, firstOrder.merchantLng,
+            candidate.customerLat, candidate.customerLng
+        )
+        if (distFromFirstPickupToCandDrop > 0.05) {
+            val toCandDropBearing = bearingDeg(
+                firstOrder.merchantLat, firstOrder.merchantLng,
+                candidate.customerLat, candidate.customerLng
+            )
+            val aheadAngle = angleDiffDeg(refBearing, toCandDropBearing)
+            if (aheadAngle > 90.0) {
+                return "dropoff behind first pickup (angle ${String.format(java.util.Locale.US, "%.1f", aheadAngle)}deg > 90deg)"
+            }
+        }
+
+        // Total route distance WITH candidate <= (1 + batchMaxDetourPercent / 100) * WITHOUT candidate
+        val routeWithout = computeNearestRouteDistanceKm(refOrders, riderLoc)
+        if (routeWithout > 0.0) {
+            val routeWith = computeNearestRouteDistanceKm(refOrders + candidate, riderLoc)
+            val maxAllowed = routeWithout * (1.0 + dispatch.batchMaxDetourPercent / 100.0)
+            if (routeWith > maxAllowed) {
+                val detourPct = ((routeWith - routeWithout) / routeWithout) * 100.0
+                return "detour ${String.format(java.util.Locale.US, "%.1f", detourPct)}% > ${dispatch.batchMaxDetourPercent}%"
+            }
+        }
+        return null
+    }
+
     /**
-     * pairable(o1, o2): both poolable, same city, unassigned,
-     * pickups within poolMaxPickupGapKm, drop-offs within poolMaxDropoffGapKm.
+     * pairable(o1, o2): both poolable, same service family (Food+Food or Mart+Mart only), same city, unassigned,
+     * pickups within poolMaxPickupGapKm, drop-offs within poolMaxDropoffGapKm,
+     * same travel direction within batchDirectionToleranceDeg, ahead of first pickup, and within batchMaxDetourPercent.
      */
-    fun isPairable(o1: Order, o2: Order, dispatch: DispatchSettings): Boolean {
-        if (!isPoolable(o1, dispatch) || !isPoolable(o2, dispatch)) return false
-        if (o1.riderId != null || o2.riderId != null) return false
-        if (o1.cityId.isNotBlank() && o2.cityId.isNotBlank() && o1.cityId != o2.cityId) return false
+    fun isPairable(
+        o1: Order,
+        o2: Order,
+        dispatch: DispatchSettings,
+        riderLoc: Pair<Double, Double>? = null
+    ): Boolean {
+        if (!isPoolable(o1, dispatch) || !isPoolable(o2, dispatch)) {
+            logBatchReject("Rejected pair (${o1.id}, ${o2.id}): not both poolable")
+            return false
+        }
+        if (!isSameBatchServiceFamily(o1.serviceType, o2.serviceType)) {
+            logBatchReject("Rejected pair (${o1.id}, ${o2.id}): cannot mix ${o1.serviceType} and ${o2.serviceType}")
+            return false
+        }
+        if (o1.riderId != null || o2.riderId != null) {
+            logBatchReject("Rejected pair (${o1.id}, ${o2.id}): already assigned")
+            return false
+        }
+        if (o1.cityId.isNotBlank() && o2.cityId.isNotBlank() && o1.cityId != o2.cityId) {
+            logBatchReject("Rejected pair (${o1.id}, ${o2.id}): city mismatch (${o1.cityId} vs ${o2.cityId})")
+            return false
+        }
 
         // Pickups distance
         val pickupGap = if (o1.merchantLat != 0.0 && o2.merchantLat != 0.0) {
@@ -277,7 +455,10 @@ object BatchConstants {
         } else {
             0.0
         }
-        if (pickupGap > dispatch.poolMaxPickupGapKm) return false
+        if (pickupGap > dispatch.poolMaxPickupGapKm) {
+            logBatchReject("Rejected pair (${o1.id}, ${o2.id}): pickup gap ${String.format(java.util.Locale.US, "%.2f", pickupGap)} km > ${dispatch.poolMaxPickupGapKm} km")
+            return false
+        }
 
         // Drop-offs distance
         val dropoffGap = if (o1.customerLat != 0.0 && o2.customerLat != 0.0) {
@@ -285,30 +466,64 @@ object BatchConstants {
         } else {
             0.0
         }
-        if (dropoffGap > dispatch.poolMaxDropoffGapKm) return false
+        if (dropoffGap > dispatch.poolMaxDropoffGapKm) {
+            logBatchReject("Rejected pair (${o1.id}, ${o2.id}): dropoff gap ${String.format(java.util.Locale.US, "%.2f", dropoffGap)} km > ${dispatch.poolMaxDropoffGapKm} km")
+            return false
+        }
+
+        // Direction, ahead check & detour check
+        val orderedPair = if (riderLoc != null && riderLoc.first != 0.0 && riderLoc.second != 0.0 &&
+            o1.merchantLat != 0.0 && o2.merchantLat != 0.0
+        ) {
+            val d1 = distanceKm(riderLoc.first, riderLoc.second, o1.merchantLat, o1.merchantLng)
+            val d2 = distanceKm(riderLoc.first, riderLoc.second, o2.merchantLat, o2.merchantLng)
+            if (d2 < d1) (o2 to o1) else (o1 to o2)
+        } else {
+            o1 to o2
+        }
+
+        val failReason = checkDirectionAndDetour(listOf(orderedPair.first), orderedPair.second, dispatch, riderLoc)
+        if (failReason != null) {
+            logBatchReject("Rejected pair (${o1.id}, ${o2.id}): $failReason")
+            return false
+        }
 
         return true
     }
 
     /**
      * canJoin(batch, order):
-     * the batch is non-empty, all its orders are poolable, the pickup phase is open,
-     * the order's merchant has not already been picked up in the batch,
-     * batch size + 1 <= the smallest maxBatch among all orders (including the new one),
-     * same city,
-     * the distance from the order's pickup to the nearest remaining pickup stop <= poolMaxPickupGapKm,
-     * and from its drop-off to the nearest batch drop-off <= poolMaxDropoffGapKm.
+     * the batch is non-empty, all its orders are poolable, same service family (never mix Food and Mart),
+     * the pickup phase is open, the order's merchant has not already been picked up in the batch,
+     * batch size + 1 <= capacity, same city,
+     * distance from order's pickup to nearest remaining pickup stop <= poolMaxPickupGapKm,
+     * from its drop-off to nearest batch drop-off <= poolMaxDropoffGapKm,
+     * and within batchDirectionToleranceDeg / ahead / batchMaxDetourPercent limits.
      */
     fun canJoin(
         batch: List<Order>,
         order: Order,
         dispatch: DispatchSettings,
-        isPriorityRider: Boolean = false
+        isPriorityRider: Boolean = false,
+        riderLoc: Pair<Double, Double>? = null
     ): Boolean {
         if (batch.isEmpty()) return false
-        if (!batch.all { isPoolable(it, dispatch) }) return false
-        if (!isPoolable(order, dispatch)) return false
-        if (!isPickupPhaseOpen(batch)) return false
+        if (!batch.all { isPoolable(it, dispatch) }) {
+            logBatchReject("Rejected add-on ${order.id}: active batch not poolable")
+            return false
+        }
+        if (!isPoolable(order, dispatch)) {
+            logBatchReject("Rejected add-on ${order.id}: candidate not poolable")
+            return false
+        }
+        if (batch.any { !isSameBatchServiceFamily(it.serviceType, order.serviceType) }) {
+            logBatchReject("Rejected add-on ${order.id}: cannot mix ${batch.first().serviceType} and ${order.serviceType}")
+            return false
+        }
+        if (!isPickupPhaseOpen(batch)) {
+            logBatchReject("Rejected add-on ${order.id}: pickup phase closed")
+            return false
+        }
 
         // Check if the order's merchant has already been picked up in the batch
         val prePickupSteps = setOf(
@@ -323,7 +538,10 @@ object BatchConstants {
             val alreadyPickedUp = bOrder.riderStep.lowercase().trim() !in prePickupSteps
             sameMerchant && alreadyPickedUp
         }
-        if (merchantAlreadyPickedUpInBatch) return false
+        if (merchantAlreadyPickedUpInBatch) {
+            logBatchReject("Rejected add-on ${order.id}: merchant already picked up in batch")
+            return false
+        }
 
         // Batch capacity:
         // For priority rider: limit is settings/dispatch.priorityMaxBatch (default 4) for Food batches (and Mart if martBatching == true)
@@ -334,10 +552,14 @@ object BatchConstants {
         } else {
             (batch.map { it.maxBatch.coerceAtLeast(2) } + order.maxBatch.coerceAtLeast(2)).minOrNull() ?: dispatch.maxBatch
         }
-        if (batch.size + 1 > capacity) return false
+        if (batch.size + 1 > capacity) {
+            logBatchReject("Rejected add-on ${order.id}: batch capacity full (${batch.size + 1} > $capacity)")
+            return false
+        }
 
         // Same city
         if (order.cityId.isNotBlank() && batch.any { it.cityId.isNotBlank() && it.cityId != order.cityId }) {
+            logBatchReject("Rejected add-on ${order.id}: city mismatch")
             return false
         }
 
@@ -349,7 +571,10 @@ object BatchConstants {
                 distanceKm(order.merchantLat, order.merchantLng, bOrder.merchantLat, bOrder.merchantLng)
             } else 0.0
         } ?: 0.0
-        if (minPickupGap > dispatch.poolMaxPickupGapKm) return false
+        if (minPickupGap > dispatch.poolMaxPickupGapKm) {
+            logBatchReject("Rejected add-on ${order.id}: pickup gap ${String.format(java.util.Locale.US, "%.2f", minPickupGap)} km > ${dispatch.poolMaxPickupGapKm} km")
+            return false
+        }
 
         // Nearest batch drop-off
         val minDropoffGap = batch.minOfOrNull { bOrder ->
@@ -357,7 +582,17 @@ object BatchConstants {
                 distanceKm(order.customerLat, order.customerLng, bOrder.customerLat, bOrder.customerLng)
             } else 0.0
         } ?: 0.0
-        if (minDropoffGap > dispatch.poolMaxDropoffGapKm) return false
+        if (minDropoffGap > dispatch.poolMaxDropoffGapKm) {
+            logBatchReject("Rejected add-on ${order.id}: dropoff gap ${String.format(java.util.Locale.US, "%.2f", minDropoffGap)} km > ${dispatch.poolMaxDropoffGapKm} km")
+            return false
+        }
+
+        // Direction, ahead check & detour check
+        val failReason = checkDirectionAndDetour(batch, order, dispatch, riderLoc)
+        if (failReason != null) {
+            logBatchReject("Rejected add-on ${order.id}: $failReason")
+            return false
+        }
 
         return true
     }

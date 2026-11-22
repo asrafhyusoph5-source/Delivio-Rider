@@ -67,6 +67,57 @@ object OsrmRouteService {
     }
 
     /**
+     * Computes real-road driving distance in km between two coordinates via OSRM.
+     * Falls back to straight-line distance x 1.3 if coordinates exist and OSRM fails.
+     */
+    fun fetchLegDistanceKm(
+        fromLat: Double,
+        fromLng: Double,
+        toLat: Double,
+        toLng: Double,
+        osrmFetcher: ((Double, Double, Double, Double) -> Double?)? = null
+    ): Double {
+        if (fromLat == 0.0 || fromLng == 0.0 || toLat == 0.0 || toLng == 0.0) {
+            return 0.0
+        }
+        val straightKm = BatchConstants.distanceKm(fromLat, fromLng, toLat, toLng)
+        if (osrmFetcher != null) {
+            val injected = try {
+                osrmFetcher(fromLat, fromLng, toLat, toLng)
+            } catch (_: Exception) {
+                null
+            }
+            if (injected != null && injected > 0.0) {
+                return injected
+            }
+            return PricingEngine.round2(straightKm * 1.3)
+        }
+
+        val urlStr = "$ROUTING_BASE_URL/route/v1/driving/" +
+            "${String.format(Locale.US, "%.5f", fromLng)},${String.format(Locale.US, "%.5f", fromLat)};" +
+            "${String.format(Locale.US, "%.5f", toLng)},${String.format(Locale.US, "%.5f", toLat)}?overview=false"
+        try {
+            val conn = URL(urlStr).openConnection() as HttpURLConnection
+            conn.connectTimeout = 4000
+            conn.readTimeout = 4000
+            conn.requestMethod = "GET"
+            conn.setRequestProperty("User-Agent", "Delivio Driver (Android; com.deliviorider.app)")
+            if (conn.responseCode == 200) {
+                val jsonStr = conn.inputStream.bufferedReader().use { it.readText() }
+                val json = JSONObject(jsonStr)
+                val route = json.optJSONArray("routes")?.optJSONObject(0)
+                val distanceMeters = route?.optDouble("distance", 0.0) ?: 0.0
+                if (distanceMeters > 0.0) {
+                    return PricingEngine.round2(distanceMeters / 1000.0)
+                }
+            }
+        } catch (_: Exception) {
+            // Fall back to straight line x 1.3
+        }
+        return PricingEngine.round2(straightKm * 1.3)
+    }
+
+    /**
      * Checks if rider has deviated from the route polyline by more than 40 meters.
      */
     fun isOffRoute(

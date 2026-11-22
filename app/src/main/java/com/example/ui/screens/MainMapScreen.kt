@@ -491,34 +491,45 @@ fun MainMapScreen(
                 )
             } else if (incomingOffer != null) {
                 val offer = incomingOffer!!
-                val fallbackBundle = remember(offer.id) {
+                val fallbackBundle = remember(offer.id, offer.riderQuote) {
                     val timerSecs = if (
                         offer.serviceType.equals(OrderStepConstants.SERVICE_REQUEST, ignoreCase = true) ||
                         offer.isTaxi
                     ) 20 else 30
+                    val quote = offer.riderQuote
+                    val delivFee = quote?.deliveryFee ?: offer.pricing?.deliveryFee?.takeIf { it > 0.0 } ?: offer.deliveryFee
+                    val pickupFee = quote?.pickupFee ?: 0.0
+                    val commRate = quote?.commissionRate ?: 0.0
+                    val commAmount = quote?.commissionAmount ?: 0.0
+                    val netTotal = quote?.net ?: offer.estimatedEarnings
                     OfferBundle(
                         id = offer.id,
                         type = OfferType.SINGLE,
                         orders = listOf(offer),
-                        firstPickupDistanceKm = offer.pickupDistanceKm,
+                        firstPickupDistanceKm = quote?.pickupKm ?: offer.pickupDistanceKm,
                         totalTripDistanceKm = offer.deliveryDistanceKm,
-                        pickupFee = 0.0,
+                        pickupFee = pickupFee,
                         breakdowns = listOf(
                             OrderPayBreakdown(
                                 orderId = offer.id,
                                 orderNumber = offer.orderNumber,
-                                rank = 1,
-                                deliveryFee = offer.deliveryFee,
-                                pickupFee = 0.0,
+                                rank = quote?.batchIndex ?: offer.batchIndex.coerceAtLeast(1),
+                                deliveryFee = delivFee,
+                                pickupFee = pickupFee,
+                                commissionRate = commRate,
+                                commissionAmount = commAmount,
                                 tip = offer.tip,
-                                totalPay = offer.estimatedEarnings,
+                                gross = quote?.gross ?: (delivFee + pickupFee + offer.tip),
+                                totalPay = netTotal,
                                 isCod = offer.isCod,
                                 codAmount = offer.cashAmountToCollect,
                                 badge = offer.badge,
-                                customerArea = offer.customerArea
+                                customerArea = offer.customerArea,
+                                pickupKm = quote?.pickupKm ?: offer.pickupDistanceKm,
+                                riderQuote = quote
                             )
                         ),
-                        totalDriverPay = offer.estimatedEarnings,
+                        totalDriverPay = netTotal,
                         eligibleSince = System.currentTimeMillis(),
                         waveDelaySeconds = 0,
                         badge = offer.badge,

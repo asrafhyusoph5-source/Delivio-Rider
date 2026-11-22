@@ -1062,6 +1062,8 @@ data class Order(
     val holdReportId: String? = null,
     val targetRiderId: String = "",
     val riderEarning: RiderEarning? = null,
+    val pricing: OrderPricingSnapshot? = null,
+    val riderQuote: RiderQuote? = null,
     val splitOut: List<String> = emptyList(),
     val splitOutInfo: SplitOutInfo? = null,
     val splitParentOrderId: String? = null,
@@ -1367,6 +1369,9 @@ data class Order(
 
     val estimatedEarnings: Double
         get() {
+            if (riderQuote != null) {
+                return riderQuote.net + lateTipAmount
+            }
             if (isSplitChild && (riderFeeFixed ?: 0.0) > 0.0) {
                 return (riderFeeFixed ?: 0.0) + tip + lateTipAmount
             }
@@ -1786,12 +1791,17 @@ data class OrderPayBreakdown(
     val rank: Int = 1,
     val deliveryFee: Double = 0.0,
     val pickupFee: Double = 0.0,
+    val commissionRate: Double = 0.0,
+    val commissionAmount: Double = 0.0,
     val tip: Double = 0.0,
+    val gross: Double = deliveryFee + pickupFee + tip,
     val totalPay: Double = 0.0,
     val isCod: Boolean = false,
     val codAmount: Double = 0.0,
     val badge: String = "Standard",
-    val customerArea: String = ""
+    val customerArea: String = "",
+    val pickupKm: Double = 0.0,
+    val riderQuote: RiderQuote? = null
 ) {
     val displayOrderNumber: String
         get() {

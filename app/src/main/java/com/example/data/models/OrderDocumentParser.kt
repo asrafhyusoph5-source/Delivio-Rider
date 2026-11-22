@@ -926,6 +926,8 @@ object OrderDocumentParser {
                 batchId = safeString(it["batchId"])
             )
         }
+        val pricingSnapshot = OrderPricingSnapshot.fromMap(safeMap(data["pricing"]))
+        val riderQuote = RiderQuote.fromMap(safeMap(data["riderQuote"]))
 
         val statusHistory = safeList(data["statusHistory"])?.mapNotNull { item ->
             val rawMap = safeMap(item) ?: return@mapNotNull null
@@ -1131,6 +1133,8 @@ object OrderDocumentParser {
             holdReportId = holdReportId,
             targetRiderId = targetRiderId,
             riderEarning = riderEarning,
+            pricing = pricingSnapshot,
+            riderQuote = riderQuote,
             splitOut = splitOut,
             splitOutInfo = splitOutInfo,
             splitParentOrderId = splitParentOrderId,
