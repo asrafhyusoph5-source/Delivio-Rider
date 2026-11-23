@@ -41,6 +41,11 @@
             android:exported="false"
             android:foregroundServiceType="location" />
 
+        <receiver
+            android:name=".data.service.SessionReminderReceiver"
+            android:enabled="true"
+            android:exported="false" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

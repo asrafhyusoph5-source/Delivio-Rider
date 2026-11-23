@@ -39,15 +39,31 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     val vibrationEnabled = prefsRepository.vibrationEnabled
     val currencySymbol = prefsRepository.currencySymbol
 
-    // Shift Schedule (Personal Planner)
-    val shifts = prefsRepository.shifts
+    // Admin-posted Session Schedule state
+    val isScheduleLoading: StateFlow<Boolean> = riderRepository.isScheduleLoading
+    val isScheduleRefreshing: StateFlow<Boolean> = riderRepository.isScheduleRefreshing
+    val scheduleLoadError: StateFlow<String?> = riderRepository.scheduleLoadError
 
-    fun addShift(shift: DriverShift) = prefsRepository.addShift(shift)
-    fun updateShift(shift: DriverShift) = prefsRepository.updateShift(shift)
-    fun deleteShift(shiftId: String) = prefsRepository.deleteShift(shiftId)
-    fun toggleShift(shiftId: String, enabled: Boolean) = prefsRepository.toggleShift(shiftId, enabled)
-    fun toggleShiftReminder(shiftId: String, reminderEnabled: Boolean) = prefsRepository.toggleShiftReminder(shiftId, reminderEnabled)
-    fun applyShiftPreset(presetType: String) = prefsRepository.applyPreset(presetType)
+    private val _swapSourceSession = MutableStateFlow<ScheduleSession?>(null)
+    val swapSourceSession: StateFlow<ScheduleSession?> = _swapSourceSession.asStateFlow()
+
+    private val _isBookingActionInProgress = MutableStateFlow(false)
+    val isBookingActionInProgress: StateFlow<Boolean> = _isBookingActionInProgress.asStateFlow()
+
+    private val _scheduleErrorMessage = MutableStateFlow<String?>(null)
+    val scheduleErrorMessage: StateFlow<String?> = _scheduleErrorMessage.asStateFlow()
+
+    private val _scheduleTickMillis = MutableStateFlow(System.currentTimeMillis())
+
+    init {
+        viewModelScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(30_000L)
+                _scheduleTickMillis.value = System.currentTimeMillis()
+                riderRepository.checkAndCreateSessionClaimsForEndedBookedSessions()
+            }
+        }
+    }
 
     // Demand Heat Map ("Busy areas")
     private val _isBusyAreasOverlayVisible = MutableStateFlow(false)
@@ -533,6 +549,106 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refreshQuests() {
         riderRepository.checkAndCreateClaimsForEndedQuests()
+    }
+
+    val scheduleFilterResult: StateFlow<ScheduleFilterResult> = combine(
+        riderRepository.scheduleSessions,
+        riderRepository.scheduleParseSkippedReasons,
+        riderRepository.bookedSessionsById,
+        riderRepository.sessionClaims,
+        rider,
+        _swapSourceSession,
+        _scheduleTickMillis
+    ) { values ->
+        @Suppress("UNCHECKED_CAST")
+        val sessions = values[0] as List<ScheduleSession>
+        @Suppress("UNCHECKED_CAST")
+        val skipped = values[1] as List<HiddenSessionDebugEntry>
+        @Suppress("UNCHECKED_CAST")
+        val booked = values[2] as Map<String, SessionBooking>
+        @Suppress("UNCHECKED_CAST")
+        val claims = values[3] as List<SessionClaim>
+        val currentRider = values[4] as Rider?
+        val swapSource = values[5] as ScheduleSession?
+        val nowMs = values[6] as Long
+
+        ScheduleRules.evaluateSessions(
+            parsedSessions = sessions,
+            skippedParseReasons = skipped,
+            bookedBySessionId = booked,
+            claimsBySessionId = claims.associateBy { it.sessionId },
+            riderCityId = currentRider?.cityId ?: "",
+            riderVehicleType = currentRider?.vehicle?.type ?: "",
+            nowMillis = nowMs,
+            swapExcludingSessionId = swapSource?.id
+        )
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, ScheduleFilterResult())
+
+    val activeLiveBookedSession: StateFlow<BookedSessionItem?> = combine(
+        scheduleFilterResult,
+        _scheduleTickMillis
+    ) { result, nowMs ->
+        result.bookedDisplayed.firstOrNull { item ->
+            item.session.statusAt(nowMs) == BookedSessionStatus.LIVE_NOW
+        }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    fun loadScheduleSessions(forceRefresh: Boolean = false) {
+        _scheduleTickMillis.value = System.currentTimeMillis()
+        riderRepository.loadScheduleSessions(forceRefresh = forceRefresh)
+    }
+
+    fun bookScheduleSession(session: ScheduleSession, onBooked: () -> Unit = {}) {
+        if (_isBookingActionInProgress.value) return
+        _isBookingActionInProgress.value = true
+        _scheduleErrorMessage.value = null
+        riderRepository.bookScheduleSession(
+            session = session,
+            onSuccess = {
+                _isBookingActionInProgress.value = false
+                _scheduleTickMillis.value = System.currentTimeMillis()
+                showSnackbar("Session booked")
+                onBooked()
+            },
+            onError = { err ->
+                _isBookingActionInProgress.value = false
+                _scheduleErrorMessage.value = err
+            }
+        )
+    }
+
+    fun startSwapForSession(session: ScheduleSession) {
+        _swapSourceSession.value = session
+    }
+
+    fun cancelSwapMode() {
+        _swapSourceSession.value = null
+    }
+
+    fun confirmSwapScheduleSession(newSession: ScheduleSession, onSwapped: () -> Unit = {}) {
+        val oldSession = _swapSourceSession.value ?: return
+        if (_isBookingActionInProgress.value) return
+        _isBookingActionInProgress.value = true
+        _scheduleErrorMessage.value = null
+        riderRepository.swapScheduleSession(
+            oldSession = oldSession,
+            newSession = newSession,
+            onSuccess = {
+                _isBookingActionInProgress.value = false
+                _swapSourceSession.value = null
+                _scheduleTickMillis.value = System.currentTimeMillis()
+                showSnackbar("Session swapped")
+                onSwapped()
+            },
+            onError = { err ->
+                _isBookingActionInProgress.value = false
+                _scheduleErrorMessage.value = err
+            }
+        )
+    }
+
+    fun dismissScheduleError() {
+        _scheduleErrorMessage.value = null
     }
 
     val hasOrderAtMerchant: StateFlow<Boolean> = activeOrders.map { orders ->

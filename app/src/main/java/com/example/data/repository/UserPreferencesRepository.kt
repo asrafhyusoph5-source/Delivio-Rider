@@ -69,116 +69,6 @@ class UserPreferencesRepository(context: Context) {
         _navigationApp.value = app
     }
 
-    // Driver Shift Schedule (Personal Planner)
-    private val _shifts = MutableStateFlow<List<com.example.data.models.DriverShift>>(loadShifts())
-    val shifts: StateFlow<List<com.example.data.models.DriverShift>> = _shifts.asStateFlow()
-
-    private fun loadShifts(): List<com.example.data.models.DriverShift> {
-        val jsonStr = prefs.getString(KEY_DRIVER_SHIFTS, null)
-        if (jsonStr.isNullOrBlank()) {
-            // Default sample shifts: Mon-Fri 08:00 - 17:00
-            return (1..5).map { day ->
-                com.example.data.models.DriverShift(
-                    dayOfWeek = day,
-                    startTime = "08:00",
-                    endTime = "17:00",
-                    reminder15MinBefore = true,
-                    isEnabled = true
-                )
-            }
-        }
-        return try {
-            val jsonArray = org.json.JSONArray(jsonStr)
-            val list = mutableListOf<com.example.data.models.DriverShift>()
-            for (i in 0 until jsonArray.length()) {
-                val obj = jsonArray.getJSONObject(i)
-                list.add(
-                    com.example.data.models.DriverShift(
-                        id = obj.optString("id", java.util.UUID.randomUUID().toString()),
-                        dayOfWeek = obj.optInt("dayOfWeek", 1),
-                        startTime = obj.optString("startTime", "08:00"),
-                        endTime = obj.optString("endTime", "17:00"),
-                        reminder15MinBefore = obj.optBoolean("reminder15MinBefore", true),
-                        isEnabled = obj.optBoolean("isEnabled", true)
-                    )
-                )
-            }
-            list.sortedWith(compareBy({ it.dayOfWeek }, { it.startTime }))
-        } catch (_: Exception) {
-            emptyList()
-        }
-    }
-
-    fun saveShifts(shifts: List<com.example.data.models.DriverShift>) {
-        val sorted = shifts.sortedWith(compareBy({ it.dayOfWeek }, { it.startTime }))
-        val jsonArray = org.json.JSONArray()
-        for (shift in sorted) {
-            val obj = org.json.JSONObject()
-            obj.put("id", shift.id)
-            obj.put("dayOfWeek", shift.dayOfWeek)
-            obj.put("startTime", shift.startTime)
-            obj.put("endTime", shift.endTime)
-            obj.put("reminder15MinBefore", shift.reminder15MinBefore)
-            obj.put("isEnabled", shift.isEnabled)
-            jsonArray.put(obj)
-        }
-        prefs.edit().putString(KEY_DRIVER_SHIFTS, jsonArray.toString()).apply()
-        _shifts.value = sorted
-    }
-
-    fun addShift(shift: com.example.data.models.DriverShift) {
-        val updated = _shifts.value.toMutableList()
-        updated.add(shift)
-        saveShifts(updated)
-    }
-
-    fun updateShift(shift: com.example.data.models.DriverShift) {
-        val updated = _shifts.value.map { if (it.id == shift.id) shift else it }
-        saveShifts(updated)
-    }
-
-    fun deleteShift(shiftId: String) {
-        val updated = _shifts.value.filter { it.id != shiftId }
-        saveShifts(updated)
-    }
-
-    fun toggleShift(shiftId: String, enabled: Boolean) {
-        val updated = _shifts.value.map { if (it.id == shiftId) it.copy(isEnabled = enabled) else it }
-        saveShifts(updated)
-    }
-
-    fun toggleShiftReminder(shiftId: String, reminderEnabled: Boolean) {
-        val updated = _shifts.value.map { if (it.id == shiftId) it.copy(reminder15MinBefore = reminderEnabled) else it }
-        saveShifts(updated)
-    }
-
-    fun applyPreset(presetType: String) {
-        val newShifts = when (presetType) {
-            "peak" -> {
-                // Lunch: 11:00-14:00, Dinner: 18:00-21:00 for Mon-Sun
-                (1..7).flatMap { day ->
-                    listOf(
-                        com.example.data.models.DriverShift(dayOfWeek = day, startTime = "11:00", endTime = "14:00", reminder15MinBefore = true),
-                        com.example.data.models.DriverShift(dayOfWeek = day, startTime = "18:00", endTime = "21:00", reminder15MinBefore = true)
-                    )
-                }
-            }
-            "full_week" -> {
-                // Mon-Sun 08:00 - 17:00
-                (1..7).map { day ->
-                    com.example.data.models.DriverShift(dayOfWeek = day, startTime = "08:00", endTime = "17:00", reminder15MinBefore = true)
-                }
-            }
-            else -> {
-                // Standard Weekday (Mon-Fri 08:00 - 17:00)
-                (1..5).map { day ->
-                    com.example.data.models.DriverShift(dayOfWeek = day, startTime = "08:00", endTime = "17:00", reminder15MinBefore = true)
-                }
-            }
-        }
-        saveShifts(newShifts)
-    }
-
     private val _onlineSinceMillis = MutableStateFlow(prefs.getLong(KEY_ONLINE_SINCE_MS, 0L))
     val onlineSinceMillis: StateFlow<Long> = _onlineSinceMillis.asStateFlow()
 
@@ -189,6 +79,67 @@ class UserPreferencesRepository(context: Context) {
         _onlineSinceMillis.value = millis
     }
 
+    // Track real online time intervals [startMs, endMs] for session claim onlineMinutes calculation
+    private val _onlineIntervals = MutableStateFlow(loadOnlineIntervals())
+    val onlineIntervals: StateFlow<List<OnlineInterval>> = _onlineIntervals.asStateFlow()
+
+    data class OnlineInterval(val startMs: Long, val endMs: Long)
+
+    private fun loadOnlineIntervals(): List<OnlineInterval> {
+        val raw = prefs.getString(KEY_ONLINE_INTERVALS, null) ?: return emptyList()
+        return try {
+            val arr = org.json.JSONArray(raw)
+            val cutoff = System.currentTimeMillis() - (30L * 24 * 60 * 60 * 1000L)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val start = obj.optLong("startMs", 0L)
+                    val end = obj.optLong("endMs", 0L)
+                    if (start > 0L && end > start && end >= cutoff) {
+                        add(OnlineInterval(start, end))
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun recordOnlineInterval(startMs: Long, endMs: Long) {
+        if (startMs <= 0L || endMs <= startMs) return
+        val cutoff = System.currentTimeMillis() - (30L * 24 * 60 * 60 * 1000L)
+        val updated = (_onlineIntervals.value + OnlineInterval(startMs, endMs))
+            .filter { it.endMs >= cutoff }
+            .distinctBy { it.startMs to it.endMs }
+            .sortedBy { it.startMs }
+        val arr = org.json.JSONArray()
+        updated.forEach { iv ->
+            arr.put(org.json.JSONObject().apply {
+                put("startMs", iv.startMs)
+                put("endMs", iv.endMs)
+            })
+        }
+        prefs.edit().putString(KEY_ONLINE_INTERVALS, arr.toString()).apply()
+        _onlineIntervals.value = updated
+    }
+
+    fun getNotifiedReminderSessionIds(): Set<String> {
+        return prefs.getStringSet(KEY_NOTIFIED_SESSION_REMINDERS, emptySet()) ?: emptySet()
+    }
+
+    fun markReminderNotified(sessionId: String) {
+        val updated = getNotifiedReminderSessionIds().toMutableSet()
+        updated.add(sessionId)
+        prefs.edit().putStringSet(KEY_NOTIFIED_SESSION_REMINDERS, updated).apply()
+    }
+
+    fun clearReminderNotified(sessionId: String) {
+        val updated = getNotifiedReminderSessionIds().toMutableSet()
+        if (updated.remove(sessionId)) {
+            prefs.edit().putStringSet(KEY_NOTIFIED_SESSION_REMINDERS, updated).apply()
+        }
+    }
+
     companion object {
         private const val KEY_NAV_APP = "key_nav_app"
         private const val KEY_DARK_MODE = "key_dark_mode"
@@ -197,7 +148,8 @@ class UserPreferencesRepository(context: Context) {
         private const val KEY_CURRENCY = "key_currency"
         private const val KEY_DECLINED_ORDERS = "key_declined_orders"
         private const val KEY_CELEBRATED_TIERS = "key_celebrated_tiers"
-        private const val KEY_DRIVER_SHIFTS = "key_driver_shifts"
         private const val KEY_ONLINE_SINCE_MS = "key_online_since_ms"
+        private const val KEY_ONLINE_INTERVALS = "key_online_intervals"
+        private const val KEY_NOTIFIED_SESSION_REMINDERS = "key_notified_session_reminders"
     }
 }

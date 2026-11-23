@@ -51,6 +51,7 @@ fun MainMapScreen(
     onOpenHelpCenter: (String?, String?) -> Unit = { _, _ -> },
     onOpenSupportChat: (String) -> Unit = {},
     onOpenEarnings: () -> Unit = {},
+    onOpenSchedule: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -89,6 +90,7 @@ fun MainMapScreen(
     val activeChatOrder by viewModel.activeChatOrder.collectAsState()
     val activeChatMessages by viewModel.activeChatMessages.collectAsState()
     val onlineSinceMillis by viewModel.onlineSinceMillis.collectAsState()
+    val activeLiveBookedSession by viewModel.activeLiveBookedSession.collectAsState()
     val lastLocationMillis by viewModel.lastLocationTimeMillis.collectAsState()
     val enabledDispatchServices by viewModel.enabledDispatchServices.collectAsState()
     val dispatchListenerStatus by viewModel.dispatchListenerStatus.collectAsState()
@@ -248,6 +250,66 @@ fun MainMapScreen(
                     onOpenDrawer = onOpenDrawer,
                     onHeadsetClick = { showHeadsetMenuDialog = true }
                 )
+
+                // Slim Live Booked Session Bar (shows rewards.emoji if present + time left)
+                activeLiveBookedSession?.let { liveItem ->
+                    val liveSession = liveItem.session
+                    val timeLeft = com.example.data.models.ScheduleRules.formatTimeLeft(
+                        endAtMillis = liveSession.endAtMillis,
+                        nowMillis = System.currentTimeMillis()
+                    )
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = DelivioGreen,
+                        shadowElevation = 4.dp,
+                        modifier = Modifier
+                            .padding(horizontal = 16.dp)
+                            .clickable { onOpenSchedule() }
+                            .testTag("live_session_bar")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                if (liveSession.rewards.hasRewards) {
+                                    Text(
+                                        text = liveSession.rewards.emoji,
+                                        fontSize = 14.sp
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.Schedule,
+                                        contentDescription = "Live session",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                                Text(
+                                    text = liveSession.title.ifBlank { "Live session" },
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Text(
+                                text = timeLeft,
+                                color = Color.White,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                }
 
                 // In-App Admin Message Notification Banner (cleanly stacked below top bar)
                 adminMessageBanner?.let { banner ->

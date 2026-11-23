@@ -170,53 +170,6 @@ data class RiderDocument(
     }
 }
 
-data class DriverShift(
-    val id: String = UUID.randomUUID().toString(),
-    val dayOfWeek: Int = 1, // 1 = Mon, 2 = Tue, 3 = Wed, 4 = Thu, 5 = Fri, 6 = Sat, 7 = Sun
-    val startTime: String = "08:00", // "HH:mm"
-    val endTime: String = "17:00",   // "HH:mm"
-    val reminder15MinBefore: Boolean = true,
-    val isEnabled: Boolean = true
-) {
-    val dayName: String
-        get() = when (dayOfWeek) {
-            1 -> "Monday"
-            2 -> "Tuesday"
-            3 -> "Wednesday"
-            4 -> "Thursday"
-            5 -> "Friday"
-            6 -> "Saturday"
-            7 -> "Sunday"
-            else -> "Day $dayOfWeek"
-        }
-
-    val dayShortName: String
-        get() = when (dayOfWeek) {
-            1 -> "Mon"
-            2 -> "Tue"
-            3 -> "Wed"
-            4 -> "Thu"
-            5 -> "Fri"
-            6 -> "Sat"
-            7 -> "Sun"
-            else -> "D$dayOfWeek"
-        }
-
-    val durationHours: Double
-        get() {
-            try {
-                val startParts = startTime.split(":").map { it.toInt() }
-                val endParts = endTime.split(":").map { it.toInt() }
-                val startMins = startParts[0] * 60 + startParts.getOrElse(1) { 0 }
-                val endMins = endParts[0] * 60 + endParts.getOrElse(1) { 0 }
-                val diff = if (endMins >= startMins) endMins - startMins else (24 * 60 - startMins + endMins)
-                return diff / 60.0
-            } catch (_: Exception) {
-                return 0.0
-            }
-        }
-}
-
 data class BusyGridCell(
     val id: String,
     val centerLat: Double,

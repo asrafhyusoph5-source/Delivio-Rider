@@ -351,8 +351,14 @@ data class SessionClaim(
     val riderId: String = "",
     val rewardAmount: Double = 0.0,
     val status: String = "Pending",
+    val deliveries: Int = 0,
+    val earned: Double = 0.0,
+    val onlineMinutes: Int = 0,
     val createdAtMillis: Long = 0L
-)
+) {
+    val isSettled: Boolean
+        get() = status.trim().lowercase(Locale.US) in setOf("credited", "approved", "paid", "settled")
+}
 
 object PricingEngine {
 

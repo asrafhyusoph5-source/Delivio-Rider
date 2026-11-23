@@ -198,6 +198,30 @@ class RiderRepository(
     private val _quests = MutableStateFlow<List<Quest>>(emptyList())
     val quests: StateFlow<List<Quest>> = _quests.asStateFlow()
 
+    // Admin-posted Session Schedule state
+    private val _scheduleSessions = MutableStateFlow<List<ScheduleSession>>(emptyList())
+    val scheduleSessions: StateFlow<List<ScheduleSession>> = _scheduleSessions.asStateFlow()
+
+    private val _scheduleParseSkippedReasons = MutableStateFlow<List<HiddenSessionDebugEntry>>(emptyList())
+    val scheduleParseSkippedReasons: StateFlow<List<HiddenSessionDebugEntry>> = _scheduleParseSkippedReasons.asStateFlow()
+
+    private val _bookedSessionsById = MutableStateFlow<Map<String, SessionBooking>>(emptyMap())
+    val bookedSessionsById: StateFlow<Map<String, SessionBooking>> = _bookedSessionsById.asStateFlow()
+
+    private val _isScheduleLoading = MutableStateFlow(false)
+    val isScheduleLoading: StateFlow<Boolean> = _isScheduleLoading.asStateFlow()
+
+    private val _isScheduleRefreshing = MutableStateFlow(false)
+    val isScheduleRefreshing: StateFlow<Boolean> = _isScheduleRefreshing.asStateFlow()
+
+    private val _scheduleLoadError = MutableStateFlow<String?>(null)
+    val scheduleLoadError: StateFlow<String?> = _scheduleLoadError.asStateFlow()
+
+    private val bookingDocCache = java.util.concurrent.ConcurrentHashMap<String, SessionBooking?>()
+    private val MISSING_BOOKING_SENTINEL = SessionBooking(sessionId = "__missing__")
+    private val bookingCacheSentinelMap = java.util.concurrent.ConcurrentHashMap<String, SessionBooking>()
+    private val inFlightSessionClaimIds = Collections.synchronizedSet(mutableSetOf<String>())
+
     private val _questClaims = MutableStateFlow<Map<String, QuestClaim>>(emptyMap())
     val questClaims: StateFlow<Map<String, QuestClaim>> = _questClaims.asStateFlow()
 
@@ -721,6 +745,13 @@ class RiderRepository(
                     _onlineSinceMillis.value = resolvedSince
                     userPrefs.setOnlineSinceMillis(resolvedSince)
                 } else {
+                    val previousSince = _onlineSinceMillis.value.takeIf { it > 0L } ?: userPrefs.getOnlineSinceMillis()
+                    if (previousSince > 0L) {
+                        val nowMs = System.currentTimeMillis()
+                        if (nowMs > previousSince) {
+                            userPrefs.recordOnlineInterval(previousSince, nowMs)
+                        }
+                    }
                     if (_onlineSinceMillis.value != 0L) {
                         _onlineSinceMillis.value = 0L
                         userPrefs.setOnlineSinceMillis(0L)
@@ -1084,6 +1115,9 @@ class RiderRepository(
                             riderId = doc.getString("riderId") ?: uid,
                             rewardAmount = reward,
                             status = doc.getString("status") ?: "Pending",
+                            deliveries = OrderDocumentParser.safeInt(doc.get("deliveries")) ?: 0,
+                            earned = OrderDocumentParser.safeDouble(doc.get("earned")) ?: 0.0,
+                            onlineMinutes = OrderDocumentParser.safeInt(doc.get("onlineMinutes")) ?: 0,
                             createdAtMillis = OrderDocumentParser.parseTolerantTimeMillisOrZero(rawTime)
                         )
                     } catch (e: Exception) {
@@ -1092,7 +1126,11 @@ class RiderRepository(
                     }
                 }
                 _sessionClaims.value = claims
+                checkAndCreateSessionClaimsForEndedBookedSessions()
             }
+
+        // Load schedule sessions once on rider session start so live bar and ended-session claims work immediately
+        loadScheduleSessions(forceRefresh = true)
 
         // 17. Customer Chat Threads (where riderId == uid and channel == "rider")
         chatThreadsListener?.remove()
@@ -1279,6 +1317,8 @@ class RiderRepository(
                 }
                 deliveredListenerInitialized = true
 
+                checkAndCreateSessionClaimsForEndedBookedSessions()
+                checkAndCreateClaimsForEndedQuests()
                 checkTierProgression(uid, _rider.value?.name ?: "Rider", orders, activeUserPrefs ?: return@addSnapshotListener)
             }
     }
@@ -1653,6 +1693,11 @@ class RiderRepository(
                 activeUserPrefs?.setOnlineSinceMillis(nowMs)
                 RiderLocationService.start(context)
             } else {
+                val nowMs = System.currentTimeMillis()
+                val prevSince = _onlineSinceMillis.value.takeIf { it > 0L } ?: activeUserPrefs?.getOnlineSinceMillis() ?: 0L
+                if (prevSince > 0L && nowMs > prevSince) {
+                    activeUserPrefs?.recordOnlineInterval(prevSince, nowMs)
+                }
                 _onlineSinceMillis.value = 0L
                 activeUserPrefs?.setOnlineSinceMillis(0L)
                 RiderLocationService.stop(context)
@@ -2980,6 +3025,13 @@ class RiderRepository(
         currentRatesCityId = null
         currentChatId = null
         activeUserPrefs = null
+        bookingDocCache.clear()
+        bookingCacheSentinelMap.clear()
+        inFlightSessionClaimIds.clear()
+        _scheduleSessions.value = emptyList()
+        _scheduleParseSkippedReasons.value = emptyList()
+        _bookedSessionsById.value = emptyMap()
+        _scheduleLoadError.value = null
         _lastTaxiDiagnostics.value = null
         _dispatchListenerStatus.value = DispatchListenerStatus(state = ListenerConnectionState.DISCONNECTED)
     }
@@ -4098,5 +4150,431 @@ class RiderRepository(
         )
 
         return listOf(q1, q2, q3)
+    }
+
+    // ==================== ADMIN-POSTED SESSION SCHEDULE ====================
+
+    fun loadScheduleSessions(forceRefresh: Boolean = false) {
+        val uid = activeSessionUid ?: auth.currentUser?.uid ?: _rider.value?.uid ?: return
+        if (uid.isBlank()) return
+
+        if (forceRefresh) {
+            _isScheduleRefreshing.value = true
+            bookingCacheSentinelMap.clear()
+        } else if (_scheduleSessions.value.isEmpty()) {
+            _isScheduleLoading.value = true
+        }
+        _scheduleLoadError.value = null
+
+        val sevenDaysAgo = Date(System.currentTimeMillis() - ScheduleRules.SEVEN_DAYS_MILLIS)
+        db.collection("scheduleSessions")
+            .whereGreaterThanOrEqualTo("startAt", Timestamp(sevenDaysAgo))
+            .orderBy("startAt", Query.Direction.ASCENDING)
+            .limit(150)
+            .get()
+            .addOnSuccessListener { snapshot ->
+                val parsed = mutableListOf<ScheduleSession>()
+                val skipped = mutableListOf<HiddenSessionDebugEntry>()
+                for (doc in snapshot.documents) {
+                    val res = ScheduleSessionParser.fromMap(doc.id, doc.data)
+                    res.onSuccess { session ->
+                        parsed.add(session)
+                    }.onFailure { err ->
+                        com.example.util.CrashReportStore.logNonFatalParseError(appContext, doc.reference.path, err)
+                        skipped.add(
+                            HiddenSessionDebugEntry(
+                                sessionId = doc.id,
+                                label = doc.get("title")?.toString() ?: doc.id,
+                                reason = "Skipped bad doc: ${err.message ?: err::class.java.simpleName}"
+                            )
+                        )
+                    }
+                }
+                _scheduleSessions.value = parsed
+                _scheduleParseSkippedReasons.value = skipped
+
+                // For each parsed session, check bookings/{myUid} using parallel gets + cache
+                fetchBookingsForSessions(uid = uid, sessions = parsed, forceRefresh = forceRefresh)
+            }
+            .addOnFailureListener { e ->
+                _isScheduleLoading.value = false
+                _isScheduleRefreshing.value = false
+                _scheduleLoadError.value = formatFirestoreError(e)
+            }
+    }
+
+    private fun fetchBookingsForSessions(
+        uid: String,
+        sessions: List<ScheduleSession>,
+        forceRefresh: Boolean
+    ) {
+        if (sessions.isEmpty()) {
+            _bookedSessionsById.value = emptyMap()
+            _isScheduleLoading.value = false
+            _isScheduleRefreshing.value = false
+            return
+        }
+
+        val resolvedBookings = java.util.concurrent.ConcurrentHashMap<String, SessionBooking>()
+        val sessionsToFetch = mutableListOf<ScheduleSession>()
+
+        for (session in sessions) {
+            val cached = if (!forceRefresh) bookingCacheSentinelMap[session.id] else null
+            if (cached != null) {
+                if (cached.sessionId != "__missing__") {
+                    resolvedBookings[session.id] = cached
+                }
+            } else {
+                sessionsToFetch.add(session)
+            }
+        }
+
+        if (sessionsToFetch.isEmpty()) {
+            applyResolvedBookings(sessions, resolvedBookings)
+            return
+        }
+
+        val tasks = sessionsToFetch.map { session ->
+            db.collection("scheduleSessions")
+                .document(session.id)
+                .collection("bookings")
+                .document(uid)
+                .get()
+                .addOnSuccessListener { doc ->
+                    if (doc != null && doc.exists()) {
+                        val booking = ScheduleSessionParser.bookingFromMap(session.id, doc.data)
+                            ?: SessionBooking(
+                                sessionId = session.id,
+                                riderId = uid,
+                                startAtMillis = session.startAtMillis,
+                                endAtMillis = session.endAtMillis
+                            )
+                        bookingCacheSentinelMap[session.id] = booking
+                        resolvedBookings[session.id] = booking
+                    } else {
+                        bookingCacheSentinelMap[session.id] = MISSING_BOOKING_SENTINEL
+                    }
+                }
+        }
+
+        Tasks.whenAllComplete(tasks).addOnCompleteListener {
+            applyResolvedBookings(sessions, resolvedBookings)
+        }
+    }
+
+    private fun applyResolvedBookings(
+        sessions: List<ScheduleSession>,
+        resolvedBookings: Map<String, SessionBooking>
+    ) {
+        _bookedSessionsById.value = resolvedBookings.toMap()
+        _isScheduleLoading.value = false
+        _isScheduleRefreshing.value = false
+
+        val now = System.currentTimeMillis()
+        val ctx = appContext
+        if (ctx != null) {
+            val bookedItems = sessions.mapNotNull { s ->
+                val b = resolvedBookings[s.id] ?: return@mapNotNull null
+                BookedSessionItem(session = s, booking = b, claim = _sessionClaims.value.firstOrNull { it.sessionId == s.id })
+            }
+            com.example.data.service.SessionReminderScheduler.syncReminders(
+                context = ctx,
+                bookedItems = bookedItems,
+                userPrefs = activeUserPrefs,
+                nowMillis = now
+            )
+        }
+        checkAndCreateSessionClaimsForEndedBookedSessions()
+    }
+
+    fun bookScheduleSession(
+        session: ScheduleSession,
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val currentRider = _rider.value
+        val uid = activeSessionUid ?: auth.currentUser?.uid ?: currentRider?.uid
+        if (uid.isNullOrBlank()) {
+            onError("Rider session is not authenticated")
+            return
+        }
+        val riderName = currentRider?.name?.takeIf { it.isNotBlank() } ?: "Rider"
+        val slotIndices = ScheduleRules.computeSlotIndices(session.startAtMillis, session.endAtMillis)
+        if (slotIndices.isEmpty()) {
+            onError("Invalid session time range")
+            return
+        }
+
+        val batch = buildBookSessionBatch(uid = uid, riderName = riderName, session = session, slotIndices = slotIndices)
+        batch.commit()
+            .addOnSuccessListener {
+                val newBooking = SessionBooking(
+                    sessionId = session.id,
+                    riderId = uid,
+                    riderName = riderName,
+                    startAtMillis = session.startAtMillis,
+                    endAtMillis = session.endAtMillis,
+                    bookedAtMillis = System.currentTimeMillis()
+                )
+                bookingCacheSentinelMap[session.id] = newBooking
+                _bookedSessionsById.value = _bookedSessionsById.value + (session.id to newBooking)
+                _scheduleSessions.value = _scheduleSessions.value.map { s ->
+                    if (s.id == session.id) s.copy(bookedCount = s.bookedCount + 1) else s
+                }
+                appContext?.let { ctx ->
+                    com.example.data.service.SessionReminderScheduler.scheduleReminder(
+                        context = ctx,
+                        session = session,
+                        userPrefs = activeUserPrefs
+                    )
+                }
+                loadScheduleSessions(forceRefresh = true)
+                onSuccess()
+            }
+            .addOnFailureListener { exc ->
+                handleBookBatchFailure(uid = uid, slotIndices = slotIndices, exc = exc, onError = onError)
+            }
+    }
+
+    fun swapScheduleSession(
+        oldSession: ScheduleSession,
+        newSession: ScheduleSession,
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val currentRider = _rider.value
+        val uid = activeSessionUid ?: auth.currentUser?.uid ?: currentRider?.uid
+        if (uid.isNullOrBlank()) {
+            onError("Rider session is not authenticated")
+            return
+        }
+        val riderName = currentRider?.name?.takeIf { it.isNotBlank() } ?: "Rider"
+        val oldSlots = ScheduleRules.computeSlotIndices(oldSession.startAtMillis, oldSession.endAtMillis)
+        val newSlots = ScheduleRules.computeSlotIndices(newSession.startAtMillis, newSession.endAtMillis)
+        if (newSlots.isEmpty()) {
+            onError("Invalid replacement session time range")
+            return
+        }
+
+        // Step 1: Cancel old booking in ONE batch
+        val cancelBatch = db.batch()
+        for (slotIdx in oldSlots) {
+            cancelBatch.delete(db.collection("riderSlots").document("${uid}_$slotIdx"))
+        }
+        cancelBatch.delete(db.collection("scheduleSessions").document(oldSession.id).collection("bookings").document(uid))
+        cancelBatch.update(
+            db.collection("scheduleSessions").document(oldSession.id),
+            mapOf("bookedCount" to FieldValue.increment(-1L))
+        )
+
+        cancelBatch.commit()
+            .addOnSuccessListener {
+                // Step 2: Book new session in ONE batch
+                val bookNewBatch = buildBookSessionBatch(
+                    uid = uid,
+                    riderName = riderName,
+                    session = newSession,
+                    slotIndices = newSlots
+                )
+                bookNewBatch.commit()
+                    .addOnSuccessListener {
+                        bookingCacheSentinelMap[oldSession.id] = MISSING_BOOKING_SENTINEL
+                        val newBooking = SessionBooking(
+                            sessionId = newSession.id,
+                            riderId = uid,
+                            riderName = riderName,
+                            startAtMillis = newSession.startAtMillis,
+                            endAtMillis = newSession.endAtMillis,
+                            bookedAtMillis = System.currentTimeMillis()
+                        )
+                        bookingCacheSentinelMap[newSession.id] = newBooking
+                        _bookedSessionsById.value = (_bookedSessionsById.value - oldSession.id) + (newSession.id to newBooking)
+                        _scheduleSessions.value = _scheduleSessions.value.map { s ->
+                            when (s.id) {
+                                oldSession.id -> s.copy(bookedCount = (s.bookedCount - 1).coerceAtLeast(0))
+                                newSession.id -> s.copy(bookedCount = s.bookedCount + 1)
+                                else -> s
+                            }
+                        }
+                        appContext?.let { ctx ->
+                            com.example.data.service.SessionReminderScheduler.cancelReminder(ctx, oldSession.id, activeUserPrefs)
+                            com.example.data.service.SessionReminderScheduler.scheduleReminder(ctx, newSession, activeUserPrefs)
+                        }
+                        loadScheduleSessions(forceRefresh = true)
+                        onSuccess()
+                    }
+                    .addOnFailureListener { bookNewExc ->
+                        // Rollback: re-book the old session
+                        val rollbackBatch = buildBookSessionBatch(
+                            uid = uid,
+                            riderName = riderName,
+                            session = oldSession,
+                            slotIndices = oldSlots
+                        )
+                        rollbackBatch.commit().addOnCompleteListener {
+                            loadScheduleSessions(forceRefresh = true)
+                            handleBookBatchFailure(
+                                uid = uid,
+                                slotIndices = newSlots,
+                                exc = bookNewExc,
+                                onError = { msg ->
+                                    onError("Could not swap sessions (your original session was kept): $msg")
+                                }
+                            )
+                        }
+                    }
+            }
+            .addOnFailureListener { cancelExc ->
+                onError("Failed to swap session: ${formatFirestoreError(cancelExc)}")
+            }
+    }
+
+    private fun buildBookSessionBatch(
+        uid: String,
+        riderName: String,
+        session: ScheduleSession,
+        slotIndices: List<Long>
+    ): WriteBatch {
+        val batch = db.batch()
+        val sessionRef = db.collection("scheduleSessions").document(session.id)
+        val bookingRef = sessionRef.collection("bookings").document(uid)
+        batch.set(
+            bookingRef,
+            mapOf(
+                "riderId" to uid,
+                "riderName" to riderName,
+                "startAt" to Timestamp(Date(session.startAtMillis)),
+                "endAt" to Timestamp(Date(session.endAtMillis)),
+                "bookedAt" to FieldValue.serverTimestamp()
+            )
+        )
+        batch.update(sessionRef, mapOf("bookedCount" to FieldValue.increment(1L)))
+        for (slotIdx in slotIndices) {
+            val slotRef = db.collection("riderSlots").document("${uid}_$slotIdx")
+            batch.set(
+                slotRef,
+                mapOf(
+                    "riderId" to uid,
+                    "sessionId" to session.id
+                )
+            )
+        }
+        return batch
+    }
+
+    private fun handleBookBatchFailure(
+        uid: String,
+        slotIndices: List<Long>,
+        exc: Exception,
+        onError: (String) -> Unit
+    ) {
+        val fsExc = exc as? FirebaseFirestoreException
+        if (fsExc?.code == FirebaseFirestoreException.Code.ALREADY_EXISTS) {
+            onError("This time conflicts with a session you already booked.")
+            return
+        }
+        if (fsExc?.code == FirebaseFirestoreException.Code.PERMISSION_DENIED && slotIndices.isNotEmpty()) {
+            // Check whether failure was due to an existing riderSlot document (conflict)
+            val checks = slotIndices.map { slotIdx ->
+                db.collection("riderSlots").document("${uid}_$slotIdx").get()
+            }
+            Tasks.whenAllComplete(checks).addOnCompleteListener {
+                val hasExistingSlot = checks.any { t ->
+                    t.isSuccessful && t.result?.exists() == true
+                }
+                if (hasExistingSlot) {
+                    onError("This time conflicts with a session you already booked.")
+                } else {
+                    onError(formatFirestoreError(exc))
+                }
+            }
+            return
+        }
+        onError(formatFirestoreError(exc))
+    }
+
+    private fun formatFirestoreError(exc: Exception): String {
+        val fsExc = exc as? FirebaseFirestoreException
+        return if (fsExc != null) {
+            "${fsExc.code.name}: ${fsExc.localizedMessage ?: "Firestore request failed"}"
+        } else {
+            exc.localizedMessage ?: exc.message ?: "Request failed"
+        }
+    }
+
+    fun checkAndCreateSessionClaimsForEndedBookedSessions() {
+        val currentRider = _rider.value
+        val uid = activeSessionUid ?: auth.currentUser?.uid ?: currentRider?.uid ?: return
+        if (uid.isBlank()) return
+
+        val now = System.currentTimeMillis()
+        val bookedMap = _bookedSessionsById.value
+        if (bookedMap.isEmpty()) return
+
+        val sessions = _scheduleSessions.value
+        val existingClaims = _sessionClaims.value
+        val onlineIntervals = activeUserPrefs?.onlineIntervals?.value ?: emptyList()
+
+        for (session in sessions) {
+            if (!bookedMap.containsKey(session.id)) continue
+            if (now < session.endAtMillis) continue
+
+            val docId = "${session.id}_${uid}"
+            val alreadyExists = existingClaims.any { it.id == docId || it.sessionId == session.id }
+            if (alreadyExists || !inFlightSessionClaimIds.add(docId)) continue
+
+            val metrics = ScheduleRules.computeSessionClaimMetrics(
+                session = session,
+                deliveredOrders = _deliveredOrders.value,
+                onlineIntervals = onlineIntervals,
+                activeOnlineSinceMillis = _onlineSinceMillis.value,
+                nowMillis = now
+            )
+
+            val claimData = hashMapOf<String, Any?>(
+                "sessionId" to session.id,
+                "sessionTitle" to session.title,
+                "riderId" to uid,
+                "riderName" to (currentRider?.name ?: "Rider"),
+                "status" to "Pending",
+                "deliveries" to metrics.deliveries,
+                "earned" to metrics.earned,
+                "onlineMinutes" to metrics.onlineMinutes,
+                "rewardAmount" to 0.0,
+                "createdAt" to FieldValue.serverTimestamp()
+            )
+
+            val optimistic = SessionClaim(
+                id = docId,
+                sessionId = session.id,
+                title = session.title.ifBlank { "Session Bonus" },
+                riderId = uid,
+                rewardAmount = 0.0,
+                status = "Pending",
+                deliveries = metrics.deliveries,
+                earned = metrics.earned,
+                onlineMinutes = metrics.onlineMinutes,
+                createdAtMillis = now
+            )
+
+            db.collection("sessionClaims").document(docId).get()
+                .addOnSuccessListener { doc ->
+                    if (!doc.exists()) {
+                        db.collection("sessionClaims").document(docId).set(claimData)
+                            .addOnSuccessListener {
+                                val current = _sessionClaims.value
+                                if (current.none { it.id == docId }) {
+                                    _sessionClaims.value = current + optimistic
+                                }
+                            }
+                            .addOnFailureListener {
+                                inFlightSessionClaimIds.remove(docId)
+                            }
+                    }
+                }
+                .addOnFailureListener {
+                    inFlightSessionClaimIds.remove(docId)
+                }
+        }
     }
 }

@@ -88,7 +88,8 @@ fun AppNavigation(
                     onOpenSupportChat = { ticketId ->
                         navController.navigate("${NavRoutes.SUPPORT_CHAT_BASE}/$ticketId")
                     },
-                    onOpenEarnings = { navController.navigate(NavRoutes.EARNINGS) }
+                    onOpenEarnings = { navController.navigate(NavRoutes.EARNINGS) },
+                    onOpenSchedule = { navController.navigate(NavRoutes.SCHEDULE) }
                 )
             }
 

@@ -1809,21 +1809,6 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `verify driver shift duration and days`() {
-        val shift = com.example.data.models.DriverShift(
-            dayOfWeek = 1,
-            startTime = "08:00",
-            endTime = "17:00",
-            reminder15MinBefore = true,
-            isEnabled = true
-        )
-        assertEquals("Monday", shift.dayName)
-        assertEquals("Mon", shift.dayShortName)
-        assertEquals(9.0, shift.durationHours, 0.01)
-        assertTrue(shift.reminder15MinBefore)
-    }
-
-    @Test
     fun `verify demand heat map 500m grid cell calculation for orders within 60 mins`() {
         val now = 1700000000000L
         val fortyMinsAgo = now - 40 * 60 * 1000L
