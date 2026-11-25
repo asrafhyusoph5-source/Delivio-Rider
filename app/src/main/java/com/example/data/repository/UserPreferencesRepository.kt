@@ -140,6 +140,72 @@ class UserPreferencesRepository(context: Context) {
         }
     }
 
+    // Pending COD wallet ledger retry queue (persisted across restarts)
+    private val _pendingCodLedgerEntries = MutableStateFlow(loadPendingCodLedgerEntries())
+    val pendingCodLedgerEntries: StateFlow<List<com.example.data.models.PendingCodLedgerEntry>> =
+        _pendingCodLedgerEntries.asStateFlow()
+
+    private fun loadPendingCodLedgerEntries(): List<com.example.data.models.PendingCodLedgerEntry> {
+        val raw = prefs.getString(KEY_PENDING_COD_LEDGER, null) ?: return emptyList()
+        return try {
+            val arr = org.json.JSONArray(raw)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val orderId = obj.optString("orderId", "")
+                    val riderId = obj.optString("riderId", "")
+                    val orderNumber = obj.optString("orderNumber", "")
+                    val amount = obj.optDouble("amount", 0.0)
+                    val createdAtMillis = obj.optLong("createdAtMillis", 0L)
+                    if (orderId.isNotBlank() && riderId.isNotBlank() && amount > 0.0) {
+                        add(
+                            com.example.data.models.PendingCodLedgerEntry(
+                                orderId = orderId,
+                                riderId = riderId,
+                                orderNumber = orderNumber,
+                                amount = amount,
+                                createdAtMillis = createdAtMillis
+                            )
+                        )
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun savePendingCodLedgerEntries(entries: List<com.example.data.models.PendingCodLedgerEntry>) {
+        val arr = org.json.JSONArray()
+        entries.forEach { entry ->
+            arr.put(org.json.JSONObject().apply {
+                put("orderId", entry.orderId)
+                put("riderId", entry.riderId)
+                put("orderNumber", entry.orderNumber)
+                put("amount", entry.amount)
+                put("createdAtMillis", entry.createdAtMillis)
+            })
+        }
+        prefs.edit().putString(KEY_PENDING_COD_LEDGER, arr.toString()).apply()
+        _pendingCodLedgerEntries.value = entries
+    }
+
+    @Synchronized
+    fun enqueuePendingCodLedgerEntry(entry: com.example.data.models.PendingCodLedgerEntry) {
+        if (entry.orderId.isBlank() || entry.riderId.isBlank() || entry.amount <= 0.0) return
+        val current = _pendingCodLedgerEntries.value.filterNot { it.orderId == entry.orderId }
+        savePendingCodLedgerEntries(current + entry)
+    }
+
+    @Synchronized
+    fun removePendingCodLedgerEntry(orderId: String) {
+        val current = _pendingCodLedgerEntries.value
+        val updated = current.filterNot { it.orderId == orderId }
+        if (updated.size != current.size) {
+            savePendingCodLedgerEntries(updated)
+        }
+    }
+
     companion object {
         private const val KEY_NAV_APP = "key_nav_app"
         private const val KEY_DARK_MODE = "key_dark_mode"
@@ -151,5 +217,6 @@ class UserPreferencesRepository(context: Context) {
         private const val KEY_ONLINE_SINCE_MS = "key_online_since_ms"
         private const val KEY_ONLINE_INTERVALS = "key_online_intervals"
         private const val KEY_NOTIFIED_SESSION_REMINDERS = "key_notified_session_reminders"
+        private const val KEY_PENDING_COD_LEDGER = "key_pending_cod_ledger_v1"
     }
 }

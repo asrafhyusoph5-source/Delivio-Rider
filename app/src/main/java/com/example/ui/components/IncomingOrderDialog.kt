@@ -463,17 +463,8 @@ fun IncomingOrderDialog(
                             }
 
                             AnimatedVisibility(visible = showPayBreakdown) {
-                                val totalDeliveryFee = bundle.breakdowns.sumOf { it.deliveryFee }
-                                val totalPickupFee = bundle.breakdowns.sumOf { it.pickupFee }
-                                    .let { if (it > 0.0) it else bundle.pickupFee }
-                                val totalCommission = bundle.breakdowns.sumOf { it.commissionAmount }
                                 val totalTip = bundle.breakdowns.sumOf { it.tip }
-                                val distinctRates = bundle.breakdowns.map { it.commissionRate }.filter { it > 0.0 }.distinct()
-                                val rateSuffix = when {
-                                    distinctRates.isEmpty() -> ""
-                                    distinctRates.size == 1 -> " (-${formatRatePercent(distinctRates.first())}%)"
-                                    else -> " (${distinctRates.joinToString("/") { "-${formatRatePercent(it)}%" }})"
-                                }
+                                val netDeliveryFee = (bundle.totalDriverPay - totalTip).coerceAtLeast(0.0)
                                 Column(
                                     modifier = Modifier.padding(top = 8.dp),
                                     verticalArrangement = Arrangement.spacedBy(5.dp)
@@ -484,26 +475,7 @@ fun IncomingOrderDialog(
                                         horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
                                         Text("Delivery fee", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                        Text("$currencySymbol${String.format(Locale.US, "%.2f", totalDeliveryFee)}", fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                                    }
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Text("Pick up fee", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                        Text("$currencySymbol${String.format(Locale.US, "%.2f", totalPickupFee)}", fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                                    }
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Text("Commission fee$rateSuffix", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                        Text(
-                                            "-$currencySymbol${String.format(Locale.US, "%.2f", totalCommission)}",
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 12.sp,
-                                            color = if (totalCommission > 0.0) DelivioRed else MaterialTheme.colorScheme.onSurface
-                                        )
+                                        Text("$currencySymbol${String.format(Locale.US, "%.2f", netDeliveryFee)}", fontWeight = FontWeight.Bold, fontSize = 12.sp)
                                     }
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),

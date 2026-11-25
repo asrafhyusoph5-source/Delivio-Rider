@@ -6,7 +6,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Celebration
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.data.models.Order
+import com.example.data.models.WalletLedgerHelper
 import com.example.ui.theme.*
 import java.util.Locale
 import kotlin.math.abs
@@ -28,8 +29,17 @@ import kotlin.math.abs
 fun DeliverySuccessDialog(
     order: Order,
     currencySymbol: String,
+    walletBalance: Double = 0.0,
     onDismiss: () -> Unit
 ) {
+    val netDeliveryFee = WalletLedgerHelper.computeNetDeliveryFeeForOrder(order)
+    val totalTip = order.tip + order.lateTipAmount
+    val formattedWalletBalance = if (walletBalance < 0.0) {
+        "-$currencySymbol${String.format(Locale.US, "%.2f", abs(walletBalance))}"
+    } else {
+        "$currencySymbol${String.format(Locale.US, "%.2f", walletBalance)}"
+    }
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -99,33 +109,6 @@ fun DeliverySuccessDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(18.dp))
-
-                // Total Earnings Highlight
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = DelivioYellowLight,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier.padding(16.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(
-                            text = "YOU EARNED",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF795548)
-                        )
-                        Text(
-                            text = "$currencySymbol${String.format(Locale.US, "%.2f", order.estimatedEarnings)}",
-                            fontSize = 32.sp,
-                            fontWeight = FontWeight.Black,
-                            color = TextOnYellow
-                        )
-                    }
-                }
-
                 Spacer(modifier = Modifier.height(14.dp))
                 PaymentBadgeChip(
                     order = order,
@@ -133,74 +116,65 @@ fun DeliverySuccessDialog(
                     isLarge = true,
                     modifier = Modifier.fillMaxWidth()
                 )
-                if (order.tip > 0) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    TipBadgeChip(
-                        tipAmount = order.tip,
-                        currencySymbol = currencySymbol,
-                        isLarge = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
 
-                Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(16.dp))
 
-                // Breakdown list (Schema 2 riderQuote or compatible fallback)
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                // Simplified Trip Completed Summary:
+                // ONLY delivery fee (after commission), tip with a heart, and new wallet balance
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    val quote = order.riderQuote
-                    val earning = order.riderEarning
-                    val delivFee = quote?.deliveryFee
-                        ?: order.pricing?.deliveryFee?.takeIf { it > 0.0 }
-                        ?: earning?.bookingFee?.takeIf { it > 0.0 }
-                        ?: order.feesDeliveryFee.takeIf { it > 0.0 }
-                        ?: order.deliveryFee.takeIf { it > 0.0 }
-                        ?: order.feesTotal
-                    val pickupFee = quote?.pickupFee ?: earning?.pickupFee ?: 0.0
-                    val commRate = quote?.commissionRate ?: 0.0
-                    val commAmount = quote?.commissionAmount ?: 0.0
-                    val totalTip = order.tip + order.lateTipAmount
-                    val rateLabel = if (commRate > 0.0) {
-                        val pct = if (abs(commRate - commRate.toInt().toDouble()) < 0.01) {
-                            commRate.toInt().toString()
-                        } else {
-                            String.format(Locale.US, "%.1f", commRate)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        SummaryRow(
+                            title = "Delivery fee (after commission)",
+                            amount = "$currencySymbol${String.format(Locale.US, "%.2f", netDeliveryFee)}",
+                            valueColor = DelivioGreenDark
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Favorite,
+                                    contentDescription = "Tip",
+                                    tint = DelivioRed,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = "Tip",
+                                    fontSize = 13.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Text(
+                                text = "+$currencySymbol${String.format(Locale.US, "%.2f", totalTip)}",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (totalTip > 0.0) DelivioGreenDark else MaterialTheme.colorScheme.onSurface
+                            )
                         }
-                        " (-$pct%)"
-                    } else ""
 
-                    FareRow("Delivery fee", "$currencySymbol${String.format(Locale.US, "%.2f", delivFee)}")
-                    FareRow("Pick up fee", "$currencySymbol${String.format(Locale.US, "%.2f", pickupFee)}")
-                    FareRow("Commission fee$rateLabel", "-$currencySymbol${String.format(Locale.US, "%.2f", commAmount)}")
-                    FareRow(
-                        "Tip",
-                        "+$currencySymbol${String.format(Locale.US, "%.2f", totalTip)}",
-                        isPositive = totalTip > 0.0
-                    )
-                    FareRow(
-                        "Total",
-                        "$currencySymbol${String.format(Locale.US, "%.2f", order.estimatedEarnings)}",
-                        isBold = true,
-                        isPositive = true
-                    )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
 
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-                    if (order.isSplitChild || order.badge.equals("split", ignoreCase = true)) {
-                        FareRow("Cash Collected", "No Cash Collected", isBold = true)
-                    } else if (order.isCod && (!order.isRequestRider || order.cashAmountToCollect > 0.0)) {
-                        val collected = if (order.codCollected > 0) order.codCollected else order.cashAmountToCollect
-                        FareRow("COD Cash Collected", "$currencySymbol${String.format(Locale.US, "%.2f", collected)}", isBold = true)
-                    } else if (order.isRequestRider) {
-                        FareRow("Payment", "No cash to collect (paid)", isBold = true)
-                    } else {
-                        val provider = if (order.paymentProviderLabel.isNotBlank()) " (${order.paymentProviderLabel})" else ""
-                        FareRow("Payment", "Paid Online$provider", isBold = true)
-                    }
-
-                    if (order.isRequestRider) {
-                        FareRow("Delivery Fee", "Paid by merchant")
+                        SummaryRow(
+                            title = "New wallet balance",
+                            amount = formattedWalletBalance,
+                            valueColor = if (walletBalance < 0.0) DelivioRed else DelivioYellowDark,
+                            isBold = true
+                        )
                     }
                 }
 
@@ -226,22 +200,28 @@ fun DeliverySuccessDialog(
 }
 
 @Composable
-private fun FareRow(title: String, amount: String, isPositive: Boolean = false, isBold: Boolean = false) {
+private fun SummaryRow(
+    title: String,
+    amount: String,
+    valueColor: Color = Color.Unspecified,
+    isBold: Boolean = false
+) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             text = title,
             fontSize = 13.sp,
             fontWeight = if (isBold) FontWeight.Bold else FontWeight.Normal,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = if (isBold) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
         )
         Text(
             text = amount,
-            fontSize = 13.sp,
-            fontWeight = if (isBold) FontWeight.Bold else FontWeight.SemiBold,
-            color = if (isPositive) DelivioGreenDark else MaterialTheme.colorScheme.onSurface
+            fontSize = if (isBold) 15.sp else 13.sp,
+            fontWeight = if (isBold) FontWeight.Black else FontWeight.SemiBold,
+            color = if (valueColor != Color.Unspecified) valueColor else MaterialTheme.colorScheme.onSurface
         )
     }
 }

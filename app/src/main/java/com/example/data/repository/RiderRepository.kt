@@ -133,8 +133,26 @@ class RiderRepository(
     private val _walletTransactions = MutableStateFlow<List<WalletTransaction>>(emptyList())
     val walletTransactions: StateFlow<List<WalletTransaction>> = _walletTransactions.asStateFlow()
 
+    private val _userWalletBalance = MutableStateFlow<Double?>(null)
+    val userWalletBalance: StateFlow<Double?> = _userWalletBalance.asStateFlow()
+
     private val _sharedCustomerWalletBalance = MutableStateFlow<Double?>(null)
     val sharedCustomerWalletBalance: StateFlow<Double?> = _sharedCustomerWalletBalance.asStateFlow()
+
+    private val _platformTimezone = MutableStateFlow(WalletLedgerHelper.DEFAULT_TIMEZONE_ID)
+    val platformTimezone: StateFlow<String> = _platformTimezone.asStateFlow()
+
+    private val _isWalletLoading = MutableStateFlow(false)
+    val isWalletLoading: StateFlow<Boolean> = _isWalletLoading.asStateFlow()
+
+    private val _isWalletRefreshing = MutableStateFlow(false)
+    val isWalletRefreshing: StateFlow<Boolean> = _isWalletRefreshing.asStateFlow()
+
+    private val _isSyncingWallet = MutableStateFlow(false)
+    val isSyncingWallet: StateFlow<Boolean> = _isSyncingWallet.asStateFlow()
+
+    private val _walletLoadError = MutableStateFlow<String?>(null)
+    val walletLoadError: StateFlow<String?> = _walletLoadError.asStateFlow()
 
     private val _riderTransactions = MutableStateFlow<List<WalletTransaction>>(emptyList())
     private val _customerTransactions = MutableStateFlow<List<WalletTransaction>>(emptyList())
@@ -268,6 +286,7 @@ class RiderRepository(
 
     // Listener registrations
     private var riderListener: ListenerRegistration? = null
+    private var currentUserDocListener: ListenerRegistration? = null
     private var linkedUserListener: ListenerRegistration? = null
     private var customerTransactionsListener: ListenerRegistration? = null
     private var currentLinkedCustomerUid: String? = null
@@ -285,6 +304,18 @@ class RiderRepository(
     private var inboxReadsListener: ListenerRegistration? = null
     private var coinTxListener: ListenerRegistration? = null
     private var walletTransactionsListener: ListenerRegistration? = null
+    private val isProcessingPendingCodQueue = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    fun effectiveWalletBalance(): Double {
+        val currentRider = _rider.value
+        val sharedBal = _sharedCustomerWalletBalance.value
+        val userBal = _userWalletBalance.value
+        return when {
+            !currentRider?.linkedCustomerUid.isNullOrBlank() && sharedBal != null -> sharedBal
+            userBal != null -> userBal
+            else -> currentRider?.walletBalance ?: 0.0
+        }
+    }
 
     private var inboxDirectList = emptyList<MessageNotification>()
     private var inboxAllList = emptyList<MessageNotification>()
@@ -676,6 +707,24 @@ class RiderRepository(
         activeSessionUid = uid
         activeUserPrefs = userPrefs
         _onlineSinceMillis.value = userPrefs.getOnlineSinceMillis()
+        _isWalletLoading.value = true
+        _walletLoadError.value = null
+
+        // 0. Listen to users/{uid} for authoritative walletBalance (used by ledger rules & COD gate)
+        currentUserDocListener = db.collection("users").document(uid)
+            .addSnapshotListener { userDoc, error ->
+                if (error != null) return@addSnapshotListener
+                if (userDoc != null && userDoc.exists()) {
+                    val bal = OrderDocumentParser.safeDouble(userDoc.get("walletBalance"))
+                    if (bal != null) {
+                        _userWalletBalance.value = bal
+                        evaluateOffers(activeUserPrefs)
+                    }
+                }
+            }
+
+        // Retry any pending COD wallet ledger entries on app start
+        processPendingCodLedgerQueue()
 
         // 1. Listen to riders/{uid}
         riderListener = db.collection("riders").document(uid)
@@ -890,11 +939,14 @@ class RiderRepository(
                 } ?: emptyList()
             }
 
-        // 10. Platform settings for support phone and service status
+        // 10. Platform settings for support phone, timezone, and service status
         platformSettingsListener = db.collection("settings").document("platform")
             .addSnapshotListener { doc, _ ->
                 if (doc != null && doc.exists()) {
                     _supportPhone.value = doc.getString("supportPhone")
+                    val tz = doc.getString("timezone")?.trim()?.takeIf { it.isNotEmpty() }
+                        ?: WalletLedgerHelper.DEFAULT_TIMEZONE_ID
+                    _platformTimezone.value = tz
                     val leadMin = (doc.get("scheduledReleaseLeadMinutes") as? Number)?.toDouble() ?: 0.0
                     _scheduledReleaseLeadMinutes.value = leadMin
                     val svcs = (doc.get("services") as? Map<*, *>)?.mapNotNull { (k, v) ->
@@ -971,11 +1023,14 @@ class RiderRepository(
         walletTransactionsListener = db.collection("walletTransactions")
             .whereEqualTo("riderId", uid)
             .addSnapshotListener { snapshots, error ->
+                _isWalletLoading.value = false
                 if (error != null) {
+                    _walletLoadError.value = "Wallet history error: ${error.localizedMessage}"
                     _listenerError.value = "Wallet history error: ${error.localizedMessage}"
                     return@addSnapshotListener
                 }
                 if (snapshots == null) return@addSnapshotListener
+                _walletLoadError.value = null
                 _riderTransactions.value = snapshots.documents.mapNotNull { parseWalletTransaction(it) }
                 mergeWalletTransactions()
             }
@@ -1256,15 +1311,7 @@ class RiderRepository(
         deliveredOrdersListener?.remove()
         deliveredOrdersListener = db.collection("orders")
             .whereEqualTo("riderId", uid)
-            .whereIn(
-                "status",
-                listOf(
-                    OrderStepConstants.STATUS_DELIVERED,
-                    OrderStepConstants.STATUS_COMPLETED,
-                    "Delivered",
-                    "Completed"
-                ).distinct()
-            )
+            .limit(2000)
             .addSnapshotListener { snapshots, error ->
                 if (error != null) {
                     android.util.Log.e(
@@ -1298,7 +1345,10 @@ class RiderRepository(
                     nextRetrySeconds = 0,
                     lastError = null
                 )
-                val orders = snapshots.documents.mapNotNull { parseOrderSafely(it, "deliveredOrders") }
+                val deliveredStatusSet = setOf("delivered", "completed")
+                val orders = snapshots.documents
+                    .mapNotNull { parseOrderSafely(it, "deliveredOrders") }
+                    .filter { it.status.trim().lowercase(Locale.US) in deliveredStatusSet }
                 _deliveredOrders.value = orders
 
                 for (order in orders) {
@@ -1354,10 +1404,24 @@ class RiderRepository(
         val eligibleWithDist = mutableListOf<Pair<Order, Double>>()
         var latestTaxiCandidate: Pair<Order, TaxiOrderDiagnostics>? = null
 
+        val isCodBlocked = WalletLedgerHelper.isCodBlockedForWallet(effectiveWalletBalance())
+
         val sessionUid = activeSessionUid ?: auth.currentUser?.uid
         for (order in rawCandidates) {
             if (order.id in inFlightAcceptOrderIds) continue
             if (!sessionUid.isNullOrBlank() && order.riderId == sessionUid) continue
+            if (isCodBlocked && WalletLedgerHelper.isCodOrder(order)) {
+                evalSkips.add(
+                    SkippedOrderRecord(
+                        orderId = order.id,
+                        displayLabel = SkippedOrderRecord.labelForOrder(order),
+                        reason = WalletLedgerHelper.COD_PAUSED_REASON,
+                        timestampMillis = nowMs,
+                        isBadData = false
+                    )
+                )
+                continue
+            }
             val checkCity = if (order.cityId.isNotBlank()) order.cityId else (currentRider?.cityId ?: "")
             if (order.isTaxi) {
                 val diag = com.example.data.constants.TaxiDispatchEvaluator.diagnoseTaxiOrder(
@@ -1723,6 +1787,23 @@ class RiderRepository(
             onError(
                 AcceptOrderErrorDetails(
                     exceptionMessage = "Rider profile or FirebaseAuth session is not ready",
+                    orderId = bundle.id,
+                    currentStatus = initialRawStatus,
+                    authUid = authUid,
+                    fieldsWritten = emptyMap()
+                )
+            )
+            return
+        }
+
+        if (WalletLedgerHelper.isCodBlockedForWallet(effectiveWalletBalance()) &&
+            bundle.orders.any { WalletLedgerHelper.isCodOrder(it) }
+        ) {
+            _incomingOfferBundle.value = null
+            _incomingOffer.value = null
+            onError(
+                AcceptOrderErrorDetails(
+                    exceptionMessage = WalletLedgerHelper.COD_PAUSED_REASON,
                     orderId = bundle.id,
                     currentStatus = initialRawStatus,
                     authUid = authUid,
@@ -2295,16 +2376,26 @@ class RiderRepository(
         )
         updates["statusHistory"] = FieldValue.arrayUnion(historyEntry)
 
-        // If completed: compute riderEarning and codCollected
+        // If completed: compute riderEarning and codCollected, then commit Batch 1 (order + delivery_earning + user wallet)
+        // followed immediately by Batch 2 (cod_collected + user wallet deduction) for COD orders.
         if (nextStep == OrderStepConstants.STEP_COMPLETED || nextStatus == OrderStepConstants.STATUS_DELIVERED || nextStatus == OrderStepConstants.STATUS_COMPLETED) {
-            val codAmountToWrite = if (order.isCod) order.cashAmountToCollect else 0.0
+            val codAmountToWrite = if (WalletLedgerHelper.isCodOrder(order) && !order.isSplitChild) {
+                PricingEngine.round2(order.cashAmountToCollect)
+            } else {
+                0.0
+            }
             updates["codCollected"] = codAmountToWrite
 
             val cityId = order.cityId.ifEmpty { _rider.value?.cityId ?: "puerto_princesa" }
+            val uid = activeSessionUid ?: auth.currentUser?.uid ?: _rider.value?.uid ?: ""
 
             val existingQuote = order.riderQuote
             val schema2Rates = resolveRatesForOrderOrFetch(order)
             if (serviceType == OrderStepConstants.SERVICE_TAXI) {
+                if (!inFlightAdvanceOrderIds.add(order.id)) {
+                    android.util.Log.w("STATUS", "Skipped duplicate in-flight Taxi complete tap for order=${order.id}")
+                    return
+                }
                 if (existingQuote != null || schema2Rates?.isSchema2 == true || order.pricing?.schema == 2) {
                     val finalQuote = existingQuote ?: PricingEngine.computeRiderQuote(
                         order = order,
@@ -2328,14 +2419,20 @@ class RiderRepository(
                         "commissionPercent" to finalQuote.commissionRate,
                         "net" to finalQuote.net
                     )
-                    orderRef.update(updates)
-                        .addOnSuccessListener {
-                            setOfferFinalOutcome(order.id, "completed")
-                            _activeOrders.value = _activeOrders.value.filter { it.id != order.id }
-                            RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
-                            onSuccess()
-                        }
-                        .addOnFailureListener { onError(it.localizedMessage ?: "Failed to complete trip") }
+                    val netDeliveryFee = WalletLedgerHelper.computeNetDeliveryFeeForOrder(order, finalQuote, finalQuote.net)
+                    commitDeliveryBatchWithLedger(
+                        order = order,
+                        uid = uid,
+                        updates = updates,
+                        netDeliveryFee = netDeliveryFee,
+                        codAmountToWrite = codAmountToWrite,
+                        nextOrderToPromote = null,
+                        expectedTxPrevStatus = null,
+                        foodExpectedStage = null,
+                        nextStatus = nextStatus,
+                        onSuccess = onSuccess,
+                        onError = onError
+                    )
                 } else {
                     val vehicleType = OrderStepConstants.normalizeVehicleType(order.vehicleType.ifEmpty { _rider.value?.vehicle?.type })
                     db.collection("deliveryRates").document(cityId).get()
@@ -2360,14 +2457,19 @@ class RiderRepository(
                                 "net" to net
                             )
 
-                            orderRef.update(updates)
-                                .addOnSuccessListener {
-                                    setOfferFinalOutcome(order.id, "completed")
-                                    _activeOrders.value = _activeOrders.value.filter { it.id != order.id }
-                                    RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
-                                    onSuccess()
-                                }
-                                .addOnFailureListener { onError(it.localizedMessage ?: "Failed to complete trip") }
+                            commitDeliveryBatchWithLedger(
+                                order = order,
+                                uid = uid,
+                                updates = updates,
+                                netDeliveryFee = PricingEngine.round2(net),
+                                codAmountToWrite = codAmountToWrite,
+                                nextOrderToPromote = null,
+                                expectedTxPrevStatus = null,
+                                foodExpectedStage = null,
+                                nextStatus = nextStatus,
+                                onSuccess = onSuccess,
+                                onError = onError
+                            )
                         }
                         .addOnFailureListener {
                             val fare = if (order.feesTotal > 0) order.feesTotal else (order.baseFare + order.distanceFare)
@@ -2385,20 +2487,26 @@ class RiderRepository(
                                 "commissionPercent" to 15.0,
                                 "net" to net
                             )
-                            orderRef.update(updates)
-                                .addOnSuccessListener {
-                                    setOfferFinalOutcome(order.id, "completed")
-                                    _activeOrders.value = _activeOrders.value.filter { it.id != order.id }
-                                    RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
-                                    onSuccess()
-                                }
-                                .addOnFailureListener { onError(it.localizedMessage ?: "Failed to complete trip") }
+                            commitDeliveryBatchWithLedger(
+                                order = order,
+                                uid = uid,
+                                updates = updates,
+                                netDeliveryFee = PricingEngine.round2(net),
+                                codAmountToWrite = codAmountToWrite,
+                                nextOrderToPromote = null,
+                                expectedTxPrevStatus = null,
+                                foodExpectedStage = null,
+                                nextStatus = nextStatus,
+                                onSuccess = onSuccess,
+                                onError = onError
+                            )
                         }
                 }
             } else {
                 val isBatch = (order.batchId != null && order.batchId.isNotBlank()) || order.batchIndex > 1 || _activeOrders.value.size > 1
                 val rank = order.batchIndex.coerceAtLeast(1)
                 val isSplit = order.isSplitChild || order.badge.equals("split", ignoreCase = true)
+                var resolvedQuoteForLedger: RiderQuote? = existingQuote
                 val earningData = if (existingQuote != null) {
                     mapOf(
                         "bookingFee" to existingQuote.deliveryFee,
@@ -2424,6 +2532,7 @@ class RiderRepository(
                         legacySpecialRadiusExtra = _dispatchSettings.value.specialRadiusRiderExtra,
                         isBatch = isBatch
                     )
+                    resolvedQuoteForLedger = computedQuote
                     updates["riderQuote"] = computedQuote.toFirestoreMap(useServerTimestamp = true)
                     mapOf(
                         "bookingFee" to computedQuote.deliveryFee,
@@ -2460,6 +2569,13 @@ class RiderRepository(
                 }
                 updates["riderEarning"] = earningData
 
+                val earningTotal = (earningData["total"] as? Number)?.toDouble() ?: 0.0
+                val netDeliveryFee = WalletLedgerHelper.computeNetDeliveryFeeForOrder(
+                    order = order,
+                    quote = resolvedQuoteForLedger,
+                    earningTotalFallback = earningTotal
+                )
+
                 // 1. CUSTOMER STATUS IN A DOUBLE BOOKING:
                 // When I complete a delivery, in the same batched write update the next customer's order from
                 // "On another delivery" to "Rider is on the way" (and the same for each following customer in turn).
@@ -2487,107 +2603,20 @@ class RiderRepository(
                     OrderStepConstants.SERVICE_PARCEL -> parcelExpectedPrevStatus
                     else -> null
                 }
-                if (expectedTxPrevStatus != null || foodExpectedStage != null) {
-                    val nextOrderRef = nextOrderToPromote?.let { db.collection("orders").document(it.id) }
-                    val promoteUpdates = if (nextOrderToPromote != null) {
-                        mapOf<String, Any>(
-                            "status" to OrderStepConstants.STATUS_RIDER_ON_THE_WAY,
-                            "updatedAt" to FieldValue.serverTimestamp(),
-                            "statusHistory" to FieldValue.arrayUnion(
-                                mapOf(
-                                    "status" to OrderStepConstants.STATUS_RIDER_ON_THE_WAY,
-                                    "timestamp" to com.google.firebase.Timestamp.now()
-                                )
-                            )
-                        )
-                    } else null
 
-                    db.runTransaction { tx ->
-                        val snap = tx.get(orderRef)
-                        val nextSnap = nextOrderRef?.let { tx.get(it) }
-                        val actualDbStatus = OrderDocumentParser.safeStringOrNull(snap.get("status"))?.trim().orEmpty()
-                        val actualDbStep = OrderDocumentParser.safeStringOrNull(snap.get("riderStep"))?.trim().orEmpty()
-                        val matches = when {
-                            serviceType == OrderStepConstants.SERVICE_PARCEL && expectedTxPrevStatus != null ->
-                                ParcelFlowRules.isExpectedStatus(actualDbStatus, expectedTxPrevStatus)
-                            serviceType == OrderStepConstants.SERVICE_PABILI && expectedTxPrevStatus != null ->
-                                PabiliFlowRules.isExpectedStatus(actualDbStatus, expectedTxPrevStatus)
-                            foodExpectedStage != null ->
-                                FoodFlowRules.isExpectedState(actualDbStep, actualDbStatus, foodExpectedStage)
-                            else -> false
-                        }
-                        if (!matches) {
-                            val tagLabel = when (serviceType) {
-                                OrderStepConstants.SERVICE_PARCEL -> "Parcel"
-                                OrderStepConstants.SERVICE_PABILI -> "Pabili"
-                                else -> "Food/Instant"
-                            }
-                            android.util.Log.w(
-                                "STATUS",
-                                "Skipped $tagLabel delivery write for order=${order.id}: expectedStatus='$expectedTxPrevStatus', expectedStage='$foodExpectedStage', actualStatus='$actualDbStatus', actualStep='$actualDbStep', target='$nextStatus'"
-                            )
-                            throw FirebaseFirestoreException(
-                                "Skipped out-of-order status update (current: $actualDbStatus)",
-                                FirebaseFirestoreException.Code.ABORTED
-                            )
-                        }
-                        tx.update(orderRef, updates)
-                        if (nextOrderRef != null && promoteUpdates != null &&
-                            nextSnap != null && nextSnap.exists() &&
-                            OrderDocumentParser.safeStringOrNull(nextSnap.get("status")) == OrderStepConstants.STATUS_ON_ANOTHER_DELIVERY
-                        ) {
-                            tx.update(nextOrderRef, promoteUpdates)
-                        }
-                    }.addOnSuccessListener {
-                        inFlightAdvanceOrderIds.remove(order.id)
-                        setOfferFinalOutcome(order.id, "completed")
-                        _activeOrders.value = _activeOrders.value
-                            .filter { it.id != order.id }
-                            .map { rem ->
-                                if (nextOrderToPromote != null && rem.id == nextOrderToPromote.id) {
-                                    rem.copy(status = OrderStepConstants.STATUS_RIDER_ON_THE_WAY)
-                                } else rem
-                            }
-                        RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
-                        onSuccess()
-                    }.addOnFailureListener {
-                        inFlightAdvanceOrderIds.remove(order.id)
-                        onError(it.localizedMessage ?: "Failed to complete delivery")
-                    }
-                } else {
-                    val writeBatch = db.batch()
-                    writeBatch.update(orderRef, updates)
-
-                    if (nextOrderToPromote != null) {
-                        val nextOrderRef = db.collection("orders").document(nextOrderToPromote.id)
-                        val promoteUpdates = mapOf<String, Any>(
-                            "status" to OrderStepConstants.STATUS_RIDER_ON_THE_WAY,
-                            "updatedAt" to FieldValue.serverTimestamp(),
-                            "statusHistory" to FieldValue.arrayUnion(
-                                mapOf(
-                                    "status" to OrderStepConstants.STATUS_RIDER_ON_THE_WAY,
-                                    "timestamp" to com.google.firebase.Timestamp.now()
-                                )
-                            )
-                        )
-                        writeBatch.update(nextOrderRef, promoteUpdates)
-                    }
-
-                    writeBatch.commit()
-                        .addOnSuccessListener {
-                            setOfferFinalOutcome(order.id, "completed")
-                            _activeOrders.value = _activeOrders.value
-                                .filter { it.id != order.id }
-                                .map { rem ->
-                                    if (nextOrderToPromote != null && rem.id == nextOrderToPromote.id) {
-                                        rem.copy(status = OrderStepConstants.STATUS_RIDER_ON_THE_WAY)
-                                    } else rem
-                                }
-                            RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
-                            onSuccess()
-                        }
-                        .addOnFailureListener { onError(it.localizedMessage ?: "Failed to complete delivery") }
-                }
+                commitDeliveryBatchWithLedger(
+                    order = order,
+                    uid = uid,
+                    updates = updates,
+                    netDeliveryFee = netDeliveryFee,
+                    codAmountToWrite = codAmountToWrite,
+                    nextOrderToPromote = nextOrderToPromote,
+                    expectedTxPrevStatus = expectedTxPrevStatus,
+                    foodExpectedStage = foodExpectedStage,
+                    nextStatus = nextStatus,
+                    onSuccess = onSuccess,
+                    onError = onError
+                )
             }
         } else if ((serviceType == OrderStepConstants.SERVICE_PABILI && pabiliExpectedPrevStatus != null) ||
             (serviceType == OrderStepConstants.SERVICE_PARCEL && parcelExpectedPrevStatus != null) ||
@@ -2978,6 +3007,8 @@ class RiderRepository(
         waveDelayJob?.cancel()
         waveDelayJob = null
         riderListener?.remove()
+        currentUserDocListener?.remove()
+        currentUserDocListener = null
         activeOrdersListener?.remove()
         offersListener?.remove()
         deliveredOrdersListener?.remove()
@@ -2987,6 +3018,12 @@ class RiderRepository(
         inboxReadsListener?.remove()
         coinTxListener?.remove()
         walletTransactionsListener?.remove()
+        _userWalletBalance.value = null
+        _isWalletLoading.value = false
+        _isWalletRefreshing.value = false
+        _isSyncingWallet.value = false
+        _walletLoadError.value = null
+        _platformTimezone.value = WalletLedgerHelper.DEFAULT_TIMEZONE_ID
         platformSettingsListener?.remove()
         platformSettingsListener = null
         citySettingsListener?.remove()
@@ -3540,38 +3577,38 @@ class RiderRepository(
             val id = doc.id
             val riderId = doc.getString("riderId") ?: ""
             val customerId = doc.getString("customerId") ?: ""
+            val orderId = doc.getString("orderId") ?: ""
+            val kind = doc.getString("kind") ?: ""
             val type = doc.getString("type") ?: doc.getString("transactionType") ?: "cash_in"
-            val amount = doc.getDouble("amount")
-                ?: (doc.getLong("amount")?.toDouble() ?: 0.0)
+            val rawAmount = OrderDocumentParser.safeDouble(doc.get("amount")) ?: 0.0
+            val signedAmount = OrderDocumentParser.safeDouble(doc.get("signedAmount"))
             val note = doc.getString("note")
                 ?: doc.getString("description")
                 ?: doc.getString("remarks")
                 ?: ""
-            val balanceAfter = doc.getDouble("balanceAfter")
-                ?: doc.getLong("balanceAfter")?.toDouble()
+            val rawTitle = doc.getString("title")?.trim().orEmpty()
+            val balanceAfter = OrderDocumentParser.safeDouble(doc.get("balanceAfter"))
 
             val rawDate = doc.get("createdAt")
                 ?: doc.get("date")
                 ?: doc.get("timestamp")
 
             var dateRaw = 0L
+            val tz = WalletLedgerHelper.resolveTimeZone(_platformTimezone.value)
             val dateText = when (rawDate) {
                 is com.google.firebase.Timestamp -> {
                     dateRaw = rawDate.toDate().time
-                    val sdf = SimpleDateFormat("MMM dd, yyyy • hh:mm a", Locale.getDefault())
-                    sdf.format(rawDate.toDate())
+                    SimpleDateFormat("MMM dd, yyyy • h:mm a", Locale.US).apply { timeZone = tz }.format(rawDate.toDate())
                 }
                 is Date -> {
                     dateRaw = rawDate.time
-                    val sdf = SimpleDateFormat("MMM dd, yyyy • hh:mm a", Locale.getDefault())
-                    sdf.format(rawDate)
+                    SimpleDateFormat("MMM dd, yyyy • h:mm a", Locale.US).apply { timeZone = tz }.format(rawDate)
                 }
                 is Number -> {
                     val num = rawDate.toLong()
-                    val millis = if (num < 1000000000000L) num * 1000L else num
+                    val millis = if (num < 1_000_000_000_000L) num * 1000L else num
                     dateRaw = millis
-                    val sdf = SimpleDateFormat("MMM dd, yyyy • hh:mm a", Locale.getDefault())
-                    sdf.format(Date(millis))
+                    SimpleDateFormat("MMM dd, yyyy • h:mm a", Locale.US).apply { timeZone = tz }.format(Date(millis))
                 }
                 else -> {
                     val str = doc.getString("dateText") ?: doc.getString("date") ?: doc.getString("createdAt") ?: ""
@@ -3584,20 +3621,35 @@ class RiderRepository(
                 }
             }
 
+            val resolvedTitle = when {
+                rawTitle.isNotBlank() -> rawTitle
+                note.isNotBlank() -> note
+                else -> WalletTransaction.formatType(type, kind)
+            }
+            val resolvedCredit = when {
+                signedAmount != null -> signedAmount >= 0.0
+                kind.equals("cod_collected", ignoreCase = true) -> false
+                kind.equals("delivery_earning", ignoreCase = true) -> true
+                else -> rawAmount >= 0.0 && type.lowercase(Locale.US) !in listOf("cod_deduction", "cash_out", "deduction", "fee", "penalty", "debit")
+            }
+
             return WalletTransaction(
                 id = id,
                 riderId = riderId,
                 customerId = customerId,
+                orderId = orderId,
+                kind = kind,
                 type = type,
-                amount = amount,
+                amount = kotlin.math.abs(rawAmount),
+                signedAmount = signedAmount,
                 note = note,
                 dateText = dateText,
                 dateRaw = dateRaw,
                 balanceAfter = balanceAfter,
-                title = if (note.isNotBlank()) note else WalletTransaction.formatType(type),
-                referenceNo = "TXN-${id.takeLast(6).uppercase()}",
-                category = type,
-                isCredit = amount >= 0 && type.lowercase() !in listOf("cash_out", "deduction", "fee", "penalty", "debit")
+                title = resolvedTitle,
+                referenceNo = "TXN-${id.takeLast(6).uppercase(Locale.US)}",
+                category = kind.ifBlank { type },
+                isCredit = resolvedCredit
             )
         } catch (e: Exception) {
             com.example.util.CrashReportStore.logNonFatalParseError(appContext, doc.reference.path, e)
@@ -4576,5 +4628,277 @@ class RiderRepository(
                     inFlightSessionClaimIds.remove(docId)
                 }
         }
+    }
+
+    private fun commitDeliveryBatchWithLedger(
+        order: Order,
+        uid: String,
+        updates: Map<String, Any>,
+        netDeliveryFee: Double,
+        codAmountToWrite: Double,
+        nextOrderToPromote: Order?,
+        expectedTxPrevStatus: String?,
+        foodExpectedStage: FoodStepStage?,
+        nextStatus: String,
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val orderRef = db.collection("orders").document(order.id)
+        val serviceType = order.serviceType.lowercase(Locale.US)
+        val earningDocId = WalletLedgerHelper.deliveryEarningDocId(order.id)
+        val earningRef = if (uid.isNotBlank()) db.collection("walletTransactions").document(earningDocId) else null
+        val userRef = if (uid.isNotBlank()) db.collection("users").document(uid) else null
+        val nextOrderRef = nextOrderToPromote?.let { db.collection("orders").document(it.id) }
+        val promoteUpdates = if (nextOrderToPromote != null) {
+            mapOf<String, Any>(
+                "status" to OrderStepConstants.STATUS_RIDER_ON_THE_WAY,
+                "updatedAt" to FieldValue.serverTimestamp(),
+                "statusHistory" to FieldValue.arrayUnion(
+                    mapOf(
+                        "status" to OrderStepConstants.STATUS_RIDER_ON_THE_WAY,
+                        "timestamp" to com.google.firebase.Timestamp.now()
+                    )
+                )
+            )
+        } else null
+
+        var appliedEarningAmount = 0.0
+        var resolvedDbFeesTotal = order.feesTotal
+
+        db.runTransaction { tx ->
+            val snap = tx.get(orderRef)
+            val nextSnap = nextOrderRef?.let { tx.get(it) }
+            val existingEarningSnap = earningRef?.let { tx.get(it) }
+
+            val actualDbStatus = OrderDocumentParser.safeStringOrNull(snap.get("status"))?.trim().orEmpty()
+            val actualDbStep = OrderDocumentParser.safeStringOrNull(snap.get("riderStep"))?.trim().orEmpty()
+
+            if (expectedTxPrevStatus != null || foodExpectedStage != null) {
+                val matches = when {
+                    serviceType == OrderStepConstants.SERVICE_PARCEL && expectedTxPrevStatus != null ->
+                        ParcelFlowRules.isExpectedStatus(actualDbStatus, expectedTxPrevStatus)
+                    serviceType == OrderStepConstants.SERVICE_PABILI && expectedTxPrevStatus != null ->
+                        PabiliFlowRules.isExpectedStatus(actualDbStatus, expectedTxPrevStatus)
+                    foodExpectedStage != null ->
+                        FoodFlowRules.isExpectedState(actualDbStep, actualDbStatus, foodExpectedStage)
+                    else -> false
+                }
+                if (!matches) {
+                    android.util.Log.w(
+                        "STATUS",
+                        "Skipped delivery write for order=${order.id}: expectedStatus='$expectedTxPrevStatus', expectedStage='$foodExpectedStage', actualStatus='$actualDbStatus', actualStep='$actualDbStep', target='$nextStatus'"
+                    )
+                    throw FirebaseFirestoreException(
+                        "Skipped out-of-order status update (current: $actualDbStatus)",
+                        FirebaseFirestoreException.Code.ABORTED
+                    )
+                }
+            }
+
+            val dbFeesMap = OrderDocumentParser.safeMap(snap.get("fees"))
+            resolvedDbFeesTotal = OrderDocumentParser.safeDouble(dbFeesMap?.get("total")) ?: order.feesTotal
+            val ruleEarningAmount = WalletLedgerHelper.resolveRuleCompliantEarningAmount(
+                netDeliveryFee = netDeliveryFee,
+                firestoreFeesTotal = resolvedDbFeesTotal
+            )
+            appliedEarningAmount = if (ruleEarningAmount != null && existingEarningSnap != null && !existingEarningSnap.exists()) {
+                ruleEarningAmount
+            } else {
+                0.0
+            }
+
+            tx.update(orderRef, updates)
+            if (nextOrderRef != null && promoteUpdates != null &&
+                nextSnap != null && nextSnap.exists() &&
+                OrderDocumentParser.safeStringOrNull(nextSnap.get("status")) == OrderStepConstants.STATUS_ON_ANOTHER_DELIVERY
+            ) {
+                tx.update(nextOrderRef, promoteUpdates)
+            }
+
+            if (appliedEarningAmount > 0.0 && earningRef != null && userRef != null) {
+                tx.set(
+                    earningRef,
+                    WalletLedgerHelper.buildDeliveryEarningPayload(
+                        riderId = uid,
+                        orderId = order.id,
+                        orderNumber = order.orderNumber,
+                        amount = appliedEarningAmount
+                    )
+                )
+                tx.update(
+                    userRef,
+                    WalletLedgerHelper.buildUserWalletUpdate(
+                        signedDelta = appliedEarningAmount,
+                        ledgerDocId = earningDocId
+                    )
+                )
+            }
+        }.addOnSuccessListener {
+            inFlightAdvanceOrderIds.remove(order.id)
+            setOfferFinalOutcome(order.id, "completed")
+            _activeOrders.value = _activeOrders.value
+                .filter { it.id != order.id }
+                .map { rem ->
+                    if (nextOrderToPromote != null && rem.id == nextOrderToPromote.id) {
+                        rem.copy(status = OrderStepConstants.STATUS_RIDER_ON_THE_WAY)
+                    } else rem
+                }
+            RiderLocationTracker.setActiveOrderIds(_activeOrders.value.map { it.id }.toSet())
+
+            if (appliedEarningAmount > 0.0) {
+                val baseBal = _userWalletBalance.value ?: _rider.value?.walletBalance ?: 0.0
+                _userWalletBalance.value = PricingEngine.round2(baseBal + appliedEarningAmount)
+            }
+
+            // Batch 2: COD collected deduction (only for COD/cash orders with cashCollected > 0)
+            val isCodPayment = WalletLedgerHelper.isCodOrder(order) && !order.isSplitChild
+            val rawCashCollected = PricingEngine.round2(codAmountToWrite.takeIf { it > 0.0 } ?: order.cashAmountToCollect)
+            val ruleCodAmount = if (isCodPayment && rawCashCollected > 0.0 && uid.isNotBlank()) {
+                if (resolvedDbFeesTotal > 0.0 && rawCashCollected > resolvedDbFeesTotal + 0.01) {
+                    PricingEngine.round2(resolvedDbFeesTotal)
+                } else {
+                    rawCashCollected
+                }
+            } else {
+                0.0
+            }
+
+            if (ruleCodAmount > 0.0) {
+                val entry = PendingCodLedgerEntry(
+                    orderId = order.id,
+                    riderId = uid,
+                    orderNumber = order.orderNumber,
+                    amount = ruleCodAmount
+                )
+                activeUserPrefs?.enqueuePendingCodLedgerEntry(entry)
+                commitSingleCodLedgerEntry(entry) {
+                    onSuccess()
+                }
+            } else {
+                onSuccess()
+            }
+        }.addOnFailureListener {
+            inFlightAdvanceOrderIds.remove(order.id)
+            onError(it.localizedMessage ?: "Failed to complete delivery")
+        }
+    }
+
+    private fun commitSingleCodLedgerEntry(
+        entry: PendingCodLedgerEntry,
+        onAttemptComplete: (Boolean) -> Unit = {}
+    ) {
+        val codDocId = WalletLedgerHelper.codCollectedDocId(entry.orderId)
+        val codDocRef = db.collection("walletTransactions").document(codDocId)
+        val userRef = db.collection("users").document(entry.riderId)
+
+        codDocRef.get()
+            .addOnSuccessListener { existingSnap ->
+                if (existingSnap.exists()) {
+                    activeUserPrefs?.removePendingCodLedgerEntry(entry.orderId)
+                    onAttemptComplete(true)
+                    return@addOnSuccessListener
+                }
+                val batch = db.batch()
+                batch.set(
+                    codDocRef,
+                    WalletLedgerHelper.buildCodCollectedPayload(
+                        riderId = entry.riderId,
+                        orderId = entry.orderId,
+                        orderNumber = entry.orderNumber,
+                        cashCollected = entry.amount
+                    )
+                )
+                batch.update(
+                    userRef,
+                    WalletLedgerHelper.buildUserWalletUpdate(
+                        signedDelta = -entry.amount,
+                        ledgerDocId = codDocId
+                    )
+                )
+                batch.commit()
+                    .addOnSuccessListener {
+                        val cur = _userWalletBalance.value ?: _rider.value?.walletBalance ?: 0.0
+                        _userWalletBalance.value = PricingEngine.round2(cur - entry.amount)
+                        activeUserPrefs?.removePendingCodLedgerEntry(entry.orderId)
+                        evaluateOffers(activeUserPrefs)
+                        onAttemptComplete(true)
+                    }
+                    .addOnFailureListener { e ->
+                        android.util.Log.w(
+                            "WALLET",
+                            "Queued COD ledger retry for order=${entry.orderId}: ${e.localizedMessage}"
+                        )
+                        onAttemptComplete(false)
+                    }
+            }
+            .addOnFailureListener { e ->
+                android.util.Log.w(
+                    "WALLET",
+                    "Failed checking COD ledger doc for order=${entry.orderId}: ${e.localizedMessage}"
+                )
+                onAttemptComplete(false)
+            }
+    }
+
+    fun processPendingCodLedgerQueue() {
+        val prefs = activeUserPrefs ?: return
+        val uid = activeSessionUid ?: auth.currentUser?.uid ?: _rider.value?.uid ?: return
+        if (uid.isBlank()) return
+        val entries = prefs.pendingCodLedgerEntries.value.filter { it.riderId == uid }
+        if (entries.isEmpty()) {
+            _isSyncingWallet.value = false
+            return
+        }
+        if (!isProcessingPendingCodQueue.compareAndSet(false, true)) return
+        _isSyncingWallet.value = true
+
+        fun processNext(index: Int) {
+            if (index >= entries.size || activeSessionUid != uid) {
+                isProcessingPendingCodQueue.set(false)
+                _isSyncingWallet.value = prefs.pendingCodLedgerEntries.value.isNotEmpty()
+                return
+            }
+            commitSingleCodLedgerEntry(entries[index]) {
+                processNext(index + 1)
+            }
+        }
+        processNext(0)
+    }
+
+    fun refreshWallet(onComplete: () -> Unit = {}) {
+        val uid = activeSessionUid ?: auth.currentUser?.uid ?: _rider.value?.uid
+        if (uid.isNullOrBlank()) {
+            onComplete()
+            return
+        }
+        _isWalletRefreshing.value = true
+        _walletLoadError.value = null
+        processPendingCodLedgerQueue()
+
+        db.collection("users").document(uid).get()
+            .addOnSuccessListener { userDoc ->
+                if (userDoc.exists()) {
+                    OrderDocumentParser.safeDouble(userDoc.get("walletBalance"))?.let { bal ->
+                        _userWalletBalance.value = bal
+                    }
+                }
+            }
+
+        db.collection("walletTransactions")
+            .whereEqualTo("riderId", uid)
+            .get()
+            .addOnSuccessListener { snapshots ->
+                _riderTransactions.value = snapshots.documents.mapNotNull { parseWalletTransaction(it) }
+                mergeWalletTransactions()
+                _isWalletRefreshing.value = false
+                _isWalletLoading.value = false
+                onComplete()
+            }
+            .addOnFailureListener { e ->
+                _walletLoadError.value = "Failed to refresh wallet: ${e.localizedMessage}"
+                _isWalletRefreshing.value = false
+                _isWalletLoading.value = false
+                onComplete()
+            }
     }
 }

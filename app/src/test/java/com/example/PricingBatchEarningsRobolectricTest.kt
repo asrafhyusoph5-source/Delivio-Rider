@@ -514,21 +514,20 @@ class PricingBatchEarningsRobolectricTest {
         composeRule.onNodeWithText("Earnings details").performClick()
         composeRule.waitForIdle()
 
+        // Net delivery fee after commission = 94.20 - 15.00 = 79.20
         composeRule.onNodeWithText("Delivery fee").assertIsDisplayed()
-        composeRule.onNodeWithText("₱65.00").assertIsDisplayed()
-        composeRule.onNodeWithText("Pick up fee").assertIsDisplayed()
-        composeRule.onNodeWithText("₱23.00").assertIsDisplayed()
-        composeRule.onNodeWithText("Commission fee (-10%)").assertIsDisplayed()
-        composeRule.onNodeWithText("-₱8.80").assertIsDisplayed()
+        composeRule.onNodeWithText("₱79.20").assertIsDisplayed()
         composeRule.onNodeWithText("Tip").assertIsDisplayed()
         composeRule.onNodeWithText("+₱15.00").assertIsDisplayed()
         composeRule.onNodeWithText("Total").assertIsDisplayed()
-        // Customer service fee ₱19.00 must never appear
+        // Commission, separate pickup fee, and customer service fee ₱19.00 must never appear
+        composeRule.onNodeWithText("Pick up fee").assertDoesNotExist()
+        composeRule.onNodeWithText("Commission fee (-10%)").assertDoesNotExist()
         composeRule.onNodeWithText("₱19.00").assertDoesNotExist()
     }
 
     @Test
-    fun deliverySuccessDialog_showsRiderQuoteRows_andOmitsLegacyFareLabels() {
+    fun deliverySuccessDialog_showsSimplifiedDeliveryFeeTipAndWalletBalance() {
         val quote = RiderQuote(
             pickupKm = 1.5,
             pickupFee = 19.0,
@@ -555,27 +554,30 @@ class PricingBatchEarningsRobolectricTest {
                 DeliverySuccessDialog(
                     order = completedOrder,
                     currencySymbol = "₱",
+                    walletBalance = 250.0,
                     onDismiss = {}
                 )
             }
         }
         composeRule.waitForIdle()
 
-        composeRule.onNodeWithText("YOU EARNED").assertIsDisplayed()
-        // net = 67.0 + lateTipAmount 5.0 = 72.00 (appears in highlight box + Total row)
-        assertTrue(composeRule.onAllNodesWithText("₱72.00").fetchSemanticsNodes().size >= 1)
-        composeRule.onAllNodesWithText("₱72.00")[0].assertIsDisplayed()
-        composeRule.onNodeWithText("Delivery fee").assertIsDisplayed()
-        composeRule.onNodeWithText("Pick up fee").assertIsDisplayed()
-        composeRule.onNodeWithText("Commission fee (-20%)").assertIsDisplayed()
+        composeRule.onNodeWithText("Delivery fee (after commission)").assertIsDisplayed()
+        composeRule.onNodeWithText("₱67.00").assertIsDisplayed()
         composeRule.onNodeWithText("Tip").assertIsDisplayed()
         composeRule.onNodeWithText("+₱15.00").assertIsDisplayed()
+        composeRule.onNodeWithText("New wallet balance").assertIsDisplayed()
+        composeRule.onNodeWithText("₱250.00").assertIsDisplayed()
+
+        // Removed commission, pickup, and legacy labels
+        composeRule.onNodeWithText("YOU EARNED").assertDoesNotExist()
+        composeRule.onNodeWithText("Pick up fee").assertDoesNotExist()
+        composeRule.onNodeWithText("Commission fee (-20%)").assertDoesNotExist()
         composeRule.onNodeWithText("Base Pay").assertDoesNotExist()
         composeRule.onNodeWithText("Per-km Pay").assertDoesNotExist()
     }
 
     @Test
-    fun earningsScreen_showsNewSummaryBreakdownCodRemit_andTripQuoteDetail() {
+    fun earningsScreen_showsTodayTotalIncomeBreakdown_withoutCommissionOrCodSummary() {
         val tz = TimeZone.getTimeZone("Asia/Manila")
         val nowCal = Calendar.getInstance(tz, Locale.US).apply {
             set(2026, Calendar.APRIL, 15, 14, 0, 0)
@@ -643,6 +645,7 @@ class PricingBatchEarningsRobolectricTest {
             createdAt = com.google.firebase.Timestamp(java.util.Date(nowMs - 1200_000L))
         )
 
+        var historyClicked = false
         composeRule.setContent {
             DelivioRiderTheme {
                 EarningsContent(
@@ -651,75 +654,64 @@ class PricingBatchEarningsRobolectricTest {
                     questClaims = listOf(creditedQuest),
                     sessionClaims = listOf(creditedSession),
                     onBack = {},
+                    onOpenIncomeHistory = { historyClicked = true },
                     nowMillis = nowMs
                 )
             }
         }
         composeRule.waitForIdle()
 
-        // Summary card: Net earnings = 82 (cod trip) + 150 (bonuses) = 232.00; Jobs completed = 1
-        composeRule.onNodeWithText("Net earnings").assertIsDisplayed()
+        // Summary card: Total Income = 82 (today cod trip) + 150 (bonuses) = 232.00; 1 job completed
+        composeRule.onNodeWithText("Total Income").assertIsDisplayed()
         composeRule.onNodeWithText("₱232.00").assertIsDisplayed()
-        composeRule.onNodeWithText("Jobs completed").assertIsDisplayed()
+        composeRule.onNodeWithText("1 job completed").assertIsDisplayed()
 
-        // Breakdown card has ONLY the 5 new lines and NONE of the old ones
+        // Breakdown card has ONLY Delivery fees (72.00), Tips (+10.00), and Bonuses (+150.00)
         composeRule.onNodeWithTag("earnings_lazy_column")
             .performScrollToNode(hasTestTag("earnings_breakdown_card"))
         composeRule.onNodeWithTag("earnings_breakdown_card").assertIsDisplayed()
         composeRule.onNodeWithText("Delivery fees").assertIsDisplayed()
-        composeRule.onNodeWithText("Pick up fees").assertIsDisplayed()
-        composeRule.onNodeWithText("Commission fee").assertIsDisplayed()
         composeRule.onNodeWithText("Tips").assertIsDisplayed()
         composeRule.onNodeWithText("Bonuses").assertIsDisplayed()
         composeRule.onNodeWithText("+₱150.00").assertIsDisplayed()
 
-        composeRule.onNodeWithText("Base Fare").assertDoesNotExist()
-        composeRule.onNodeWithText("Distance Fare").assertDoesNotExist()
-        composeRule.onNodeWithText("Surges & Demand Boosts").assertDoesNotExist()
-        composeRule.onNodeWithText("Waiting Time Pay").assertDoesNotExist()
-        composeRule.onNodeWithText("Multi-Drop Extra Stop Pay").assertDoesNotExist()
-        composeRule.onNodeWithText("Return Trip Pay").assertDoesNotExist()
-        composeRule.onNodeWithText("Urgent Dispatch Bonus").assertDoesNotExist()
+        // Removed commission, pickup fees, COD cash summary, filters, and period tabs from main EarningsScreen
+        composeRule.onNodeWithText("Net earnings").assertDoesNotExist()
+        composeRule.onNodeWithText("Pick up fees").assertDoesNotExist()
+        composeRule.onNodeWithText("Commission fee").assertDoesNotExist()
+        composeRule.onNodeWithText("COD cash summary").assertDoesNotExist()
+        composeRule.onNodeWithText("Service Type").assertDoesNotExist()
+        composeRule.onNodeWithText("Payment Method").assertDoesNotExist()
+        composeRule.onNodeWithTag("earnings_period_weekly").assertDoesNotExist()
 
-        // COD card: COD cash collected = 500.00; Cash to remit = 500 - 82 = 418.00
-        composeRule.onNodeWithTag("earnings_lazy_column")
-            .performScrollToNode(hasTestTag("earnings_cod_card"))
-        composeRule.onNodeWithTag("earnings_cod_card").assertIsDisplayed()
-        composeRule.onNodeWithText("COD cash collected").assertIsDisplayed()
-        composeRule.onNodeWithText("₱500.00").assertIsDisplayed()
-        composeRule.onNodeWithText("Cash to remit").assertIsDisplayed()
-        composeRule.onNodeWithText("₱418.00").assertIsDisplayed()
-
-        // Tapping the trip opens its riderQuote breakdown
+        // Today-only Trip History shows trip_cod_today (1) and NOT two-days-ago trip
+        composeRule.onNodeWithText("Trip History (1)").assertIsDisplayed()
         composeRule.onNodeWithTag("earnings_lazy_column")
             .performScrollToNode(hasTestTag("earnings_job_row_trip_cod_today"))
+        composeRule.onNodeWithTag("earnings_job_row_trip_cod_today").assertIsDisplayed()
+        composeRule.onNodeWithTag("earnings_job_row_trip_online_week").assertDoesNotExist()
+
+        // Tapping today's trip opens commission-free Trip Detail Dialog
         composeRule.onNodeWithTag("earnings_job_row_trip_cod_today").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("earnings_trip_detail_dialog").assertIsDisplayed()
         composeRule.onNode(
-            hasText("Commission fee (-10%)") and hasAnyAncestor(hasTestTag("earnings_trip_detail_dialog"))
+            hasText("Delivery fee") and hasAnyAncestor(hasTestTag("earnings_trip_detail_dialog"))
         ).assertIsDisplayed()
         composeRule.onNode(
             hasText("₱82.00") and hasAnyAncestor(hasTestTag("earnings_trip_detail_dialog"))
         ).assertIsDisplayed()
+        composeRule.onNode(
+            hasText("Commission fee (-10%)") and hasAnyAncestor(hasTestTag("earnings_trip_detail_dialog"))
+        ).assertDoesNotExist()
         composeRule.onNodeWithText("Close").performClick()
         composeRule.waitForIdle()
 
-        // Switching to Weekly includes both trips: 82 + 76 + 150 = 308.00
+        // Tapping Total Income card triggers onOpenIncomeHistory
         composeRule.onNodeWithTag("earnings_lazy_column")
-            .performScrollToNode(hasTestTag("earnings_period_weekly"))
-        composeRule.onNodeWithTag("earnings_period_weekly").performClick()
+            .performScrollToNode(hasTestTag("earnings_total_income_card"))
+        composeRule.onNodeWithTag("earnings_total_income_card").performClick()
         composeRule.waitForIdle()
-        composeRule.onNodeWithText("₱308.00").assertIsDisplayed()
-        composeRule.onNodeWithTag("earnings_lazy_column")
-            .performScrollToNode(hasText("Trip History (2)"))
-        composeRule.onNodeWithText("Trip History (2)").assertIsDisplayed()
-
-        // Switching to Monthly keeps all month trips
-        composeRule.onNodeWithTag("earnings_lazy_column")
-            .performScrollToNode(hasTestTag("earnings_period_monthly"))
-        composeRule.onNodeWithTag("earnings_period_monthly").performClick()
-        composeRule.waitForIdle()
-        composeRule.onNodeWithText("₱308.00").assertIsDisplayed()
+        assertTrue(historyClicked)
     }
 }

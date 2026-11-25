@@ -99,6 +99,8 @@ fun MainMapScreen(
     val eligibleOrdersCount by viewModel.eligibleOrdersCount.collectAsState()
     val skippedOrderRecords by viewModel.skippedOrderRecords.collectAsState()
     val lastTaxiDiagnostics by viewModel.lastTaxiDiagnostics.collectAsState()
+    val walletBalance by viewModel.walletBalance.collectAsState()
+    val isCodPaused by viewModel.isCodPausedByNegativeWallet.collectAsState()
     var showHeadsetMenuDialog by remember { mutableStateOf(false) }
     var showDispatchStatusSheet by remember { mutableStateOf(false) }
     var pendingReleaseTarget by remember { mutableStateOf<Pair<Order, String>?>(null) }
@@ -169,7 +171,6 @@ fun MainMapScreen(
     // Today earnings & trips
     val todayTrips = deliveredOrders.size
     val todayEarnings = deliveredOrders.sumOf { it.estimatedEarnings }
-    val walletCashOnHand = deliveredOrders.filter { it.isCod }.sumOf { it.codCollected } - (rider?.cashRemitted ?: 0.0)
 
     val navBarBottomPadding = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     val fallbackSheetDp = (when {
@@ -250,6 +251,41 @@ fun MainMapScreen(
                     onOpenDrawer = onOpenDrawer,
                     onHeadsetClick = { showHeadsetMenuDialog = true }
                 )
+
+                // Negative-wallet COD pause banner
+                if (isCodPaused) {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = DelivioRed,
+                        shadowElevation = 6.dp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp)
+                            .testTag("cod_paused_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Warning,
+                                contentDescription = "COD orders paused",
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = com.example.data.models.WalletLedgerHelper.COD_PAUSED_REASON,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp,
+                                lineHeight = 16.sp
+                            )
+                        }
+                    }
+                }
 
                 // Slim Live Booked Session Bar (shows rewards.emoji if present + time left)
                 activeLiveBookedSession?.let { liveItem ->
@@ -500,7 +536,7 @@ fun MainMapScreen(
                     currentStop = currentStop,
                     activeOrders = activeOrders,
                     isOnline = isOnline,
-                    walletBalance = walletCashOnHand.coerceAtLeast(0.0),
+                    walletBalance = walletBalance,
                     todayEarnings = todayEarnings,
                     todayTrips = todayTrips,
                     currencySymbol = currencySymbol,
@@ -615,6 +651,7 @@ fun MainMapScreen(
                 DeliverySuccessDialog(
                     order = order,
                     currencySymbol = currencySymbol,
+                    walletBalance = walletBalance,
                     onDismiss = {
                         viewModel.dismissDeliverySuccess()
                         val sType = order.serviceType.lowercase().trim()

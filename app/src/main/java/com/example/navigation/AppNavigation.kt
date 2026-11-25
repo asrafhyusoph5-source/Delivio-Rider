@@ -22,6 +22,7 @@ object NavRoutes {
     const val SCHEDULE = "schedule"
     const val WALLET = "wallet"
     const val EARNINGS = "earnings"
+    const val INCOME_HISTORY = "income_history"
     const val PAYMENTS = "earnings"
     const val PROFILE = "profile"
     const val QUESTS = "quests"
@@ -110,13 +111,20 @@ fun AppNavigation(
             composable(NavRoutes.WALLET) {
                 WalletScreen(
                     viewModel = viewModel,
-                    onBack = { navController.popBackStack() },
-                    onOpenEarnings = { navController.navigate(NavRoutes.EARNINGS) }
+                    onBack = { navController.popBackStack() }
                 )
             }
 
             composable(NavRoutes.EARNINGS) {
                 EarningsScreen(
+                    viewModel = viewModel,
+                    onBack = { navController.popBackStack() },
+                    onOpenIncomeHistory = { navController.navigate(NavRoutes.INCOME_HISTORY) }
+                )
+            }
+
+            composable(NavRoutes.INCOME_HISTORY) {
+                IncomeHistoryScreen(
                     viewModel = viewModel,
                     onBack = { navController.popBackStack() }
                 )

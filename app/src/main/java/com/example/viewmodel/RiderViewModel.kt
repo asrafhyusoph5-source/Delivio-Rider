@@ -57,10 +57,15 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         viewModelScope.launch {
+            var tick = 0
             while (true) {
                 kotlinx.coroutines.delay(30_000L)
+                tick += 1
                 _scheduleTickMillis.value = System.currentTimeMillis()
                 riderRepository.checkAndCreateSessionClaimsForEndedBookedSessions()
+                if (tick % 2 == 0) {
+                    riderRepository.processPendingCodLedgerQueue()
+                }
             }
         }
     }
@@ -112,6 +117,16 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     val coinHistory = riderRepository.coinHistory
     val newlyReachedTier = riderRepository.newlyReachedTier
     val listenerError = riderRepository.listenerError
+    val platformTimezone: StateFlow<String> = riderRepository.platformTimezone
+    val isWalletLoading: StateFlow<Boolean> = riderRepository.isWalletLoading
+    val isWalletRefreshing: StateFlow<Boolean> = riderRepository.isWalletRefreshing
+    val walletLoadError: StateFlow<String?> = riderRepository.walletLoadError
+    val isWalletSyncing: StateFlow<Boolean> = combine(
+        prefsRepository.pendingCodLedgerEntries,
+        riderRepository.isSyncingWallet
+    ) { pending, syncing ->
+        pending.isNotEmpty() || syncing
+    }.stateIn(viewModelScope, SharingStarted.Lazily, false)
     val currentLocation = RiderLocationTracker.currentLocation
     val lastLocationTimeMillis: StateFlow<Long> = combine(
         RiderLocationTracker.lastLocationTimeMillis,
@@ -380,9 +395,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     val earningsSummary: StateFlow<EarningSummary> = combine(
         deliveredOrders,
         riderRepository.questClaims,
-        sessionClaims
-    ) { orders, qClaims, sClaims ->
-        val tz = java.util.TimeZone.getTimeZone("Asia/Manila")
+        sessionClaims,
+        platformTimezone
+    ) { orders, qClaims, sClaims, tzId ->
+        val tz = WalletLedgerHelper.resolveTimeZone(tzId)
         val nowMs = System.currentTimeMillis()
         val nowCal = java.util.Calendar.getInstance(tz).apply { timeInMillis = nowMs }
         val todayYear = nowCal.get(java.util.Calendar.YEAR)
@@ -454,14 +470,26 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         !r?.linkedCustomerUid.isNullOrBlank()
     }.stateIn(viewModelScope, SharingStarted.Lazily, false)
 
-    // Wallet balance: live from users/{linkedCustomerUid}.walletBalance if linked, or riders/{uid}.walletBalance
-    val walletBalance: StateFlow<Double> = combine(rider, riderRepository.sharedCustomerWalletBalance) { r, sharedBal ->
-        if (!r?.linkedCustomerUid.isNullOrBlank() && sharedBal != null) {
-            sharedBal
-        } else {
-            r?.walletBalance ?: 0.0
+    // Wallet balance: live from users/{linkedCustomerUid}.walletBalance if linked, else users/{uid}.walletBalance (or riders/{uid}.walletBalance fallback)
+    val walletBalance: StateFlow<Double> = combine(
+        rider,
+        riderRepository.userWalletBalance,
+        riderRepository.sharedCustomerWalletBalance
+    ) { r, userBal, sharedBal ->
+        when {
+            !r?.linkedCustomerUid.isNullOrBlank() && sharedBal != null -> sharedBal
+            userBal != null -> userBal
+            else -> r?.walletBalance ?: 0.0
         }
     }.stateIn(viewModelScope, SharingStarted.Lazily, 0.0)
+
+    val isCodPausedByNegativeWallet: StateFlow<Boolean> = walletBalance
+        .map { WalletLedgerHelper.isCodBlockedForWallet(it) }
+        .stateIn(viewModelScope, SharingStarted.Lazily, false)
+
+    fun refreshWallet() {
+        riderRepository.refreshWallet()
+    }
 
     val earningsAvailableToWithdraw: StateFlow<Double> = combine(
         deliveredOrders,

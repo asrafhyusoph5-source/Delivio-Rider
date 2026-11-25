@@ -1601,8 +1601,11 @@ data class WalletTransaction(
     val id: String = "",
     val riderId: String = "",
     val customerId: String = "",
-    val type: String = "cash_in", // "cash_in", "adjustment", etc.
+    val orderId: String = "",
+    val kind: String = "", // "delivery_earning", "cod_collected", etc.
+    val type: String = "cash_in", // "delivery_credit", "cod_deduction", "cash_in", "adjustment", etc.
     val amount: Double = 0.0,
+    val signedAmount: Double? = null,
     val note: String = "",
     val dateText: String = "",
     val dateRaw: Long = 0L,
@@ -1612,37 +1615,53 @@ data class WalletTransaction(
     val category: String = "Wallet",
     val isCredit: Boolean = true
 ) {
+    val effectiveSignedAmount: Double
+        get() = signedAmount ?: if (isPositive) kotlin.math.abs(amount) else -kotlin.math.abs(amount)
+
     val isPositive: Boolean
-        get() = when {
-            amount > 0 -> true
-            amount < 0 -> false
-            type.lowercase() in listOf("cash_in", "top_up", "credit", "bonus", "reward") -> true
-            type.lowercase() in listOf("cash_out", "deduction", "fee", "penalty", "debit") -> false
-            else -> isCredit
+        get() {
+            signedAmount?.let { return it >= 0.0 }
+            val normKind = kind.trim().lowercase(java.util.Locale.US)
+            if (normKind == "cod_collected") return false
+            if (normKind == "delivery_earning") return true
+            val normType = type.trim().lowercase(java.util.Locale.US)
+            return when {
+                amount > 0.0 && normType !in listOf("cod_deduction", "cash_out", "deduction", "fee", "penalty", "debit") -> true
+                amount < 0.0 -> false
+                normType in listOf("delivery_credit", "cash_in", "top_up", "credit", "bonus", "reward", "admin_deposit", "merged_wallet") -> true
+                normType in listOf("cod_deduction", "cash_out", "deduction", "fee", "penalty", "debit") -> false
+                else -> isCredit
+            }
         }
 
     val displayAmount: String
         get() {
             val sign = if (isPositive) "+" else "-"
-            return "$sign${String.format("%.2f", kotlin.math.abs(amount))}"
+            return "$sign${String.format(java.util.Locale.US, "%.2f", kotlin.math.abs(amount))}"
         }
 
     val formattedType: String
-        get() = formatType(type)
+        get() = formatType(type, kind)
 
     companion object {
-        fun formatType(rawType: String): String {
-            return when (rawType.trim().lowercase()) {
-                "cash_in" -> "Cash In"
-                "adjustment" -> "Adjustment"
-                "cash_out" -> "Cash Out"
-                "top_up" -> "Top Up"
-                "penalty" -> "Penalty"
-                "fee" -> "Fee"
-                else -> if (rawType.isNotBlank()) {
-                    rawType.replace("_", " ").split(" ")
-                        .joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
-                } else "Transaction"
+        fun formatType(rawType: String, rawKind: String = ""): String {
+            return when (rawKind.trim().lowercase(java.util.Locale.US)) {
+                "delivery_earning" -> "Delivery earning"
+                "cod_collected" -> "COD collected"
+                else -> when (rawType.trim().lowercase(java.util.Locale.US)) {
+                    "delivery_credit" -> "Delivery earning"
+                    "cod_deduction" -> "COD collected"
+                    "cash_in" -> "Cash In"
+                    "adjustment" -> "Adjustment"
+                    "cash_out" -> "Cash Out"
+                    "top_up" -> "Top Up"
+                    "penalty" -> "Penalty"
+                    "fee" -> "Fee"
+                    else -> if (rawType.isNotBlank()) {
+                        rawType.replace("_", " ").split(" ")
+                            .joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
+                    } else "Transaction"
+                }
             }
         }
     }
