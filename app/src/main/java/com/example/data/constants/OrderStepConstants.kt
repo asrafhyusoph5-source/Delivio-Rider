@@ -218,13 +218,17 @@ object OrderStepConstants {
         isPlatformOn: Boolean,
         isCityOn: Boolean,
         isAllowed: Boolean,
-        cityName: String = ""
+        cityName: String = "",
+        isVehicleSupported: Boolean = true,
+        vehicleName: String = ""
     ): String? {
         val city = if (cityName.isNotBlank()) cityName else "your city"
+        val vehicle = if (vehicleName.isNotBlank()) vehicleName else "your vehicle"
         return when {
             !isPlatformOn -> "Disabled platform-wide"
             !isCityOn -> "Disabled in $city"
             !isAllowed -> "Disabled for your account by admin"
+            !isVehicleSupported -> "Not available for $vehicle"
             else -> null
         }
     }

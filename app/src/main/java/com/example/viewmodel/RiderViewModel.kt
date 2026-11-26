@@ -785,11 +785,17 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val isAllowed = currentRider?.allowedServices?.any { it.trim().lowercase(java.util.Locale.US) == normService } ?: true
         val isPlatformOn = isPlatformServiceOn(serviceType)
         val isCityOn = isCityServiceOn(serviceType)
+        val vehicleType = currentRider?.vehicle?.type
+        val supportedServices = OrderStepConstants.getServicesForVehicle(vehicleType)
+        val isVehicleSupported = supportedServices.any { it.trim().lowercase(java.util.Locale.US) == normService }
+        val vehicleName = OrderStepConstants.getVehicleDisplayName(vehicleType)
         return OrderStepConstants.getServiceLockReason(
             isPlatformOn = isPlatformOn,
             isCityOn = isCityOn,
             isAllowed = isAllowed,
-            cityName = getCityDisplayName()
+            cityName = getCityDisplayName(),
+            isVehicleSupported = isVehicleSupported,
+            vehicleName = vehicleName
         )
     }
 

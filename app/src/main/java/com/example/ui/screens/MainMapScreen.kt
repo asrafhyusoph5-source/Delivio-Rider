@@ -246,9 +246,17 @@ fun MainMapScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 MainMapTopBar(
+                    isOnline = isOnline,
                     hasUnreadAdminMessage = hasUnreadAdminMessage,
                     hasUnresolvedTicket = hasUnresolvedTicket,
                     onOpenDrawer = onOpenDrawer,
+                    onStatusPillClick = {
+                        if (isOnline) {
+                            showDispatchStatusSheet = true
+                        } else {
+                            viewModel.toggleOnline(context)
+                        }
+                    },
                     onHeadsetClick = { showHeadsetMenuDialog = true }
                 )
 
@@ -806,9 +814,11 @@ fun MainMapScreen(
 
 @Composable
 fun MainMapTopBar(
+    isOnline: Boolean = false,
     hasUnreadAdminMessage: Boolean = false,
     hasUnresolvedTicket: Boolean = false,
     onOpenDrawer: () -> Unit,
+    onStatusPillClick: () -> Unit = {},
     onHeadsetClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -825,6 +835,11 @@ fun MainMapTopBar(
             contentDescription = "Menu",
             onClick = onOpenDrawer,
             testTag = "hamburger_menu_button"
+        )
+
+        OnlineOfflinePill(
+            isOnline = isOnline,
+            onClick = onStatusPillClick
         )
 
         Box(contentAlignment = Alignment.TopEnd) {

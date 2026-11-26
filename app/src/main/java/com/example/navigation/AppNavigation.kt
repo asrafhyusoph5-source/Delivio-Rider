@@ -25,6 +25,7 @@ object NavRoutes {
     const val INCOME_HISTORY = "income_history"
     const val PAYMENTS = "earnings"
     const val PROFILE = "profile"
+    const val SERVICE_TYPES = "service_types"
     const val QUESTS = "quests"
     const val RESOURCES_QUESTS = "resources/quests"
     const val RESOURCES_INSIGHTS = "resources/insights"
@@ -135,6 +136,13 @@ fun AppNavigation(
                     viewModel = viewModel,
                     onBack = { navController.popBackStack() },
                     onNavigateToReviews = { navController.navigate(NavRoutes.RESOURCES_REVIEWS) }
+                )
+            }
+
+            composable(NavRoutes.SERVICE_TYPES) {
+                ServiceTypesScreen(
+                    viewModel = viewModel,
+                    onBack = { navController.popBackStack() }
                 )
             }
 
@@ -268,14 +276,6 @@ fun AppNavigation(
             unreadInboxCount = unreadCount,
             averageRating = avgRating,
             reviewCount = reviewCount,
-            isServiceOn = { viewModel.isServiceOn(it) },
-            getServiceLockReason = { viewModel.getServiceLockReason(it) },
-            cityName = viewModel.getCityDisplayName(),
-            hasActiveOrders = activeOrders.isNotEmpty(),
-            onToggleOnline = { viewModel.toggleOnline(context) },
-            onToggleService = { serviceKey, enabled ->
-                viewModel.toggleService(serviceKey, enabled)
-            },
             onClose = { isDrawerOpen = false },
             onNavigate = { route ->
                 val fullRoute = when (route) {
@@ -285,6 +285,7 @@ fun AppNavigation(
                     "earnings" -> NavRoutes.EARNINGS
                     "payments" -> NavRoutes.EARNINGS
                     "profile" -> NavRoutes.PROFILE
+                    "service_types" -> NavRoutes.SERVICE_TYPES
                     "quests" -> NavRoutes.QUESTS
                     "resources/quests" -> NavRoutes.RESOURCES_QUESTS
                     "resources/tiers" -> NavRoutes.TIERS

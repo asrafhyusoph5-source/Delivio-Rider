@@ -1,7 +1,6 @@
 package com.example.ui.screens
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -25,10 +24,29 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.data.constants.OrderStepConstants
+import com.example.data.models.Rider
 import com.example.ui.theme.*
 import com.example.viewmodel.RiderViewModel
+import java.util.Locale
 
-@OptIn(ExperimentalMaterial3Api::class)
+fun formatAssignedCityName(cityDisplayName: String, cityId: String): String {
+    val raw = when {
+        cityDisplayName.isNotBlank() && !cityDisplayName.equals("City", ignoreCase = true) -> cityDisplayName
+        cityId.isNotBlank() -> cityId
+        cityDisplayName.isNotBlank() -> cityDisplayName
+        else -> "Not assigned"
+    }
+    return raw
+        .replace("_", " ")
+        .replace("-", " ")
+        .trim()
+        .split(Regex("\\s+"))
+        .filter { it.isNotBlank() }
+        .joinToString(" ") { word ->
+            word.lowercase(Locale.US).replaceFirstChar { ch -> ch.titlecase(Locale.US) }
+        }
+}
+
 @Composable
 fun ProfileScreen(
     viewModel: RiderViewModel,
@@ -36,8 +54,29 @@ fun ProfileScreen(
     onNavigateToReviews: () -> Unit = {}
 ) {
     val riderState by viewModel.rider.collectAsState()
-    val rider = riderState
+    val currentCityName by viewModel.currentCityName.collectAsState()
+    val cityDisplayName = remember(currentCityName, riderState?.cityId) {
+        viewModel.getCityDisplayName()
+    }
 
+    ProfileContent(
+        rider = riderState,
+        cityDisplayName = cityDisplayName,
+        onBack = onBack,
+        onNavigateToReviews = onNavigateToReviews,
+        onUpdatePhone = { newPhone -> viewModel.updatePhone(newPhone) }
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ProfileContent(
+    rider: Rider?,
+    cityDisplayName: String = "",
+    onBack: () -> Unit,
+    onNavigateToReviews: () -> Unit = {},
+    onUpdatePhone: (String) -> Unit = {}
+) {
     var showEditPhoneDialog by remember { mutableStateOf(false) }
     var editPhone by remember(rider?.phone) { mutableStateOf(rider?.phone ?: "") }
 
@@ -46,12 +85,18 @@ fun ProfileScreen(
             TopAppBar(
                 title = { Text("My Profile", fontWeight = FontWeight.Bold) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(
+                        onClick = onBack,
+                        modifier = Modifier.minimumInteractiveComponentSize()
+                    ) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
                 actions = {
-                    IconButton(onClick = { showEditPhoneDialog = true }) {
+                    IconButton(
+                        onClick = { showEditPhoneDialog = true },
+                        modifier = Modifier.minimumInteractiveComponentSize()
+                    ) {
                         Icon(Icons.Default.Edit, contentDescription = "Edit Phone", tint = DelivioYellowDark)
                     }
                 },
@@ -61,17 +106,27 @@ fun ProfileScreen(
         modifier = Modifier.testTag("profile_screen")
     ) { padding ->
         if (rider == null) {
-            Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding),
+                contentAlignment = Alignment.Center
+            ) {
                 CircularProgressIndicator(color = DelivioYellowDark)
             }
             return@Scaffold
+        }
+
+        val assignedCityLabel = remember(cityDisplayName, rider.cityId) {
+            formatAssignedCityName(cityDisplayName, rider.cityId)
         }
 
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .background(MaterialTheme.colorScheme.background),
+                .background(MaterialTheme.colorScheme.background)
+                .testTag("profile_lazy_column"),
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
@@ -87,7 +142,7 @@ fun ProfileScreen(
                         modifier = Modifier.padding(20.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        // Profile Picture (Coil AsyncImage, fallback circle with first letter, never emoji)
+                        // Profile Picture
                         Box(
                             modifier = Modifier
                                 .size(92.dp)
@@ -100,7 +155,9 @@ fun ProfileScreen(
                                     model = rider.photoUrl,
                                     contentDescription = "Profile Picture",
                                     contentScale = ContentScale.Crop,
-                                    modifier = Modifier.size(92.dp).clip(CircleShape)
+                                    modifier = Modifier
+                                        .size(92.dp)
+                                        .clip(CircleShape)
                                 )
                             } else {
                                 val initial = rider.name.firstOrNull()?.uppercase() ?: "R"
@@ -124,7 +181,12 @@ fun ProfileScreen(
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                             Spacer(modifier = Modifier.width(6.dp))
-                            Icon(Icons.Default.Lock, contentDescription = "Locked", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
+                            Icon(
+                                imageVector = Icons.Default.Lock,
+                                contentDescription = "Locked",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(16.dp)
+                            )
                         }
 
                         // Rider ID with lock icon
@@ -137,22 +199,38 @@ fun ProfileScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                             ) {
-                                Text("ID: ${rider.riderCode}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(
+                                    text = "ID: ${rider.riderCode}",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Icon(Icons.Default.Lock, contentDescription = "Locked", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(12.dp))
+                                Icon(
+                                    imageVector = Icons.Default.Lock,
+                                    contentDescription = "Locked",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(12.dp)
+                                )
                             }
                         }
-
-                        // Email hidden per privacy/display rules
 
                         // Editable Phone number
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
                                 .padding(top = 6.dp)
+                                .defaultMinSize(minHeight = 48.dp)
+                                .clip(RoundedCornerShape(10.dp))
                                 .clickable { showEditPhoneDialog = true }
+                                .padding(horizontal = 10.dp)
                         ) {
-                            Icon(Icons.Default.Phone, contentDescription = "Phone", tint = DelivioGreenDark, modifier = Modifier.size(15.dp))
+                            Icon(
+                                imageVector = Icons.Default.Phone,
+                                contentDescription = "Phone",
+                                tint = DelivioGreenDark,
+                                modifier = Modifier.size(15.dp)
+                            )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
                                 text = if (rider.phone.isNotBlank()) rider.phone else "Tap to add phone",
@@ -161,13 +239,18 @@ fun ProfileScreen(
                                 color = MaterialTheme.colorScheme.primary
                             )
                             Spacer(modifier = Modifier.width(4.dp))
-                            Icon(Icons.Default.Edit, contentDescription = "Edit", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
+                            Icon(
+                                imageVector = Icons.Default.Edit,
+                                contentDescription = "Edit",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(14.dp)
+                            )
                         }
 
                         Surface(
                             shape = RoundedCornerShape(6.dp),
                             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                            modifier = Modifier.padding(top = 8.dp)
+                            modifier = Modifier.padding(top = 6.dp)
                         ) {
                             Text(
                                 text = "Only admin can change name, email, photo, or driver ID.",
@@ -181,88 +264,53 @@ fun ProfileScreen(
                         HorizontalDivider()
                         Spacer(modifier = Modifier.height(12.dp))
 
-                        // Rating & Member stats
+                        // Stat row: Star "Rating" (tapping opens Ratings & Reviews) + "Assigned City"
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceAround
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(
                                 horizontalAlignment = Alignment.CenterHorizontally,
-                                modifier = Modifier.clickable { onNavigateToReviews() }
+                                modifier = Modifier
+                                    .defaultMinSize(minHeight = 48.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable { onNavigateToReviews() }
+                                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                                    .testTag("profile_rating_stat")
                             ) {
-                                Text("★ ${String.format(java.util.Locale.US, "%.1f", rider.rating)}", fontWeight = FontWeight.Black, fontSize = 16.sp, color = DelivioYellowDark)
-                                Text("Rating", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text("${rider.totalTrips}", fontWeight = FontWeight.Black, fontSize = 16.sp)
-                                Text("Completed Trips", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(rider.cityId.replace("_", " ").replaceFirstChar { it.uppercase() }, fontWeight = FontWeight.Black, fontSize = 14.sp)
-                                Text("Assigned City", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Ratings and reviews Row
-            item {
-                Card(
-                    shape = RoundedCornerShape(18.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onNavigateToReviews() }
-                        .testTag("profile_ratings_reviews_row")
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Surface(
-                                shape = CircleShape,
-                                color = DelivioYellowLight,
-                                modifier = Modifier.size(40.dp)
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(
-                                        imageVector = Icons.Default.Star,
-                                        contentDescription = "Ratings and reviews",
-                                        tint = DelivioYellowDark,
-                                        modifier = Modifier.size(22.dp)
-                                    )
-                                }
-                            }
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Column {
                                 Text(
-                                    text = "Ratings and reviews",
-                                    fontWeight = FontWeight.Bold,
+                                    text = "★ ${String.format(Locale.US, "%.1f", rider.rating)}",
+                                    fontWeight = FontWeight.Black,
+                                    fontSize = 16.sp,
+                                    color = DelivioYellowDark
+                                )
+                                Text(
+                                    text = "Rating",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier
+                                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                                    .testTag("profile_assigned_city_stat")
+                            ) {
+                                Text(
+                                    text = assignedCityLabel,
+                                    fontWeight = FontWeight.Black,
                                     fontSize = 15.sp,
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
-                                val reviewCount by viewModel.customerReviewCount.collectAsState()
                                 Text(
-                                    text = "★ ${String.format(java.util.Locale.US, "%.1f", rider.rating)} ($reviewCount reviews)",
+                                    text = "Assigned City",
                                     fontSize = 12.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                         }
-                        Icon(
-                            imageVector = Icons.Default.ChevronRight,
-                            contentDescription = "Open Ratings and reviews",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(22.dp)
-                        )
                     }
                 }
             }
@@ -280,7 +328,7 @@ fun ProfileScreen(
                             Spacer(modifier = Modifier.width(10.dp))
                             Text("Registered Vehicle", fontWeight = FontWeight.Bold, fontSize = 15.sp)
                         }
-                        ProfileRow("Vehicle Type", com.example.data.constants.OrderStepConstants.getVehicleDisplayName(rider.vehicle.type))
+                        ProfileRow("Vehicle Type", OrderStepConstants.getVehicleDisplayName(rider.vehicle.type))
                         ProfileRow("Model", rider.vehicle.model.ifBlank { "Registered Model" })
                         if (rider.vehicle.color.isNotBlank()) {
                             ProfileRow("Color", rider.vehicle.color)
@@ -299,7 +347,9 @@ fun ProfileScreen(
                 Card(
                     shape = RoundedCornerShape(18.dp),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    modifier = Modifier.fillMaxWidth().testTag("profile_documents_card")
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("profile_documents_card")
                 ) {
                     Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -443,7 +493,7 @@ fun ProfileScreen(
                 Button(
                     onClick = {
                         if (editPhone.isNotBlank()) {
-                            viewModel.updatePhone(editPhone.trim())
+                            onUpdatePhone(editPhone.trim())
                             showEditPhoneDialog = false
                         }
                     },

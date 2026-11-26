@@ -1,8 +1,8 @@
 package com.example.ui.components
 
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -15,13 +15,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.theme.DelivioGreen
+import com.example.ui.theme.DelivioGreenDark
 import com.example.ui.theme.DelivioRed
 
 @Composable
@@ -30,7 +31,6 @@ fun OnlineOfflinePill(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // Pulse animation when online
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
     val pulseScale by infiniteTransition.animateFloat(
         initialValue = 1f,
@@ -42,11 +42,24 @@ fun OnlineOfflinePill(
         label = "pulseScale"
     )
 
+    val containerColor = if (isOnline) {
+        DelivioGreen.copy(alpha = 0.16f).compositeOver(MaterialTheme.colorScheme.surface)
+    } else {
+        Color(0xFF9E9E9E).copy(alpha = 0.16f).compositeOver(MaterialTheme.colorScheme.surface)
+    }
+    val borderColor = if (isOnline) {
+        DelivioGreen.copy(alpha = 0.65f)
+    } else {
+        DelivioRed.copy(alpha = 0.45f)
+    }
+    val textColor = if (isOnline) DelivioGreenDark else DelivioRed
+
     Surface(
         onClick = onClick,
         shape = RoundedCornerShape(24.dp),
         shadowElevation = 6.dp,
-        color = MaterialTheme.colorScheme.surface,
+        color = containerColor,
+        border = BorderStroke(1.2.dp, borderColor),
         modifier = modifier
             .heightIn(min = 48.dp)
             .testTag("online_offline_pill")
@@ -54,7 +67,7 @@ fun OnlineOfflinePill(
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center,
-            modifier = Modifier.padding(horizontal = 18.dp)
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp)
         ) {
             Box(contentAlignment = Alignment.Center) {
                 if (isOnline) {
@@ -78,9 +91,9 @@ fun OnlineOfflinePill(
 
             Text(
                 text = if (isOnline) "Online" else "Offline",
-                color = if (isOnline) DelivioGreen else DelivioRed,
+                color = textColor,
                 fontWeight = FontWeight.Bold,
-                fontSize = 15.sp
+                fontSize = 14.sp
             )
         }
     }

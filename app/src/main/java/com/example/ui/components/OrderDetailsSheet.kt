@@ -265,26 +265,19 @@ fun OrderDetailsSheet(
                     } else {
                         Spacer(modifier = Modifier.width(12.dp))
                         OutlinedButton(
-                            onClick = onOnlineStatusClick,
+                            onClick = onGoOnlineClick,
                             shape = RoundedCornerShape(14.dp),
-                            border = BorderStroke(1.dp, DelivioGreen.copy(alpha = 0.55f)),
+                            border = BorderStroke(1.dp, DelivioRed.copy(alpha = 0.55f)),
                             colors = ButtonDefaults.outlinedButtonColors(
-                                containerColor = DelivioGreen.copy(alpha = 0.12f),
-                                contentColor = DelivioGreenDark
+                                containerColor = DelivioRed.copy(alpha = 0.10f),
+                                contentColor = DelivioRed
                             ),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
                             modifier = Modifier
                                 .heightIn(min = 48.dp)
-                                .testTag("idle_online_status_button")
+                                .testTag("go_offline_button")
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(8.dp)
-                                    .clip(CircleShape)
-                                    .background(DelivioGreen)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Online", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            Text("Go Offline", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                         }
                     }
                 }

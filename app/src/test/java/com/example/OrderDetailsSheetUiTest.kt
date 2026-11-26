@@ -1974,12 +1974,13 @@ class OrderDetailsSheetUiTest {
     }
 
     @Test
-    fun drawerMenuPanel_locksOfflineSwitchDuringActiveOrder() {
+    fun drawerMenuPanel_omitsOnlineSwitchAndMyProfile_andOpensProfileViaGreetingAndServiceTypes() {
         val onlineRider = com.example.data.models.Rider(
             uid = "r1",
             name = "Juan Dela Cruz",
             isOnline = true
         )
+        val navigatedRoutes = mutableListOf<String>()
 
         composeRule.setContent {
             DelivioRiderTheme {
@@ -1987,31 +1988,37 @@ class OrderDetailsSheetUiTest {
                     isOpen = true,
                     rider = onlineRider,
                     unreadInboxCount = 0,
-                    hasActiveOrders = true,
-                    onToggleOnline = {},
-                    onToggleService = { _, _ -> },
                     onClose = {},
-                    onNavigate = {}
+                    onNavigate = { navigatedRoutes.add(it) }
                 )
             }
         }
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("drawer_online_status_card").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithTag("drawer_online_switch").assertIsNotEnabled()
-        composeRule.onNodeWithText("Going offline locked during active order").assertIsDisplayed()
+        composeRule.onNodeWithTag("drawer_online_status_card").assertDoesNotExist()
+        composeRule.onNodeWithTag("drawer_online_switch").assertDoesNotExist()
+        composeRule.onNodeWithText("My profile").assertDoesNotExist()
+
+        composeRule.onNodeWithTag("drawer_profile_greeting_button").assertIsDisplayed().performClick()
+        assertEquals(listOf("profile"), navigatedRoutes)
+
+        composeRule.onNodeWithTag("drawer_service_type_item").performScrollTo().assertIsDisplayed().performClick()
+        assertEquals(listOf("profile", "service_types"), navigatedRoutes)
     }
 
     @Test
-    fun mainMapTopBar_showsOnlyHamburgerOnLeftAndHeadsetOnRight() {
+    fun mainMapTopBar_showsHamburgerOnLeftStatusPillInCenterAndHeadsetOnRight() {
         var drawerOpened = false
+        var pillClicked = false
         var headsetOpened = false
 
         composeRule.setContent {
             DelivioRiderTheme {
                 com.example.ui.screens.MainMapTopBar(
+                    isOnline = true,
                     hasUnreadAdminMessage = false,
                     hasUnresolvedTicket = false,
                     onOpenDrawer = { drawerOpened = true },
+                    onStatusPillClick = { pillClicked = true },
                     onHeadsetClick = { headsetOpened = true }
                 )
             }
@@ -2020,11 +2027,14 @@ class OrderDetailsSheetUiTest {
 
         composeRule.onNodeWithTag("main_top_bar").assertIsDisplayed()
         composeRule.onNodeWithTag("hamburger_menu_button").assertIsDisplayed().performClick()
+        composeRule.onNodeWithTag("online_offline_pill").assertIsDisplayed().performClick()
+        composeRule.onNodeWithText("Online").assertIsDisplayed()
         composeRule.onNodeWithTag("support_headset_button").assertIsDisplayed().performClick()
         composeRule.onNodeWithTag("top_navigation_card").assertDoesNotExist()
         composeRule.onNodeWithTag("nav_support_headset_button").assertDoesNotExist()
 
         assertTrue(drawerOpened)
+        assertTrue(pillClicked)
         assertTrue(headsetOpened)
     }
 
