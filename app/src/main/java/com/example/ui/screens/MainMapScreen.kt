@@ -116,7 +116,6 @@ fun MainMapScreen(
 
     val view = LocalView.current
     var recenterTrigger by remember { mutableIntStateOf(0) }
-    var isSatelliteLayer by remember { mutableStateOf(false) }
     var sheetState by remember { mutableStateOf(OrderSheetState.EXPANDED) }
     var routeDistanceKm by remember { mutableDoubleStateOf(0.0) }
     var routeEtaMinutes by remember { mutableIntStateOf(0) }
@@ -224,7 +223,7 @@ fun MainMapScreen(
                 focusedStop = focusedStop,
                 recenterTrigger = recenterTrigger,
                 sheetHeightFraction = sheetHeightFraction,
-                isSatelliteLayer = isSatelliteLayer,
+                isSatelliteLayer = false,
                 showBusyAreas = isBusyAreasVisible && !isTripActive,
                 busyGridCells = busyGridCells,
                 topBannerPaddingDp = topBannerClearanceDp,
@@ -498,13 +497,6 @@ fun MainMapScreen(
                                 onClick = { recenterTrigger += 1 },
                                 testTag = "recenter_button"
                             )
-
-                            CircularFloatingButton(
-                                icon = Icons.Default.Layers,
-                                contentDescription = "Toggle Map Layers",
-                                onClick = { isSatelliteLayer = !isSatelliteLayer },
-                                testTag = "layers_button"
-                            )
                         }
                     } else {
                         Row(
@@ -517,13 +509,6 @@ fun MainMapScreen(
                                 contentDescription = "Locate",
                                 onClick = { recenterTrigger += 1 },
                                 testTag = "recenter_button"
-                            )
-
-                            CircularFloatingButton(
-                                icon = Icons.Default.Layers,
-                                contentDescription = "Toggle Map Layers",
-                                onClick = { isSatelliteLayer = !isSatelliteLayer },
-                                testTag = "layers_button"
                             )
                         }
                     }

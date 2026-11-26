@@ -159,9 +159,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 .map { it.lowercase().trim() }
                 .toSet()
             OrderStepConstants.SERVICE_DEFINITIONS.mapNotNull { def ->
-                val key = def.key.lowercase().trim()
-                val riderAllowed = currentRider.allowedServices.any { it.lowercase().trim() == key }
-                val riderActive = currentRider.activeServices.any { it.lowercase().trim() == key }
+                val key = OrderStepConstants.normalizeOrderServiceKey(def.key)
+                val riderAllowed = OrderStepConstants.isServiceAllowedMatch(currentRider.allowedServices, key)
+                val riderActive = currentRider.activeServices.any { OrderStepConstants.normalizeOrderServiceKey(it) == key }
                 val platformOn = platformSvcs[key] != false
                 val cityOn = citySvcs[key] != false
                 val vehicleOk = key in vehicleAllowed
@@ -781,13 +781,13 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
     fun getServiceLockReason(serviceType: String): String? {
         val currentRider = rider.value
-        val normService = serviceType.trim().lowercase(java.util.Locale.US)
-        val isAllowed = currentRider?.allowedServices?.any { it.trim().lowercase(java.util.Locale.US) == normService } ?: true
+        val normService = OrderStepConstants.normalizeOrderServiceKey(serviceType)
+        val isAllowed = currentRider?.let { OrderStepConstants.isServiceAllowedMatch(it.allowedServices, normService) } ?: true
         val isPlatformOn = isPlatformServiceOn(serviceType)
         val isCityOn = isCityServiceOn(serviceType)
         val vehicleType = currentRider?.vehicle?.type
         val supportedServices = OrderStepConstants.getServicesForVehicle(vehicleType)
-        val isVehicleSupported = supportedServices.any { it.trim().lowercase(java.util.Locale.US) == normService }
+        val isVehicleSupported = supportedServices.any { OrderStepConstants.normalizeOrderServiceKey(it) == normService }
         val vehicleName = OrderStepConstants.getVehicleDisplayName(vehicleType)
         return OrderStepConstants.getServiceLockReason(
             isPlatformOn = isPlatformOn,
@@ -1478,13 +1478,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             it.key to it.displayName
         }
         return services.map { (key, displayName) ->
+            val normKey = OrderStepConstants.normalizeOrderServiceKey(key)
             val svcLogs = logs.filter {
-                val st = it.serviceType.lowercase().trim()
-                when (key) {
-                    "convenience" -> st == "convenience" || st == "mart"
-                    "request_rider" -> st == "request_rider"
-                    else -> st == key
-                }
+                OrderStepConstants.normalizeOrderServiceKey(it.serviceType) == normKey
             }
             val accepted = svcLogs.count { it.outcome == "accepted" }
             val declined = svcLogs.count { it.outcome == "declined" }
@@ -1519,13 +1515,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             it.key to it.displayName
         }
         return services.map { (key, displayName) ->
+            val normKey = OrderStepConstants.normalizeOrderServiceKey(key)
             val svcLogs = logs.filter {
-                val st = it.serviceType.lowercase().trim()
-                when (key) {
-                    "convenience" -> st == "convenience" || st == "mart"
-                    "request_rider" -> st == "request_rider"
-                    else -> st == key
-                }
+                OrderStepConstants.normalizeOrderServiceKey(it.serviceType) == normKey
             }
             val accepted = svcLogs.count { it.outcome == "accepted" }
             val released = svcLogs.count { it.finalOutcome == "released" }

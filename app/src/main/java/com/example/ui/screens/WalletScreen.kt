@@ -99,12 +99,10 @@ fun WalletContent(
     onRefresh: () -> Unit = {},
     onBack: () -> Unit
 ) {
-    var selectedFilter by remember { mutableStateOf(WalletFilter.ALL) }
-
-    val dayGroups = remember(transactions, selectedFilter, platformTimezone, nowMillis) {
+    val dayGroups = remember(transactions, platformTimezone, nowMillis) {
         WalletLedgerHelper.groupTransactionsByDay(
             transactions = transactions,
-            filter = selectedFilter,
+            filter = WalletFilter.ALL,
             timezoneId = platformTimezone,
             nowMillis = nowMillis
         )
@@ -356,37 +354,7 @@ fun WalletContent(
                     }
                 }
 
-                // 4. Filter Chips: All, Credits, Debits
-                item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        WalletFilter.entries.forEach { filter ->
-                            val isSelected = selectedFilter == filter
-                            FilterChip(
-                                selected = isSelected,
-                                onClick = { selectedFilter = filter },
-                                label = {
-                                    Text(
-                                        text = filter.label,
-                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                        fontSize = 13.sp
-                                    )
-                                },
-                                colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = DelivioYellow,
-                                    selectedLabelColor = TextOnYellow
-                                ),
-                                modifier = Modifier
-                                    .heightIn(min = 48.dp)
-                                    .testTag("wallet_filter_${filter.name.lowercase(Locale.US)}")
-                            )
-                        }
-                    }
-                }
-
-                // 5. Loading Skeletons / Empty State / Day-grouped Transactions
+                // 4. Loading Skeletons / Empty State / Day-grouped Transactions (full history, newest first)
                 if (isLoading && transactions.isEmpty()) {
                     items(4) { idx ->
                         WalletTransactionSkeleton(modifier = Modifier.testTag("wallet_skeleton_$idx"))
@@ -424,13 +392,8 @@ fun WalletContent(
                                     )
                                 }
                                 Spacer(modifier = Modifier.height(12.dp))
-                                val emptyHeadline = when (selectedFilter) {
-                                    WalletFilter.ALL -> "No wallet activity yet"
-                                    WalletFilter.CREDITS -> "No credit entries yet"
-                                    WalletFilter.DEBITS -> "No debit entries yet"
-                                }
                                 Text(
-                                    text = emptyHeadline,
+                                    text = "No wallet activity yet",
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 16.sp,
                                     color = MaterialTheme.colorScheme.onSurface

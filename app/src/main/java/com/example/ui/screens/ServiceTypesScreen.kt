@@ -53,10 +53,12 @@ fun ServiceTypesScreen(
     ServiceTypesContent(
         rider = rider,
         isPlatformServiceOn = { svc ->
-            platformServices[svc.trim().lowercase(Locale.US)] ?: true
+            val norm = OrderStepConstants.normalizeOrderServiceKey(svc)
+            platformServices[norm] ?: platformServices[svc.trim().lowercase(Locale.US)] ?: true
         },
         isCityServiceOn = { svc ->
-            cityServices[svc.trim().lowercase(Locale.US)] ?: true
+            val norm = OrderStepConstants.normalizeOrderServiceKey(svc)
+            cityServices[norm] ?: cityServices[svc.trim().lowercase(Locale.US)] ?: true
         },
         cityDisplayName = cityDisplayName,
         snackbarHostState = snackbarHostState,
@@ -76,11 +78,14 @@ fun ServiceTypesContent(
     onToggleService: (String, Boolean) -> Unit,
     onBack: () -> Unit
 ) {
-    val activeList = rider?.activeServices.orEmpty().map { it.trim().lowercase(Locale.US) }.toSet()
+    val activeList = rider?.activeServices.orEmpty()
+        .map { OrderStepConstants.normalizeOrderServiceKey(it) }
+        .filter { it.isNotEmpty() }
+        .toSet()
     val allowedList = rider?.allowedServices ?: OrderStepConstants.ALL_SERVICES
     val vehicleType = rider?.vehicle?.type
     val vehicleSupported = OrderStepConstants.getServicesForVehicle(vehicleType)
-        .map { it.trim().lowercase(Locale.US) }
+        .map { OrderStepConstants.normalizeOrderServiceKey(it) }
         .toSet()
     val vehicleDisplayName = OrderStepConstants.getVehicleDisplayName(vehicleType)
 
@@ -123,10 +128,10 @@ fun ServiceTypesContent(
             }
 
             items(OrderStepConstants.SERVICE_DEFINITIONS, key = { it.key }) { def ->
-                val svcKey = def.key.trim().lowercase(Locale.US)
+                val svcKey = OrderStepConstants.normalizeOrderServiceKey(def.key)
                 val isPlatformOn = isPlatformServiceOn(svcKey)
                 val isCityOn = isCityServiceOn(svcKey)
-                val isAllowed = allowedList.any { it.trim().lowercase(Locale.US) == svcKey }
+                val isAllowed = OrderStepConstants.isServiceAllowedMatch(allowedList, svcKey)
                 val isVehicleSupported = svcKey in vehicleSupported
                 val lockReason = OrderStepConstants.getServiceLockReason(
                     isPlatformOn = isPlatformOn,

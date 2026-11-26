@@ -118,6 +118,7 @@ fun OrderDetailsSheet(
     var showProblemDialog by remember { mutableStateOf(false) }
     var problemReason by remember { mutableStateOf("Merchant delay / waiting") }
     var showReleaseOrderDialog by remember(currentStop?.orderId) { mutableStateOf(false) }
+    var pendingOnlineToggleTarget by remember { mutableStateOf<Boolean?>(null) }
 
     // Dialogs for Slide / Press confirmations
     var showItemChecklistDialog by remember { mutableStateOf(false) }
@@ -234,7 +235,7 @@ fun OrderDetailsSheet(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = if (isOnline) "Ready for Bookings" else "You are Offline",
+                            text = if (isOnline) "You are Online" else "You are Offline",
                             fontSize = 17.sp,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onSurface
@@ -248,8 +249,25 @@ fun OrderDetailsSheet(
 
                     if (!isOnline) {
                         Spacer(modifier = Modifier.width(12.dp))
+                        OutlinedButton(
+                            onClick = { pendingOnlineToggleTarget = true },
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.5.dp, DelivioRed),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = Color.Transparent,
+                                contentColor = DelivioRed
+                            ),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .testTag("go_online_button")
+                        ) {
+                            Text("Offline", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        }
+                    } else {
+                        Spacer(modifier = Modifier.width(12.dp))
                         Button(
-                            onClick = onGoOnlineClick,
+                            onClick = { pendingOnlineToggleTarget = false },
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = DelivioGreen,
                                 contentColor = Color.White
@@ -258,28 +276,62 @@ fun OrderDetailsSheet(
                             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
                             modifier = Modifier
                                 .heightIn(min = 48.dp)
-                                .testTag("go_online_button")
-                        ) {
-                            Text("Go Online", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        }
-                    } else {
-                        Spacer(modifier = Modifier.width(12.dp))
-                        OutlinedButton(
-                            onClick = onGoOnlineClick,
-                            shape = RoundedCornerShape(14.dp),
-                            border = BorderStroke(1.dp, DelivioRed.copy(alpha = 0.55f)),
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                containerColor = DelivioRed.copy(alpha = 0.10f),
-                                contentColor = DelivioRed
-                            ),
-                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
-                            modifier = Modifier
-                                .heightIn(min = 48.dp)
                                 .testTag("go_offline_button")
                         ) {
-                            Text("Go Offline", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            Text("Online", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                         }
                     }
+                }
+
+                pendingOnlineToggleTarget?.let { targetOnline ->
+                    AlertDialog(
+                        onDismissRequest = { pendingOnlineToggleTarget = null },
+                        title = {
+                            Text(
+                                text = if (targetOnline) "Go Online?" else "Go Offline?",
+                                fontWeight = FontWeight.Bold
+                            )
+                        },
+                        text = {
+                            Text(
+                                text = if (targetOnline) {
+                                    "Start receiving incoming delivery and ride offers?"
+                                } else {
+                                    "Stop receiving new delivery and ride offers?"
+                                }
+                            )
+                        },
+                        confirmButton = {
+                            Button(
+                                onClick = {
+                                    pendingOnlineToggleTarget = null
+                                    onGoOnlineClick()
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (targetOnline) DelivioGreen else DelivioRed,
+                                    contentColor = Color.White
+                                ),
+                                modifier = Modifier
+                                    .heightIn(min = 48.dp)
+                                    .testTag("confirm_online_toggle_button")
+                            ) {
+                                Text(
+                                    text = if (targetOnline) "Go Online" else "Go Offline",
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(
+                                onClick = { pendingOnlineToggleTarget = null },
+                                modifier = Modifier
+                                    .heightIn(min = 48.dp)
+                                    .testTag("cancel_online_toggle_button")
+                            ) {
+                                Text("Cancel")
+                            }
+                        }
+                    )
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))

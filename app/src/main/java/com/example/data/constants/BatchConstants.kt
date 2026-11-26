@@ -688,8 +688,8 @@ object InstantDispatchEvaluator {
             return InstantDispatchResult(false, "busy")
         }
         if (!isPlatformServiceEnabled ||
-            !rider.allowedServices.contains(OrderStepConstants.SERVICE_REQUEST) ||
-            !rider.activeServices.contains(OrderStepConstants.SERVICE_REQUEST)
+            !OrderStepConstants.isServiceAllowedMatch(rider.allowedServices, OrderStepConstants.SERVICE_REQUEST) ||
+            rider.activeServices.none { OrderStepConstants.normalizeOrderServiceKey(it) == OrderStepConstants.SERVICE_REQUEST }
         ) {
             return InstantDispatchResult(false, "service off")
         }
@@ -1011,16 +1011,16 @@ object GeneralDispatchEvaluator {
         if (order.cityId.isNotBlank() && rider.cityId.isNotBlank() && order.cityId != rider.cityId) {
             return InstantDispatchResult(false, "service off in city")
         }
-        val normService = order.serviceType.lowercase().trim()
-        val riderHasActive = rider.activeServices.any { it.lowercase().trim() == normService }
-        val riderHasAllowed = rider.allowedServices.any { it.lowercase().trim() == normService }
+        val normService = OrderStepConstants.normalizeOrderServiceKey(order.serviceType)
+        val riderHasActive = rider.activeServices.any { OrderStepConstants.normalizeOrderServiceKey(it) == normService }
+        val riderHasAllowed = OrderStepConstants.isServiceAllowedMatch(rider.allowedServices, normService)
         if (!riderHasAllowed || !riderHasActive) {
             return InstantDispatchResult(false, "service off for rider")
         }
 
         val riderVehicleType = OrderStepConstants.normalizeVehicleType(rider.vehicle.type)
         val allowedForVehicle = OrderStepConstants.getServicesForVehicle(riderVehicleType)
-        if (!allowedForVehicle.any { it.lowercase().trim() == normService }) {
+        if (!allowedForVehicle.any { OrderStepConstants.normalizeOrderServiceKey(it) == normService }) {
             return InstantDispatchResult(false, "vehicle mismatch (not eligible for $riderVehicleType)")
         }
 

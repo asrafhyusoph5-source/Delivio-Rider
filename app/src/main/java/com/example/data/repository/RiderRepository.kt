@@ -254,15 +254,17 @@ class RiderRepository(
     }
 
     fun isPlatformServiceOn(serviceType: String): Boolean {
-        val norm = serviceType.lowercase().trim()
-        return _platformServices.value[norm] != false
+        val norm = OrderStepConstants.normalizeOrderServiceKey(serviceType)
+        val raw = serviceType.lowercase().trim()
+        return (_platformServices.value[norm] ?: _platformServices.value[raw]) != false
     }
 
     fun isCityServiceOn(serviceType: String, cityId: String = ""): Boolean {
-        val norm = serviceType.lowercase().trim()
+        val norm = OrderStepConstants.normalizeOrderServiceKey(serviceType)
+        val raw = serviceType.lowercase().trim()
         val checkCity = if (cityId.isNotBlank()) cityId else (_rider.value?.cityId ?: "")
         if (checkCity.isNotBlank()) {
-            val cityVal = _cityServices.value[norm]
+            val cityVal = _cityServices.value[norm] ?: _cityServices.value[raw]
             if (cityVal == false) return false
         }
         return true
@@ -734,12 +736,20 @@ class RiderRepository(
                     return@addSnapshotListener
                 }
                 if (snapshot == null || !snapshot.exists()) return@addSnapshotListener
-                val allowed = (snapshot.get("allowedServices") as? List<*>)
-                    ?.mapNotNull { it?.toString()?.trim()?.lowercase(Locale.US)?.takeIf { s -> s.isNotEmpty() } }
-                    ?: OrderStepConstants.ALL_SERVICES
-                val active = (snapshot.get("activeServices") as? List<*>)
-                    ?.mapNotNull { it?.toString()?.trim()?.lowercase(Locale.US)?.takeIf { s -> s.isNotEmpty() } }
-                    ?: allowed
+                val rawAllowed = (snapshot.get("allowedServices") as? List<*>)
+                    ?.mapNotNull { it?.toString()?.trim()?.takeIf { s -> s.isNotEmpty() } }
+                val allowed = if (rawAllowed != null) {
+                    OrderStepConstants.normalizeOrderServiceKeys(rawAllowed)
+                } else {
+                    OrderStepConstants.ALL_SERVICES
+                }
+                val rawActive = (snapshot.get("activeServices") as? List<*>)
+                    ?.mapNotNull { it?.toString()?.trim()?.takeIf { s -> s.isNotEmpty() } }
+                val active = if (rawActive != null) {
+                    OrderStepConstants.normalizeOrderServiceKeys(rawActive)
+                } else {
+                    allowed
+                }
 
                 val vehicleMap = snapshot.get("vehicle") as? Map<*, *>
                 val vehicleTypeVal = vehicleMap?.get("type")?.toString()?.takeIf { it.isNotBlank() }
@@ -780,7 +790,9 @@ class RiderRepository(
                     RiderLocationTracker.updateLocation(docLat, docLng)
                 }
 
-                val isOnlineNow = snapshot.getBoolean("isOnline") ?: false
+                val isOnlineNow = snapshot.getBoolean("isOnline")
+                    ?: snapshot.getBoolean("online")
+                    ?: false
                 if (isOnlineNow) {
                     val serverOnlineSince = OrderDocumentParser.parseTolerantTimeMillisOrZero(snapshot.get("onlineSince"))
                     val resolvedSince = when {
@@ -847,15 +859,21 @@ class RiderRepository(
                     citySettingsListener = db.collection("cities").document(r.cityId)
                         .addSnapshotListener { cSnap, _ ->
                             if (cSnap != null && cSnap.exists()) {
-                                val svcs = (cSnap.get("services") as? Map<*, *>)?.mapNotNull { (k, v) ->
-                                    val key = k?.toString() ?: return@mapNotNull null
-                                    val bool = when (v) {
-                                        is Boolean -> v
-                                        is String -> v.toBooleanStrictOrNull() ?: true
-                                        else -> true
+                                val svcs = buildMap<String, Boolean> {
+                                    (cSnap.get("services") as? Map<*, *>)?.forEach { (k, v) ->
+                                        val key = k?.toString()?.trim()?.lowercase(Locale.US) ?: return@forEach
+                                        val bool = when (v) {
+                                            is Boolean -> v
+                                            is String -> v.toBooleanStrictOrNull() ?: true
+                                            else -> true
+                                        }
+                                        put(key, bool)
+                                        val normKey = OrderStepConstants.normalizeOrderServiceKey(key)
+                                        if (normKey.isNotEmpty()) {
+                                            put(normKey, bool)
+                                        }
                                     }
-                                    key to bool
-                                }?.toMap() ?: emptyMap()
+                                }
                                 _cityServices.value = svcs
                                 val name = cSnap.getString("name") ?: cSnap.getString("cityName") ?: r.cityId
                                 _currentCityName.value = name
@@ -1713,8 +1731,8 @@ class RiderRepository(
     // SERVICE TYPE TOGGLE
     fun toggleServiceType(serviceKey: String, enabled: Boolean, onSuccess: () -> Unit, onError: (String) -> Unit) {
         val currentRider = _rider.value ?: run { onError("Rider data not loaded"); return }
-        val normKey = serviceKey.trim().lowercase(Locale.US)
-        if (!currentRider.allowedServices.any { it.trim().lowercase(Locale.US) == normKey }) {
+        val normKey = OrderStepConstants.normalizeOrderServiceKey(serviceKey)
+        if (!OrderStepConstants.isServiceAllowedMatch(currentRider.allowedServices, normKey)) {
             onError("This service is disabled by admin")
             return
         }
@@ -1723,20 +1741,24 @@ class RiderRepository(
             return
         }
 
-        val updatedActive = currentRider.activeServices.toMutableList()
+        val updatedActive = OrderStepConstants.normalizeOrderServiceKeys(currentRider.activeServices).toMutableList()
         if (enabled) {
-            if (!updatedActive.contains(serviceKey)) updatedActive.add(serviceKey)
+            if (!updatedActive.contains(normKey)) updatedActive.add(normKey)
         } else {
-            if (updatedActive.size <= 1 && updatedActive.contains(serviceKey)) {
+            if (updatedActive.size <= 1 && updatedActive.contains(normKey)) {
                 onError("At least one service must stay active")
                 return
             }
-            updatedActive.remove(serviceKey)
+            updatedActive.remove(normKey)
         }
 
+        _rider.value = currentRider.copy(activeServices = updatedActive)
         db.collection("riders").document(currentRider.uid).update("activeServices", updatedActive)
             .addOnSuccessListener { onSuccess() }
-            .addOnFailureListener { onError(it.localizedMessage ?: "Failed to update services") }
+            .addOnFailureListener {
+                _rider.value = currentRider
+                onError(it.localizedMessage ?: "Failed to update services")
+            }
     }
 
     // ONLINE / OFFLINE TOGGLE
@@ -1747,27 +1769,40 @@ class RiderRepository(
             return
         }
 
+        val prevOnlineSince = _onlineSinceMillis.value
+        val prevPrefsOnlineSince = activeUserPrefs?.getOnlineSinceMillis() ?: 0L
+        // Optimistically update single source of truth immediately so pill, title, and button stay in sync without restart
+        _rider.value = currentRider.copy(isOnline = online)
+        if (online) {
+            val nowMs = System.currentTimeMillis()
+            _onlineSinceMillis.value = nowMs
+            activeUserPrefs?.setOnlineSinceMillis(nowMs)
+            RiderLocationService.start(context)
+        } else {
+            val nowMs = System.currentTimeMillis()
+            val prevSince = prevOnlineSince.takeIf { it > 0L } ?: prevPrefsOnlineSince
+            if (prevSince > 0L && nowMs > prevSince) {
+                activeUserPrefs?.recordOnlineInterval(prevSince, nowMs)
+            }
+            _onlineSinceMillis.value = 0L
+            activeUserPrefs?.setOnlineSinceMillis(0L)
+            RiderLocationService.stop(context)
+        }
+
         db.collection("riders").document(currentRider.uid).update(
             "isOnline", online,
             "lastSeenAt", FieldValue.serverTimestamp()
         ).addOnSuccessListener {
-            if (online) {
-                val nowMs = System.currentTimeMillis()
-                _onlineSinceMillis.value = nowMs
-                activeUserPrefs?.setOnlineSinceMillis(nowMs)
-                RiderLocationService.start(context)
-            } else {
-                val nowMs = System.currentTimeMillis()
-                val prevSince = _onlineSinceMillis.value.takeIf { it > 0L } ?: activeUserPrefs?.getOnlineSinceMillis() ?: 0L
-                if (prevSince > 0L && nowMs > prevSince) {
-                    activeUserPrefs?.recordOnlineInterval(prevSince, nowMs)
-                }
-                _onlineSinceMillis.value = 0L
-                activeUserPrefs?.setOnlineSinceMillis(0L)
-                RiderLocationService.stop(context)
-            }
             onSuccess()
         }.addOnFailureListener {
+            _rider.value = currentRider
+            _onlineSinceMillis.value = prevOnlineSince
+            activeUserPrefs?.setOnlineSinceMillis(prevPrefsOnlineSince)
+            if (!online) {
+                RiderLocationService.start(context)
+            } else {
+                RiderLocationService.stop(context)
+            }
             onError(it.localizedMessage ?: "Failed to update online status")
         }
     }
@@ -1784,13 +1819,15 @@ class RiderRepository(
         val initialRawStatus = AcceptOrderRules.formatRawStatus(firstOrder?.status)
 
         if (currentRider == null || authUid.isEmpty()) {
+            val shortMsg = "Rider profile or FirebaseAuth session is not ready"
             onError(
                 AcceptOrderErrorDetails(
-                    exceptionMessage = "Rider profile or FirebaseAuth session is not ready",
+                    exceptionMessage = shortMsg,
                     orderId = bundle.id,
                     currentStatus = initialRawStatus,
                     authUid = authUid,
-                    fieldsWritten = emptyMap()
+                    fieldsWritten = emptyMap(),
+                    shortMessage = shortMsg
                 )
             )
             return
@@ -1801,13 +1838,34 @@ class RiderRepository(
         ) {
             _incomingOfferBundle.value = null
             _incomingOffer.value = null
+            val targetOrd = firstOrder
+            val checks = if (targetOrd != null) {
+                AcceptOrderRules.evaluateAcceptChecks(
+                    myUid = authUid,
+                    riderStatus = currentRider.status,
+                    riderAllowedServices = currentRider.allowedServices,
+                    riderTopLevelVehicleType = currentRider.vehicle.type,
+                    riderFallbackVehicleType = currentRider.vehicle.type,
+                    orderServiceType = targetOrd.serviceType,
+                    orderVehicleType = targetOrd.vehicleType,
+                    orderCityId = targetOrd.cityId,
+                    isCityServiceOn = isCityServiceOn(targetOrd.serviceType, targetOrd.cityId),
+                    excludeRiderIds = targetOrd.excludeRiderIds,
+                    onHold = targetOrd.onHold,
+                    isCashOrder = true,
+                    userWalletBalance = effectiveWalletBalance(),
+                    orderRiderId = targetOrd.riderId.orEmpty()
+                )
+            } else emptyList()
             onError(
                 AcceptOrderErrorDetails(
                     exceptionMessage = WalletLedgerHelper.COD_PAUSED_REASON,
                     orderId = bundle.id,
                     currentStatus = initialRawStatus,
                     authUid = authUid,
-                    fieldsWritten = emptyMap()
+                    fieldsWritten = emptyMap(),
+                    shortMessage = WalletLedgerHelper.COD_PAUSED_REASON,
+                    checks = checks
                 )
             )
             return
@@ -1876,13 +1934,45 @@ class RiderRepository(
             var lastObservedOrderId: String = firstOrder?.id ?: bundle.id
             var lastObservedRawStatus: String = initialRawStatus
             var lastFailureDecision: AcceptOrderDecision? = null
+            var lastObservedChecks: List<AcceptOrderCheckItem> = emptyList()
 
             db.runTransaction { tx ->
-                // 1. Re-read all order documents in offer
-                val docsToWrite = mutableListOf<Triple<Int, DocumentReference, DocumentSnapshot>>()
-                bundle.orders.forEachIndexed { idx, order ->
+                // 1. Read rider profile, user doc, and all order docs BEFORE any writes
+                val riderSnap = tx.get(db.collection("riders").document(authUid))
+                val userSnap = tx.get(db.collection("users").document(authUid))
+                val orderSnapshots = bundle.orders.mapIndexed { idx, order ->
                     val ref = db.collection("orders").document(order.id)
-                    val snapshot = tx.get(ref)
+                    Triple(idx, ref, tx.get(ref))
+                }
+                val citySnaps = mutableMapOf<String, DocumentSnapshot>()
+                orderSnapshots.forEach { (idx, _, snapshot) ->
+                    val cid = (if (snapshot.exists()) OrderDocumentParser.safeStringOrNull(snapshot.get("cityId")) else null)
+                        ?.ifBlank { null }
+                        ?: bundle.orders[idx].cityId.ifBlank { null }
+                        ?: riderSnap.getString("cityId")?.trim()?.ifBlank { null }
+                    if (!cid.isNullOrBlank() && !citySnaps.containsKey(cid)) {
+                        citySnaps[cid] = tx.get(db.collection("cities").document(cid))
+                    }
+                }
+
+                val liveRiderStatus = riderSnap.getString("status")?.trim().orEmpty()
+                val liveAllowedServices = (riderSnap.get("allowedServices") as? List<*>)
+                    ?.mapNotNull { it?.toString()?.trim()?.takeIf { s -> s.isNotEmpty() } }
+                    ?: emptyList()
+                val liveTopLevelVehicleType = riderSnap.getString("vehicleType")?.trim().orEmpty()
+                val liveFallbackVehicleType = ((riderSnap.get("vehicle") as? Map<*, *>)?.get("type")?.toString())
+                    ?.trim()
+                    .orEmpty()
+                val liveUserWalletBalance = if (userSnap.exists()) {
+                    OrderDocumentParser.safeDouble(userSnap.get("walletBalance"))
+                } else {
+                    null
+                }
+
+                // 2. Evaluate all orders in bundle
+                val docsToWrite = mutableListOf<Triple<Int, DocumentReference, DocumentSnapshot>>()
+                orderSnapshots.forEach { (idx, ref, snapshot) ->
+                    val order = bundle.orders[idx]
                     lastObservedOrderId = order.id
 
                     val exists = snapshot.exists()
@@ -1895,9 +1985,21 @@ class RiderRepository(
                     lastObservedRawStatus = rawStatusFormatted
 
                     val rawRiderId = if (exists) snapshot.get("riderId") else null
+                    val rawRiderIdStr = when (rawRiderId) {
+                        null -> ""
+                        is String -> rawRiderId.trim()
+                        else -> rawRiderId.toString().trim()
+                    }
                     val rawReqMap = if (exists) OrderDocumentParser.safeMap(snapshot.get("riderRequest")) else null
                     val rawReqStatus = rawReqMap?.get("status") ?: if (exists) snapshot.get("riderRequestStatus") else null
                     val rawServiceType = if (exists) snapshot.get("serviceType") ?: order.serviceType else order.serviceType
+                    val rawVehicleType = if (exists) snapshot.get("vehicleType") ?: order.vehicleType else order.vehicleType
+                    val rawCityId = (if (exists) OrderDocumentParser.safeStringOrNull(snapshot.get("cityId")) else null)
+                        ?.ifBlank { null }
+                        ?: order.cityId
+                    val rawPaymentMethod = (if (exists) OrderDocumentParser.safeStringOrNull(snapshot.get("paymentMethod")) else null)
+                        ?.ifBlank { null }
+                        ?: order.paymentMethod
                     val excludes = if (exists) {
                         (snapshot.get("excludeRiderIds") as? List<*>)?.mapNotNull { it?.toString() } ?: emptyList()
                     } else {
@@ -1916,10 +2018,60 @@ class RiderRepository(
                         onHold = isOnHold
                     )
 
-                    when (eval.decision) {
-                        AcceptOrderDecision.ALREADY_OURS -> {
-                            android.util.Log.d("STATUS", "Order ${order.id} already assigned to current rider ($authUid); opening trip")
+                    if (eval.decision == AcceptOrderDecision.ALREADY_OURS) {
+                        android.util.Log.d("STATUS", "Order ${order.id} already assigned to current rider ($authUid); opening trip")
+                        return@forEach
+                    }
+
+                    val cityServicesMap = rawCityId.takeIf { it.isNotBlank() }?.let { cid ->
+                        citySnaps[cid]?.takeIf { it.exists() }?.get("services") as? Map<*, *>
+                    }
+                    val orderSvcStr = rawServiceType.toString().trim()
+                    val normOrderSvc = OrderStepConstants.normalizeOrderServiceKey(orderSvcStr)
+                    val cityServiceOnVal = if (cityServicesMap == null) {
+                        true
+                    } else {
+                        val rawVal = cityServicesMap[orderSvcStr] ?: cityServicesMap[normOrderSvc]
+                        when (rawVal) {
+                            is Boolean -> rawVal
+                            is String -> rawVal.toBooleanStrictOrNull() ?: true
+                            else -> true
                         }
+                    }
+                    val isCashOrder = rawPaymentMethod.trim().lowercase(Locale.US) in setOf("cod", "cash")
+
+                    val checks = AcceptOrderRules.evaluateAcceptChecks(
+                        myUid = authUid,
+                        riderStatus = liveRiderStatus,
+                        riderAllowedServices = liveAllowedServices,
+                        riderTopLevelVehicleType = liveTopLevelVehicleType,
+                        riderFallbackVehicleType = liveFallbackVehicleType,
+                        orderServiceType = orderSvcStr,
+                        orderVehicleType = rawVehicleType.toString(),
+                        orderCityId = rawCityId,
+                        isCityServiceOn = cityServiceOnVal,
+                        excludeRiderIds = excludes,
+                        onHold = isOnHold,
+                        isCashOrder = isCashOrder,
+                        userWalletBalance = liveUserWalletBalance,
+                        orderRiderId = rawRiderIdStr
+                    )
+                    lastObservedChecks = checks
+
+                    if (checks.any { !it.passed }) {
+                        lastFailureDecision = if (rawRiderIdStr.isNotEmpty() && rawRiderIdStr != authUid) {
+                            AcceptOrderDecision.TAKEN_BY_OTHER
+                        } else {
+                            AcceptOrderDecision.UNAVAILABLE
+                        }
+                        throw FirebaseFirestoreException(
+                            AcceptOrderRules.buildShortFailureMessage(checks, eval.reason),
+                            FirebaseFirestoreException.Code.ABORTED
+                        )
+                    }
+
+                    when (eval.decision) {
+                        AcceptOrderDecision.ALREADY_OURS -> Unit
                         AcceptOrderDecision.ALLOW_ACCEPT -> {
                             docsToWrite.add(Triple(idx, ref, snapshot))
                         }
@@ -1944,7 +2096,7 @@ class RiderRepository(
                     }
                 }
 
-                // 2. Perform writes across orders that still need assignment
+                // 3. Perform writes across orders that still need assignment
                 docsToWrite.forEach { (idx, ref, snapshot) ->
                     val order = bundle.orders[idx]
                     val rank = startingIndex + idx
@@ -1955,8 +2107,9 @@ class RiderRepository(
                         ?.trim()
                         ?.ifBlank { null }
                         ?: OrderStepConstants.STATUS_PLACED_ORDER
-                    val serviceType = (OrderDocumentParser.safeStringOrNull(snapshot.get("serviceType"))
-                        ?: order.serviceType).lowercase(Locale.US)
+                    val serviceType = OrderStepConstants.normalizeOrderServiceKey(
+                        OrderDocumentParser.safeStringOrNull(snapshot.get("serviceType")) ?: order.serviceType
+                    ).ifBlank { OrderStepConstants.SERVICE_FOOD }
 
                     val stepForOrder = when (serviceType) {
                         OrderStepConstants.SERVICE_TAXI -> OrderStepConstants.STEP_TO_PICKUP
@@ -2016,9 +2169,11 @@ class RiderRepository(
                         else -> currentStatus
                     }
 
+                    val nowTs = com.google.firebase.Timestamp.now()
                     val historyEntry = mapOf(
                         "status" to newStatusForHistory,
-                        "timestamp" to com.google.firebase.Timestamp.now()
+                        "at" to nowTs,
+                        "timestamp" to nowTs
                     )
                     updates["statusHistory"] = FieldValue.arrayUnion(historyEntry)
                     updates["updatedAt"] = FieldValue.serverTimestamp()
@@ -2041,7 +2196,7 @@ class RiderRepository(
                     val rank = startingIndex + idx
                     val computedQuote = computedQuotesByOrderId[ord.id]
                     val feeEstimate = computedQuote?.net ?: bundle.breakdowns.getOrNull(idx)?.totalPay ?: 0.0
-                    val serviceType = ord.serviceType.lowercase(Locale.US)
+                    val serviceType = OrderStepConstants.normalizeOrderServiceKey(ord.serviceType)
                     val stepForOrder = when (serviceType) {
                         OrderStepConstants.SERVICE_TAXI -> OrderStepConstants.STEP_TO_PICKUP
                         OrderStepConstants.SERVICE_PARCEL -> OrderStepConstants.STEP_TO_SENDER
@@ -2081,12 +2236,38 @@ class RiderRepository(
                     _candidateOrders.value = _candidateOrders.value.filterNot { it.id in removeIds }
                 }
                 val msg = exception.message ?: exception.localizedMessage ?: "This order is no longer available"
+                val finalChecks = if (lastObservedChecks.isNotEmpty()) {
+                    lastObservedChecks
+                } else {
+                    val targetOrd = firstOrder
+                    if (targetOrd != null) {
+                        AcceptOrderRules.evaluateAcceptChecks(
+                            myUid = authUid,
+                            riderStatus = currentRider.status,
+                            riderAllowedServices = currentRider.allowedServices,
+                            riderTopLevelVehicleType = currentRider.vehicle.type,
+                            riderFallbackVehicleType = currentRider.vehicle.type,
+                            orderServiceType = targetOrd.serviceType,
+                            orderVehicleType = targetOrd.vehicleType,
+                            orderCityId = targetOrd.cityId,
+                            isCityServiceOn = isCityServiceOn(targetOrd.serviceType, targetOrd.cityId),
+                            excludeRiderIds = targetOrd.excludeRiderIds,
+                            onHold = targetOrd.onHold,
+                            isCashOrder = WalletLedgerHelper.isCodOrder(targetOrd),
+                            userWalletBalance = effectiveWalletBalance(),
+                            orderRiderId = targetOrd.riderId.orEmpty()
+                        )
+                    } else emptyList()
+                }
+                val shortMsg = AcceptOrderRules.buildShortFailureMessage(finalChecks, msg)
                 val errorDetails = AcceptOrderErrorDetails(
                     exceptionMessage = msg,
                     orderId = lastObservedOrderId,
                     currentStatus = lastObservedRawStatus.ifBlank { "(missing)" },
                     authUid = authUid,
-                    fieldsWritten = writeMap
+                    fieldsWritten = writeMap,
+                    shortMessage = shortMsg,
+                    checks = finalChecks
                 )
                 onError(errorDetails)
             }
@@ -2370,9 +2551,11 @@ class RiderRepository(
         }
 
         // statusHistory (arrayUnion with Timestamp.now())
+        val nowHistoryTs = com.google.firebase.Timestamp.now()
         val historyEntry = mapOf(
             "status" to nextStatus,
-            "timestamp" to com.google.firebase.Timestamp.now()
+            "at" to nowHistoryTs,
+            "timestamp" to nowHistoryTs
         )
         updates["statusHistory"] = FieldValue.arrayUnion(historyEntry)
 
@@ -2661,10 +2844,12 @@ class RiderRepository(
                 if (expectedFood == FoodStepStage.TO_MERCHANT && actualDbStatus.isNotBlank()) {
                     // Preserve live merchant status (e.g. Preparing -> Ready) without overwriting it on arrival
                     finalUpdates["status"] = actualDbStatus
+                    val nowArrivalTs = com.google.firebase.Timestamp.now()
                     finalUpdates["statusHistory"] = FieldValue.arrayUnion(
                         mapOf(
                             "status" to actualDbStatus,
-                            "timestamp" to com.google.firebase.Timestamp.now()
+                            "at" to nowArrivalTs,
+                            "timestamp" to nowArrivalTs
                         )
                     )
                     effectiveWrittenStatus = actualDbStatus
@@ -4650,13 +4835,15 @@ class RiderRepository(
         val userRef = if (uid.isNotBlank()) db.collection("users").document(uid) else null
         val nextOrderRef = nextOrderToPromote?.let { db.collection("orders").document(it.id) }
         val promoteUpdates = if (nextOrderToPromote != null) {
+            val nowPromoteTs = com.google.firebase.Timestamp.now()
             mapOf<String, Any>(
                 "status" to OrderStepConstants.STATUS_RIDER_ON_THE_WAY,
                 "updatedAt" to FieldValue.serverTimestamp(),
                 "statusHistory" to FieldValue.arrayUnion(
                     mapOf(
                         "status" to OrderStepConstants.STATUS_RIDER_ON_THE_WAY,
-                        "timestamp" to com.google.firebase.Timestamp.now()
+                        "at" to nowPromoteTs,
+                        "timestamp" to nowPromoteTs
                     )
                 )
             )

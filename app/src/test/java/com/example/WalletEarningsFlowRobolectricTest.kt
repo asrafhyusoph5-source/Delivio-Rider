@@ -206,6 +206,14 @@ class WalletEarningsFlowRobolectricTest {
         composeRule.onNodeWithText("Cash collected (on hand)").assertIsDisplayed()
         composeRule.onNodeWithText("₱420.00").assertIsDisplayed()
 
+        // All, Credits, Debits filter chips are removed; full history displays newest first grouped by date
+        composeRule.onNodeWithTag("wallet_filter_all").assertDoesNotExist()
+        composeRule.onNodeWithTag("wallet_filter_credits").assertDoesNotExist()
+        composeRule.onNodeWithTag("wallet_filter_debits").assertDoesNotExist()
+        composeRule.onNodeWithText("All").assertDoesNotExist()
+        composeRule.onNodeWithText("Credits").assertDoesNotExist()
+        composeRule.onNodeWithText("Debits").assertDoesNotExist()
+
         // Day headers & transaction cards
         composeRule.onNodeWithTag("wallet_lazy_column").performScrollToNode(hasTestTag("wallet_transaction_rider_o1_cod_collected"))
         composeRule.onNodeWithText("Today").assertIsDisplayed()
@@ -214,22 +222,6 @@ class WalletEarningsFlowRobolectricTest {
         composeRule.onNodeWithText("Balance after: -₱255.00").assertIsDisplayed()
         composeRule.onNodeWithTag("wallet_lazy_column").performScrollToNode(hasTestTag("wallet_transaction_rider_o1_delivery_earning"))
         composeRule.onNodeWithText("Delivery earning - #3LZKAP").assertIsDisplayed()
-
-        // Filter Credits hides COD deduction
-        composeRule.onNodeWithTag("wallet_lazy_column").performScrollToNode(hasTestTag("wallet_filter_credits"))
-        composeRule.onNodeWithTag("wallet_filter_credits").performClick()
-        composeRule.waitForIdle()
-        composeRule.onNodeWithTag("wallet_lazy_column").performScrollToNode(hasTestTag("wallet_transaction_rider_o1_delivery_earning"))
-        composeRule.onNodeWithText("Delivery earning - #3LZKAP").assertIsDisplayed()
-        composeRule.onNodeWithText("COD collected - #3LZKAP").assertDoesNotExist()
-
-        // Filter Debits shows COD deduction only
-        composeRule.onNodeWithTag("wallet_lazy_column").performScrollToNode(hasTestTag("wallet_filter_debits"))
-        composeRule.onNodeWithTag("wallet_filter_debits").performClick()
-        composeRule.waitForIdle()
-        composeRule.onNodeWithTag("wallet_lazy_column").performScrollToNode(hasTestTag("wallet_transaction_rider_o1_cod_collected"))
-        composeRule.onNodeWithText("COD collected - #3LZKAP").assertIsDisplayed()
-        composeRule.onNodeWithText("Delivery earning - #3LZKAP").assertDoesNotExist()
     }
 
     @Test

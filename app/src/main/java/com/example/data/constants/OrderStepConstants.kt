@@ -178,6 +178,51 @@ object OrderStepConstants {
         }
     }
 
+    fun normalizeOrderServiceKey(raw: String?): String {
+        return when (raw?.trim()?.lowercase(java.util.Locale.US)) {
+            null, "" -> ""
+            "instant", "request", "request_rider", "delivio instant" -> SERVICE_REQUEST_RIDER
+            "mart", "convenience", "delivio mart" -> SERVICE_CONVENIENCE
+            "food", "delivio food" -> SERVICE_FOOD
+            "parcel", "delivio parcel" -> SERVICE_PARCEL
+            "pabili", "delivio pabili" -> SERVICE_PABILI
+            "taxi", "delivio taxi" -> SERVICE_TAXI
+            else -> raw.trim().lowercase(java.util.Locale.US)
+        }
+    }
+
+    fun normalizeOrderServiceKeys(keys: Iterable<String>): List<String> {
+        val out = LinkedHashSet<String>()
+        for (raw in keys) {
+            val norm = normalizeOrderServiceKey(raw)
+            if (norm.isNotEmpty()) out.add(norm)
+        }
+        return out.toList()
+    }
+
+    fun isServiceAllowedMatch(allowedServices: Iterable<String>, orderServiceType: String?): Boolean {
+        val normalizedOrder = normalizeOrderServiceKey(orderServiceType)
+        if (normalizedOrder.isEmpty()) return false
+        val normalizedAllowed = normalizeOrderServiceKeys(allowedServices)
+        if (normalizedAllowed.isEmpty()) return true
+        return normalizedOrder in normalizedAllowed
+    }
+
+    fun parcelVehicleMatch(orderVehicleRaw: String?, riderVehicleRaw: String?): Boolean {
+        val want = orderVehicleRaw?.trim()?.lowercase(java.util.Locale.US).orEmpty()
+        val have = riderVehicleRaw?.trim()?.lowercase(java.util.Locale.US).orEmpty()
+        return want.isEmpty() ||
+            (want == VEHICLE_SEDAN && have in setOf(VEHICLE_CAR4, VEHICLE_CAR8, VEHICLE_SEDAN)) ||
+            (want == VEHICLE_MOTORCYCLE && have == VEHICLE_MOTORCYCLE) ||
+            (want != VEHICLE_SEDAN && want != VEHICLE_MOTORCYCLE && want == have)
+    }
+
+    fun taxiVehicleMatch(orderVehicleRaw: String?, riderVehicleRaw: String?): Boolean {
+        val want = orderVehicleRaw?.trim()?.lowercase(java.util.Locale.US).orEmpty()
+        val have = riderVehicleRaw?.trim()?.lowercase(java.util.Locale.US).orEmpty()
+        return want == have
+    }
+
     fun getServiceDisplayName(serviceType: String): String {
         return when (serviceType.lowercase().trim()) {
             SERVICE_FOOD -> "Delivio Food"

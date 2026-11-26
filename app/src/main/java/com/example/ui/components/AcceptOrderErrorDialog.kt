@@ -1,21 +1,23 @@
 package com.example.ui.components
 
 import android.widget.Toast
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Cancel
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -26,9 +28,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.example.data.models.AcceptOrderCheckItem
 import com.example.data.models.AcceptOrderErrorDetails
-import com.example.ui.theme.DelivioYellow
-import com.example.ui.theme.TextOnYellow
+import com.example.data.models.AcceptOrderRules
+import com.example.ui.theme.DelivioGreenDark
+import com.example.ui.theme.DelivioRed
 
 @Composable
 fun AcceptOrderErrorDialog(
@@ -37,7 +41,19 @@ fun AcceptOrderErrorDialog(
 ) {
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
+    var showDetails by remember(errorDetails.orderId, errorDetails.exceptionMessage) {
+        mutableStateOf(false)
+    }
     val scrollState = rememberScrollState()
+
+    val resolvedShortMessage = remember(errorDetails) {
+        errorDetails.shortMessage.ifBlank {
+            AcceptOrderRules.buildShortFailureMessage(
+                checks = errorDetails.checks,
+                fallbackMessage = errorDetails.exceptionMessage
+            )
+        }
+    }
 
     fun formatFieldValue(value: Any?): String {
         return when (value) {
@@ -72,11 +88,19 @@ fun AcceptOrderErrorDialog(
     }
 
     val clipboardText = buildString {
-        appendLine("=== ACCEPT ORDER TRANSACTION ERROR ===")
+        appendLine("=== ACCEPT ORDER ERROR ===")
+        appendLine("Summary: $resolvedShortMessage")
         appendLine("Exception Message: ${errorDetails.exceptionMessage}")
         appendLine("Order ID: ${errorDetails.orderId}")
         appendLine("Order Current Status: ${errorDetails.currentStatus}")
         appendLine("FirebaseAuth UID: ${errorDetails.authUid}")
+        if (errorDetails.checks.isNotEmpty()) {
+            appendLine("Checks:")
+            errorDetails.checks.forEach { chk ->
+                val badge = if (chk.passed) "PASS" else "FAIL"
+                appendLine("  [$badge] ${chk.label}: ${chk.detail}")
+            }
+        }
         appendLine("Fields Written Map:")
         if (errorDetails.fieldsWritten.isEmpty()) {
             appendLine("  (none)")
@@ -87,232 +111,315 @@ fun AcceptOrderErrorDialog(
         }
     }
 
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(
-            dismissOnBackPress = true,
-            dismissOnClickOutside = false,
-            usePlatformDefaultWidth = false
-        )
-    ) {
-        Card(
-            shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            elevation = CardDefaults.cardElevation(defaultElevation = 10.dp),
-            modifier = Modifier
-                .fillMaxWidth(0.94f)
-                .fillMaxHeight(0.85f)
-                .testTag("accept_order_error_dialog")
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(20.dp)
-            ) {
-                // Header with Error Icon & Title
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
+    if (!showDetails) {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.ErrorOutline,
+                    contentDescription = "Accept Order Failed",
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(30.dp)
+                )
+            },
+            title = {
+                Text(
+                    text = "Accept Order Failed",
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Text(
+                    text = resolvedShortMessage,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.testTag("accept_error_short_message")
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("dismiss_error_dialog_button")
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(44.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(MaterialTheme.colorScheme.errorContainer),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.ErrorOutline,
-                            contentDescription = "Error",
-                            tint = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.size(26.dp)
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.width(12.dp))
-
-                    Column {
-                        Text(
-                            text = "Accept Order Failed",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = "Transaction could not complete",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                    Text("OK", fontWeight = FontWeight.Bold)
                 }
-
-                Spacer(modifier = Modifier.height(16.dp))
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Scrollable Content
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { showDetails = true },
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("accept_error_details_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Info,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Details", fontWeight = FontWeight.SemiBold)
+                }
+            },
+            modifier = Modifier.testTag("accept_order_error_dialog")
+        )
+    } else {
+        Dialog(
+            onDismissRequest = onDismiss,
+            properties = DialogProperties(
+                dismissOnBackPress = true,
+                dismissOnClickOutside = false,
+                usePlatformDefaultWidth = false
+            )
+        ) {
+            Card(
+                shape = RoundedCornerShape(24.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 10.dp),
+                modifier = Modifier
+                    .fillMaxWidth(0.94f)
+                    .fillMaxHeight(0.85f)
+                    .testTag("accept_order_error_details_view")
+            ) {
                 Column(
                     modifier = Modifier
-                        .weight(1f)
-                        .verticalScroll(scrollState),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                        .fillMaxSize()
+                        .padding(20.dp)
                 ) {
-                    // 1. Exception Message Card
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.4f)),
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
-                            Text(
-                                text = "EXCEPTION MESSAGE",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.error
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(MaterialTheme.colorScheme.errorContainer),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ErrorOutline,
+                                contentDescription = "Error",
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(26.dp)
                             )
-                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+
+                        Spacer(modifier = Modifier.width(12.dp))
+
+                        Column {
                             Text(
-                                text = errorDetails.exceptionMessage.ifEmpty { "Transaction was aborted or timed out." },
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontFamily = FontFamily.Monospace,
-                                color = MaterialTheme.colorScheme.onErrorContainer
+                                text = "Accept Order Details",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = "Order ${errorDetails.orderId.ifBlank { "N/A" }}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
 
-                    // 2. Order ID
-                    DetailRow(
-                        label = "ORDER ID",
-                        value = errorDetails.orderId.ifEmpty { "N/A" },
-                        isMono = true
-                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    Spacer(modifier = Modifier.height(12.dp))
 
-                    // 3. Current Order Status
-                    DetailRow(
-                        label = "CURRENT ORDER STATUS",
-                        value = errorDetails.currentStatus.ifEmpty { "(missing)" },
-                        isMono = false
-                    )
-
-                    // 4. Current FirebaseAuth UID
-                    DetailRow(
-                        label = "CURRENT FIREBASEAUTH UID",
-                        value = errorDetails.authUid.ifEmpty { "(not logged in)" },
-                        isMono = true
-                    )
-
-                    // 5. Exact Map of Fields & Values Tried to Write
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                        modifier = Modifier.fillMaxWidth()
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .verticalScroll(scrollState),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
+                        if (errorDetails.checks.isNotEmpty()) {
+                            val sortedChecks = remember(errorDetails.checks) {
+                                errorDetails.checks.sortedBy { it.passed }
+                            }
+                            Text(
+                                text = "ACCEPT REQUIREMENTS",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            sortedChecks.forEach { check ->
+                                AcceptCheckRow(check = check)
+                            }
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.4f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
                                 Text(
-                                    text = "FIELDS ATTEMPTED TO WRITE",
+                                    text = "EXCEPTION MESSAGE",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.primary
+                                    color = MaterialTheme.colorScheme.error
                                 )
+                                Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = "${errorDetails.fieldsWritten.size} fields",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    text = errorDetails.exceptionMessage.ifEmpty { "Transaction was aborted or timed out." },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
                                 )
                             }
+                        }
 
-                            Spacer(modifier = Modifier.height(8.dp))
+                        DetailRow(
+                            label = "CURRENT ORDER STATUS",
+                            value = errorDetails.currentStatus.ifEmpty { "(missing)" },
+                            isMono = false
+                        )
 
-                            if (errorDetails.fieldsWritten.isEmpty()) {
-                                Text(
-                                    text = "(No fields recorded)",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            } else {
-                                errorDetails.fieldsWritten.forEach { (fieldName, fieldValue) ->
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(vertical = 3.dp)
-                                    ) {
+                        DetailRow(
+                            label = "CURRENT FIREBASEAUTH UID",
+                            value = errorDetails.authUid.ifEmpty { "(not logged in)" },
+                            isMono = true
+                        )
+
+                        if (errorDetails.fieldsWritten.isNotEmpty()) {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp)) {
+                                    Text(
+                                        text = "FIELDS ATTEMPTED TO WRITE (${errorDetails.fieldsWritten.size})",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    errorDetails.fieldsWritten.forEach { (fieldName, fieldValue) ->
                                         Text(
-                                            text = "• ",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                        Text(
-                                            text = "$fieldName: ",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            fontWeight = FontWeight.SemiBold,
-                                            fontFamily = FontFamily.Monospace,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                        Text(
-                                            text = formatFieldValue(fieldValue),
+                                            text = "• $fieldName: ${formatFieldValue(fieldValue)}",
                                             style = MaterialTheme.typography.bodySmall,
                                             fontFamily = FontFamily.Monospace,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.weight(1f, fill = false)
+                                            modifier = Modifier.padding(vertical = 2.dp)
                                         )
                                     }
                                 }
                             }
                         }
                     }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = onDismiss,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("dismiss_error_dialog_button")
+                        ) {
+                            Text("Dismiss", fontWeight = FontWeight.SemiBold)
+                        }
+
+                        Button(
+                            onClick = {
+                                clipboardManager.setText(AnnotatedString(clipboardText))
+                                Toast.makeText(context, "Error details copied to clipboard", Toast.LENGTH_SHORT).show()
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .weight(1.3f)
+                                .height(48.dp)
+                                .testTag("copy_error_details_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ContentCopy,
+                                contentDescription = "Copy",
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Copy Details", fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
+            }
+        }
+    }
+}
 
-                Spacer(modifier = Modifier.height(16.dp))
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Actions: Copy Button & Dismiss
+@Composable
+private fun AcceptCheckRow(check: AcceptOrderCheckItem) {
+    val bgColor = if (check.passed) {
+        DelivioGreenDark.copy(alpha = 0.08f)
+    } else {
+        DelivioRed.copy(alpha = 0.10f)
+    }
+    val borderColor = if (check.passed) {
+        DelivioGreenDark.copy(alpha = 0.30f)
+    } else {
+        DelivioRed.copy(alpha = 0.50f)
+    }
+    val statusColor = if (check.passed) DelivioGreenDark else DelivioRed
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = bgColor,
+        border = BorderStroke(1.dp, borderColor),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("accept_check_${check.key}")
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.Top,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Icon(
+                imageVector = if (check.passed) Icons.Default.CheckCircle else Icons.Default.Cancel,
+                contentDescription = if (check.passed) "Passed" else "Failed",
+                tint = statusColor,
+                modifier = Modifier
+                    .padding(top = 2.dp)
+                    .size(18.dp)
+            )
+            Column(modifier = Modifier.weight(1f)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    OutlinedButton(
-                        onClick = onDismiss,
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp)
-                            .testTag("dismiss_error_dialog_button")
-                    ) {
-                        Text("Dismiss", fontWeight = FontWeight.SemiBold)
-                    }
-
-                    Button(
-                        onClick = {
-                            clipboardManager.setText(AnnotatedString(clipboardText))
-                            Toast.makeText(context, "Error details copied to clipboard", Toast.LENGTH_SHORT).show()
-                        },
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.primary,
-                            contentColor = MaterialTheme.colorScheme.onPrimary
-                        ),
-                        modifier = Modifier
-                            .weight(1.3f)
-                            .height(48.dp)
-                            .testTag("copy_error_details_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.ContentCopy,
-                            contentDescription = "Copy",
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Copy Details", fontWeight = FontWeight.Bold)
-                    }
+                    Text(
+                        text = check.label,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        text = if (check.passed) "PASS" else "FAIL",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = statusColor
+                    )
+                }
+                if (check.detail.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = check.detail,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp
+                    )
                 }
             }
         }

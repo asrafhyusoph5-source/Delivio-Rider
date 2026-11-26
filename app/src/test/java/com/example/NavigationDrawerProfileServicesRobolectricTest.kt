@@ -25,6 +25,7 @@ import com.example.ui.screens.ServiceTypesContent
 import com.example.ui.screens.formatAssignedCityName
 import com.example.ui.theme.DelivioRiderTheme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -177,7 +178,7 @@ class NavigationDrawerProfileServicesRobolectricTest {
     }
 
     @Test
-    fun orderDetailsSheet_idleShowsGoOnlineWhenOfflineAndGoOfflineWhenOnline() {
+    fun orderDetailsSheet_idleShowsMatchingStatusTitleAndButtonWithConfirmation() {
         var onlineState by mutableStateOf(false)
         var toggleCalls = 0
 
@@ -202,15 +203,40 @@ class NavigationDrawerProfileServicesRobolectricTest {
         }
         composeRule.waitForIdle()
 
-        composeRule.onNodeWithTag("go_online_button").assertIsDisplayed().performClick()
+        composeRule.onNodeWithText("You are Offline").assertIsDisplayed()
+        composeRule.onNodeWithTag("go_online_button").assertIsDisplayed()
+        composeRule.onNodeWithText("Offline").assertIsDisplayed()
         composeRule.onNodeWithTag("go_offline_button").assertDoesNotExist()
+
+        // Tap Offline button -> asks "Go Online?" first; Cancel does not toggle
+        composeRule.onNodeWithTag("go_online_button").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Go Online?").assertIsDisplayed()
+        composeRule.onNodeWithTag("cancel_online_toggle_button").performClick()
+        composeRule.waitForIdle()
+        assertEquals(0, toggleCalls)
+
+        // Tap Offline button -> confirm "Go Online" toggles state
+        composeRule.onNodeWithTag("go_online_button").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("confirm_online_toggle_button").performClick()
+        composeRule.waitForIdle()
         assertEquals(1, toggleCalls)
 
         composeRule.runOnUiThread { onlineState = true }
         composeRule.waitForIdle()
 
-        composeRule.onNodeWithTag("go_offline_button").assertIsDisplayed().performClick()
+        composeRule.onNodeWithText("You are Online").assertIsDisplayed()
+        composeRule.onNodeWithTag("go_offline_button").assertIsDisplayed()
+        composeRule.onNodeWithText("Online").assertIsDisplayed()
         composeRule.onNodeWithTag("go_online_button").assertDoesNotExist()
+
+        // Tap Online button -> asks "Go Offline?" first -> confirm
+        composeRule.onNodeWithTag("go_offline_button").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Go Offline?").assertIsDisplayed()
+        composeRule.onNodeWithTag("confirm_online_toggle_button").performClick()
+        composeRule.waitForIdle()
         assertEquals(2, toggleCalls)
     }
 
@@ -287,5 +313,106 @@ class NavigationDrawerProfileServicesRobolectricTest {
         assertTrue(reviewsOpened)
         assertEquals("Puerto Princesa", formatAssignedCityName("", "puerto_princesa"))
         assertEquals("Puerto Princesa", formatAssignedCityName("puerto princesa", ""))
+    }
+
+    @Test
+    fun acceptOrderRules_checksAllEightConditionsAndCanonicalizesServices() {
+        // Canonical service mapping ("instant" -> "request_rider", "mart" -> "convenience")
+        val normalized = OrderStepConstants.normalizeOrderServiceKeys(
+            listOf("food", "mart", "parcel", "pabili", "instant", "taxi")
+        )
+        assertEquals(
+            listOf("food", "convenience", "parcel", "pabili", "request_rider", "taxi"),
+            normalized
+        )
+        assertTrue(OrderStepConstants.isServiceAllowedMatch(listOf("instant"), "request_rider"))
+        assertTrue(OrderStepConstants.isServiceAllowedMatch(listOf("request_rider"), "instant"))
+
+        // Evaluate 8 checks: failing rider status, vehicle match, city off, excluded, onHold, negative cash wallet, taken riderId
+        val checks = com.example.data.models.AcceptOrderRules.evaluateAcceptChecks(
+            myUid = "rider_1",
+            riderStatus = "suspended",
+            riderAllowedServices = listOf("food", "instant"),
+            riderTopLevelVehicleType = "",
+            riderFallbackVehicleType = "motorcycle",
+            orderServiceType = "parcel",
+            orderVehicleType = "sedan",
+            orderCityId = "puerto_princesa",
+            isCityServiceOn = false,
+            excludeRiderIds = listOf("rider_1"),
+            onHold = true,
+            isCashOrder = true,
+            userWalletBalance = -50.0,
+            orderRiderId = "other_rider"
+        )
+        val byKey = checks.associateBy { it.key }
+        assertEquals(8, checks.size)
+        assertFalse(byKey.getValue("rider_status").passed)
+        assertFalse(byKey.getValue("allowed_services").passed)
+        assertFalse(byKey.getValue("vehicle_match").passed)
+        assertFalse(byKey.getValue("city_service").passed)
+        assertFalse(byKey.getValue("exclude_riders").passed)
+        assertFalse(byKey.getValue("on_hold").passed)
+        assertFalse(byKey.getValue("cod_wallet").passed)
+        assertFalse(byKey.getValue("rider_id_empty").passed)
+
+        // When riderId is already me -> ALREADY_OURS
+        val alreadyOursEval = com.example.data.models.AcceptOrderRules.evaluateDocument(
+            exists = true,
+            riderIdRaw = "rider_1",
+            statusRaw = "Preparing",
+            riderRequestStatusRaw = null,
+            serviceTypeRaw = "instant",
+            excludeRiderIds = emptyList(),
+            myUid = "rider_1",
+            onHold = false
+        )
+        assertEquals(com.example.data.models.AcceptOrderDecision.ALREADY_OURS, alreadyOursEval.decision)
+    }
+
+    @Test
+    fun acceptOrderErrorDialog_showsShortMessageAndDetailsButtonRevealingFailedChecks() {
+        val checks = com.example.data.models.AcceptOrderRules.evaluateAcceptChecks(
+            myUid = "rider_1",
+            riderStatus = "active",
+            riderAllowedServices = listOf("food"),
+            riderTopLevelVehicleType = "motorcycle",
+            orderServiceType = "taxi",
+            orderVehicleType = "car4",
+            orderCityId = "puerto_princesa",
+            isCityServiceOn = true,
+            excludeRiderIds = emptyList(),
+            onHold = false,
+            isCashOrder = false,
+            userWalletBalance = 100.0,
+            orderRiderId = ""
+        )
+        val details = com.example.data.models.AcceptOrderErrorDetails(
+            exceptionMessage = "PERMISSION_DENIED",
+            orderId = "ord_99",
+            currentStatus = "Searching",
+            authUid = "rider_1",
+            shortMessage = com.example.data.models.AcceptOrderRules.buildShortFailureMessage(checks, "PERMISSION_DENIED"),
+            checks = checks
+        )
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                com.example.ui.components.AcceptOrderErrorDialog(
+                    errorDetails = details,
+                    onDismiss = {}
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("accept_order_error_dialog").assertIsDisplayed()
+        composeRule.onNodeWithTag("accept_error_short_message").assertIsDisplayed()
+        composeRule.onNodeWithTag("accept_error_details_button").assertIsDisplayed().performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("accept_order_error_details_view").assertIsDisplayed()
+        composeRule.onNodeWithTag("accept_check_vehicle_match").assertIsDisplayed()
+        composeRule.onNodeWithTag("accept_check_allowed_services").assertIsDisplayed()
     }
 }

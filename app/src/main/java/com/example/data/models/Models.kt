@@ -620,11 +620,13 @@ object AcceptOrderRules {
 
         val normStatus = rawStatus.trim().lowercase(Locale.US)
         val normReqStatus = formatRawStatus(riderRequestStatusRaw).lowercase(Locale.US)
-        val normService = when (serviceTypeRaw) {
+        val rawServiceStr = when (serviceTypeRaw) {
             null -> OrderStepConstants.SERVICE_FOOD
             is String -> serviceTypeRaw.trim().lowercase(Locale.US)
             else -> serviceTypeRaw.toString().trim().lowercase(Locale.US)
         }
+        val normService = OrderStepConstants.normalizeOrderServiceKey(rawServiceStr)
+            .ifBlank { OrderStepConstants.SERVICE_FOOD }
 
         val acceptable = when (normService) {
             OrderStepConstants.SERVICE_PARCEL,
@@ -647,6 +649,169 @@ object AcceptOrderRules {
                 rawStatus = rawStatus,
                 reason = "This order is no longer available"
             )
+        }
+    }
+
+    fun evaluateAcceptChecks(
+        myUid: String,
+        riderStatus: String,
+        riderAllowedServices: List<String>,
+        riderTopLevelVehicleType: String,
+        riderFallbackVehicleType: String = "",
+        orderServiceType: String,
+        orderVehicleType: String,
+        orderCityId: String,
+        isCityServiceOn: Boolean,
+        excludeRiderIds: List<String>,
+        onHold: Boolean,
+        isCashOrder: Boolean,
+        userWalletBalance: Double?,
+        orderRiderId: String
+    ): List<AcceptOrderCheckItem> {
+        val normService = OrderStepConstants.normalizeOrderServiceKey(orderServiceType)
+            .ifBlank { OrderStepConstants.SERVICE_FOOD }
+        val normRiderStatus = riderStatus.trim().lowercase(Locale.US)
+        val statusPassed = normRiderStatus == "active"
+
+        val normalizedAllowed = OrderStepConstants.normalizeOrderServiceKeys(riderAllowedServices)
+        val allowedPassed = OrderStepConstants.isServiceAllowedMatch(riderAllowedServices, orderServiceType)
+        val allowedDetail = when {
+            normalizedAllowed.isEmpty() -> "allowedServices is empty (all services permitted); order=$normService"
+            allowedPassed -> "Contains '$normService' (allowed=${normalizedAllowed.joinToString(", ")})"
+            else -> "Missing '$normService' in allowedServices (${normalizedAllowed.joinToString(", ")})"
+        }
+
+        val effectiveRiderVeh = riderTopLevelVehicleType.trim()
+        val vehiclePassed: Boolean
+        val vehicleDetail: String
+        when (normService) {
+            OrderStepConstants.SERVICE_TAXI -> {
+                vehiclePassed = OrderStepConstants.taxiVehicleMatch(orderVehicleType, effectiveRiderVeh)
+                vehicleDetail = if (effectiveRiderVeh.isBlank()) {
+                    "Top-level riders.vehicleType is missing (nested='${riderFallbackVehicleType.ifBlank { "none" }}'), order needs '${orderVehicleType.ifBlank { "(none)" }}'"
+                } else {
+                    "order='${orderVehicleType.ifBlank { "(none)" }}', rider='$effectiveRiderVeh'"
+                }
+            }
+            OrderStepConstants.SERVICE_PARCEL -> {
+                vehiclePassed = OrderStepConstants.parcelVehicleMatch(orderVehicleType, effectiveRiderVeh)
+                vehicleDetail = if (effectiveRiderVeh.isBlank() && orderVehicleType.isNotBlank()) {
+                    "Top-level riders.vehicleType is missing (nested='${riderFallbackVehicleType.ifBlank { "none" }}'), parcel needs '$orderVehicleType'"
+                } else {
+                    "order='${orderVehicleType.ifBlank { "any" }}', rider='${effectiveRiderVeh.ifBlank { "(none)" }}'"
+                }
+            }
+            else -> {
+                vehiclePassed = true
+                vehicleDetail = "Not restricted by vehicle type for $normService"
+            }
+        }
+
+        val cityDetail = if (orderCityId.isBlank()) {
+            "No city restriction on order"
+        } else if (isCityServiceOn) {
+            "City '$orderCityId' has '$orderServiceType' enabled"
+        } else {
+            "City '$orderCityId' has '$orderServiceType' disabled"
+        }
+
+        val excludedMatch = excludeRiderIds.any { it.trim() == myUid && myUid.isNotBlank() }
+        val notExcludedPassed = !excludedMatch
+
+        val notOnHoldPassed = !onHold
+
+        val cashWalletPassed = if (!isCashOrder) {
+            true
+        } else {
+            (userWalletBalance ?: 0.0) >= 0.0
+        }
+        val cashWalletDetail = if (!isCashOrder) {
+            "Not a cash order"
+        } else if (userWalletBalance == null) {
+            "users/$myUid walletBalance missing (defaults to 0.0)"
+        } else {
+            "users/$myUid walletBalance = ${String.format(Locale.US, "%.2f", userWalletBalance)}"
+        }
+
+        val cleanOrderRiderId = orderRiderId.trim()
+        val riderIdEmptyPassed = cleanOrderRiderId.isEmpty() || cleanOrderRiderId == myUid
+        val riderIdDetail = when {
+            cleanOrderRiderId.isEmpty() -> "Empty (unassigned)"
+            cleanOrderRiderId == myUid -> "Already assigned to you ($myUid)"
+            else -> "Assigned to another rider ($cleanOrderRiderId)"
+        }
+
+        return listOf(
+            AcceptOrderCheckItem(
+                key = "rider_status",
+                label = "Rider status is active",
+                passed = statusPassed,
+                detail = "riders/$myUid status='${riderStatus.ifBlank { "(missing)" }}'"
+            ),
+            AcceptOrderCheckItem(
+                key = "allowed_services",
+                label = "Rider allowedServices allows '$normService'",
+                passed = allowedPassed,
+                detail = allowedDetail
+            ),
+            AcceptOrderCheckItem(
+                key = "vehicle_match",
+                label = "Taxi and parcel vehicle match",
+                passed = vehiclePassed,
+                detail = vehicleDetail
+            ),
+            AcceptOrderCheckItem(
+                key = "city_service",
+                label = "City service is on",
+                passed = isCityServiceOn,
+                detail = cityDetail
+            ),
+            AcceptOrderCheckItem(
+                key = "exclude_riders",
+                label = "Not in excludeRiderIds",
+                passed = notExcludedPassed,
+                detail = if (notExcludedPassed) "Your uid ($myUid) is not excluded" else "Your uid ($myUid) is in excludeRiderIds"
+            ),
+            AcceptOrderCheckItem(
+                key = "on_hold",
+                label = "Order onHold is false",
+                passed = notOnHoldPassed,
+                detail = if (notOnHoldPassed) "onHold = false" else "onHold = true"
+            ),
+            AcceptOrderCheckItem(
+                key = "cod_wallet",
+                label = "Cash order walletBalance >= 0",
+                passed = cashWalletPassed,
+                detail = cashWalletDetail
+            ),
+            AcceptOrderCheckItem(
+                key = "rider_id_empty",
+                label = "Order riderId is empty",
+                passed = riderIdEmptyPassed,
+                detail = riderIdDetail
+            )
+        )
+    }
+
+    fun buildShortFailureMessage(
+        checks: List<AcceptOrderCheckItem>,
+        fallbackMessage: String
+    ): String {
+        val failed = checks.filter { !it.passed }
+        if (failed.isNotEmpty()) {
+            val first = failed.first()
+            return if (failed.size == 1) {
+                "Cannot accept order: ${first.label} (${first.detail})."
+            } else {
+                "Cannot accept order: ${first.label} (+${failed.size - 1} more)."
+            }
+        }
+        val trimmed = fallbackMessage.trim()
+        return when {
+            trimmed.contains("PERMISSION_DENIED", ignoreCase = true) ->
+                "Permission denied while accepting this order. Tap Details to inspect."
+            trimmed.isNotBlank() -> trimmed
+            else -> "Unable to accept this order. Tap Details to inspect."
         }
     }
 }
@@ -1667,12 +1832,21 @@ data class WalletTransaction(
     }
 }
 
+data class AcceptOrderCheckItem(
+    val key: String,
+    val label: String,
+    val passed: Boolean,
+    val detail: String = ""
+)
+
 data class AcceptOrderErrorDetails(
     val exceptionMessage: String = "",
     val orderId: String = "",
     val currentStatus: String = "",
     val authUid: String = "",
-    val fieldsWritten: Map<String, Any?> = emptyMap()
+    val fieldsWritten: Map<String, Any?> = emptyMap(),
+    val shortMessage: String = "",
+    val checks: List<AcceptOrderCheckItem> = emptyList()
 )
 
 data class OfferLogEntry(
