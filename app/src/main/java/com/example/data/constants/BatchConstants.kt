@@ -688,7 +688,7 @@ object InstantDispatchEvaluator {
             return InstantDispatchResult(false, "busy")
         }
         if (!isPlatformServiceEnabled ||
-            !OrderStepConstants.isServiceAllowedMatch(rider.allowedServices, OrderStepConstants.SERVICE_REQUEST) ||
+            !rider.isServiceAllowedByAdmin(OrderStepConstants.SERVICE_REQUEST) ||
             rider.activeServices.none { OrderStepConstants.normalizeOrderServiceKey(it) == OrderStepConstants.SERVICE_REQUEST }
         ) {
             return InstantDispatchResult(false, "service off")
@@ -774,13 +774,11 @@ object TaxiDispatchEvaluator {
         val locale = java.util.Locale.US
 
         // 1. allowedServices
-        val hasAllowedTaxi = rider != null && rider.allowedServices.any {
-            it.trim().lowercase(locale) == OrderStepConstants.SERVICE_TAXI
-        }
+        val hasAllowedTaxi = rider != null && rider.isServiceAllowedByAdmin(OrderStepConstants.SERVICE_TAXI)
         val allowedDetail = when {
             rider == null -> "rider not loaded"
             hasAllowedTaxi -> "contains \"taxi\""
-            else -> "missing \"taxi\" (${rider.allowedServices.joinToString(", ").ifBlank { "none" }})"
+            else -> "missing \"taxi\" (${rider.effectiveAllowedServices.joinToString(", ").ifBlank { "none" }})"
         }
 
         // 2. vehicle match (trim + lowercase both)
@@ -914,9 +912,7 @@ object TaxiDispatchEvaluator {
         if (order.cityId.isNotBlank() && rider.cityId.isNotBlank() && !order.cityId.trim().equals(rider.cityId.trim(), ignoreCase = true)) {
             return InstantDispatchResult(false, "service off in city")
         }
-        val riderHasTaxiAllowed = rider.allowedServices.any {
-            it.trim().lowercase(locale) == OrderStepConstants.SERVICE_TAXI
-        }
+        val riderHasTaxiAllowed = rider.isServiceAllowedByAdmin(OrderStepConstants.SERVICE_TAXI)
         if (!riderHasTaxiAllowed) {
             return InstantDispatchResult(false, "service off for rider")
         }
@@ -1013,7 +1009,7 @@ object GeneralDispatchEvaluator {
         }
         val normService = OrderStepConstants.normalizeOrderServiceKey(order.serviceType)
         val riderHasActive = rider.activeServices.any { OrderStepConstants.normalizeOrderServiceKey(it) == normService }
-        val riderHasAllowed = OrderStepConstants.isServiceAllowedMatch(rider.allowedServices, normService)
+        val riderHasAllowed = rider.isServiceAllowedByAdmin(normService)
         if (!riderHasAllowed || !riderHasActive) {
             return InstantDispatchResult(false, "service off for rider")
         }

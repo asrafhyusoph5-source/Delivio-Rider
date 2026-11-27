@@ -160,7 +160,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 .toSet()
             OrderStepConstants.SERVICE_DEFINITIONS.mapNotNull { def ->
                 val key = OrderStepConstants.normalizeOrderServiceKey(def.key)
-                val riderAllowed = OrderStepConstants.isServiceAllowedMatch(currentRider.allowedServices, key)
+                val riderAllowed = currentRider.isServiceAllowedByAdmin(key)
                 val riderActive = currentRider.activeServices.any { OrderStepConstants.normalizeOrderServiceKey(it) == key }
                 val platformOn = platformSvcs[key] != false
                 val cityOn = citySvcs[key] != false
@@ -782,7 +782,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     fun getServiceLockReason(serviceType: String): String? {
         val currentRider = rider.value
         val normService = OrderStepConstants.normalizeOrderServiceKey(serviceType)
-        val isAllowed = currentRider?.let { OrderStepConstants.isServiceAllowedMatch(it.allowedServices, normService) } ?: true
+        val isAllowed = currentRider?.isServiceAllowedByAdmin(normService) ?: true
         val isPlatformOn = isPlatformServiceOn(serviceType)
         val isCityOn = isCityServiceOn(serviceType)
         val vehicleType = currentRider?.vehicle?.type

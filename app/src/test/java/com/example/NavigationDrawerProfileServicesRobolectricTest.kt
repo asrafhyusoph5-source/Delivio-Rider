@@ -6,6 +6,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsOff
+import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -100,12 +102,10 @@ class NavigationDrawerProfileServicesRobolectricTest {
         composeRule.onNodeWithText("Delivio Pabili").assertIsDisplayed()
         composeRule.onNodeWithTag("service_type_switch_${OrderStepConstants.SERVICE_PABILI}").assertIsNotEnabled()
 
-        // 5. request_rider (Delivio Instant) -> locked by admin (allowedServices lacks request_rider)
-        composeRule.onNodeWithTag("service_types_list").performScrollToNode(hasTestTag("service_type_card_${OrderStepConstants.SERVICE_REQUEST}"))
-        composeRule.onNodeWithTag("service_type_card_${OrderStepConstants.SERVICE_REQUEST}").assertIsDisplayed()
-        composeRule.onNodeWithText("Delivio Instant").assertIsDisplayed()
-        composeRule.onNodeWithText("Disabled for your account by admin").assertIsDisplayed()
-        composeRule.onNodeWithTag("service_type_switch_${OrderStepConstants.SERVICE_REQUEST}").assertIsNotEnabled()
+        // 5. request_rider (Delivio Instant) -> blocked by admin (allowedServices lacks request_rider): completely hidden!
+        composeRule.onNodeWithTag("service_type_card_${OrderStepConstants.SERVICE_REQUEST}").assertDoesNotExist()
+        composeRule.onNodeWithText("Delivio Instant").assertDoesNotExist()
+        composeRule.onNodeWithText("Disabled for your account by admin").assertDoesNotExist()
 
         // 6. taxi -> locked by city
         composeRule.onNodeWithTag("service_types_list").performScrollToNode(hasTestTag("service_type_card_${OrderStepConstants.SERVICE_TAXI}"))
@@ -414,5 +414,196 @@ class NavigationDrawerProfileServicesRobolectricTest {
         composeRule.onNodeWithTag("accept_order_error_details_view").assertIsDisplayed()
         composeRule.onNodeWithTag("accept_check_vehicle_match").assertIsDisplayed()
         composeRule.onNodeWithTag("accept_check_allowed_services").assertIsDisplayed()
+    }
+
+    @Test
+    fun serviceTypesContent_hidesAdminBlockedAndRestoresWithPreviousDriverSwitchOnAllow() {
+        var riderState by mutableStateOf(
+            Rider(
+                uid = "r_live",
+                name = "Live Rider",
+                cityId = "puerto_princesa",
+                vehicle = Vehicle(type = "motorcycle"),
+                allowedServices = OrderStepConstants.ALL_SERVICES,
+                activeServices = listOf(
+                    OrderStepConstants.SERVICE_FOOD,
+                    OrderStepConstants.SERVICE_MART,
+                    OrderStepConstants.SERVICE_PARCEL,
+                    OrderStepConstants.SERVICE_PABILI,
+                    OrderStepConstants.SERVICE_REQUEST
+                    // driver switched off taxi themselves
+                ),
+                blockedServices = emptyList()
+            )
+        )
+
+        composeRule.setContent {
+            DelivioRiderTheme {
+                ServiceTypesContent(
+                    rider = riderState,
+                    cityDisplayName = "Puerto Princesa",
+                    onToggleService = { _, _ -> },
+                    onBack = {}
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        // Driver switched off taxi themselves -> still visible with switch OFF
+        composeRule.onNodeWithTag("service_types_list").performScrollToNode(hasTestTag("service_type_card_${OrderStepConstants.SERVICE_TAXI}"))
+        composeRule.onNodeWithTag("service_type_card_${OrderStepConstants.SERVICE_TAXI}").assertIsDisplayed()
+        composeRule.onNodeWithTag("service_type_switch_${OrderStepConstants.SERVICE_TAXI}").assertIsEnabled().assertIsOff()
+
+        // Instant (request_rider) initially allowed & ON
+        composeRule.onNodeWithTag("service_types_list").performScrollToNode(hasTestTag("service_type_card_${OrderStepConstants.SERVICE_REQUEST}"))
+        composeRule.onNodeWithTag("service_type_card_${OrderStepConstants.SERVICE_REQUEST}").assertIsDisplayed()
+        composeRule.onNodeWithTag("service_type_switch_${OrderStepConstants.SERVICE_REQUEST}").assertIsEnabled().assertIsOn()
+
+        // Admin blocks Instant live -> disappears completely (no row, no message)
+        composeRule.runOnUiThread {
+            val access = OrderStepConstants.parseRiderServiceAccess(
+                mapOf(
+                    "allowedServices" to listOf("food", "convenience", "parcel", "pabili", "instant", "taxi"),
+                    "driverToggles" to mapOf("instant" to "blocked", "taxi" to "allowed")
+                )
+            )
+            riderState = riderState.copy(
+                allowedServices = access.allowedServices,
+                blockedServices = access.blockedServices
+            )
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("service_type_card_${OrderStepConstants.SERVICE_REQUEST}").assertDoesNotExist()
+        composeRule.onNodeWithText("Delivio Instant").assertDoesNotExist()
+
+        // Admin allows Instant again -> returns with driver's switch still ON
+        composeRule.runOnUiThread {
+            val access = OrderStepConstants.parseRiderServiceAccess(
+                mapOf(
+                    "allowedServices" to listOf("food", "convenience", "parcel", "pabili", "instant", "taxi"),
+                    "driverToggles" to mapOf("instant" to "allowed", "taxi" to "allowed")
+                )
+            )
+            riderState = riderState.copy(
+                allowedServices = access.allowedServices,
+                blockedServices = access.blockedServices
+            )
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("service_types_list").performScrollToNode(hasTestTag("service_type_card_${OrderStepConstants.SERVICE_REQUEST}"))
+        composeRule.onNodeWithTag("service_type_card_${OrderStepConstants.SERVICE_REQUEST}").assertIsDisplayed()
+        composeRule.onNodeWithTag("service_type_switch_${OrderStepConstants.SERVICE_REQUEST}").assertIsEnabled().assertIsOn()
+    }
+
+    @Test
+    fun parseRiderServiceAccess_andDispatchEvaluators_filterAdminBlockedServices() {
+        // 1. Parse admin toggle maps + explicit blocked lists + canonicalization ("instant" <-> "request_rider")
+        val accessFromMap = OrderStepConstants.parseRiderServiceAccess(
+            mapOf(
+                "allowedServices" to listOf("food", "convenience", "parcel", "pabili", "instant", "taxi"),
+                "driverToggles" to mapOf("instant" to "Blocked", "food" to "Allowed"),
+                "blockedServices" to listOf("parcel")
+            )
+        )
+        assertEquals(listOf("food", "convenience", "pabili", "taxi"), accessFromMap.allowedServices)
+        assertEquals(listOf("parcel", "request_rider"), accessFromMap.blockedServices)
+
+        val blockedRider = Rider(
+            uid = "rider_blk",
+            isOnline = true,
+            status = "active",
+            cityId = "ppc",
+            vehicle = Vehicle(type = "motorcycle"),
+            allowedServices = accessFromMap.allowedServices,
+            activeServices = OrderStepConstants.ALL_SERVICES, // even with own switch ON!
+            blockedServices = accessFromMap.blockedServices
+        )
+
+        val dispatch = com.example.data.constants.DispatchSettings()
+        val riderLoc = Pair(9.7392, 118.7353)
+        val instantOrder = com.example.data.models.Order(
+            id = "inst_1",
+            orderNumber = "IN101",
+            serviceType = "instant",
+            status = OrderStepConstants.REQ_SEARCHING,
+            cityId = "ppc",
+            pickupDistanceKm = 1.5
+        )
+        val parcelOrder = com.example.data.models.Order(
+            id = "prc_1",
+            orderNumber = "PR101",
+            serviceType = "parcel",
+            status = OrderStepConstants.STATUS_PREPARING,
+            cityId = "ppc",
+            pickupDistanceKm = 1.5
+        )
+
+        val instantSkip = com.example.data.constants.InstantDispatchEvaluator.evaluateSkipReason(
+            order = instantOrder,
+            rider = blockedRider,
+            activeOrders = emptyList(),
+            riderLoc = riderLoc,
+            lastLocationTimeMs = System.currentTimeMillis(),
+            nowMs = System.currentTimeMillis(),
+            isPlatformServiceEnabled = true,
+            isCityServiceEnabled = true,
+            dispatch = dispatch
+        )
+        assertFalse(instantSkip.isEligible)
+
+        val parcelSkip = com.example.data.constants.GeneralDispatchEvaluator.evaluateSkipReason(
+            order = parcelOrder,
+            rider = blockedRider,
+            activeOrders = emptyList(),
+            riderLoc = riderLoc,
+            isPlatformServiceEnabled = true,
+            isCityServiceEnabled = true,
+            dispatch = dispatch
+        )
+        assertFalse(parcelSkip.isEligible)
+
+        // Accept check also rejects blocked service
+        val acceptChecks = com.example.data.models.AcceptOrderRules.evaluateAcceptChecks(
+            myUid = blockedRider.uid,
+            riderStatus = blockedRider.status,
+            riderAllowedServices = blockedRider.effectiveAllowedServices,
+            riderTopLevelVehicleType = blockedRider.vehicle.type,
+            orderServiceType = "instant",
+            orderVehicleType = "motorcycle",
+            orderCityId = "ppc",
+            isCityServiceOn = true,
+            excludeRiderIds = emptyList(),
+            onHold = false,
+            isCashOrder = false,
+            userWalletBalance = 100.0,
+            orderRiderId = ""
+        )
+        assertFalse(acceptChecks.first { it.key == "allowed_services" }.passed)
+
+        // Re-allowing Instant in admin restores eligibility without altering activeServices
+        val restoredAccess = OrderStepConstants.parseRiderServiceAccess(
+            mapOf(
+                "allowedServices" to listOf("food", "convenience", "parcel", "pabili", "request_rider", "taxi"),
+                "driverToggles" to mapOf("request_rider" to true)
+            )
+        )
+        val restoredRider = blockedRider.copy(
+            allowedServices = restoredAccess.allowedServices,
+            blockedServices = restoredAccess.blockedServices
+        )
+        val instantPass = com.example.data.constants.InstantDispatchEvaluator.evaluateSkipReason(
+            order = instantOrder,
+            rider = restoredRider,
+            activeOrders = emptyList(),
+            riderLoc = riderLoc,
+            lastLocationTimeMs = System.currentTimeMillis(),
+            nowMs = System.currentTimeMillis(),
+            isPlatformServiceEnabled = true,
+            isCityServiceEnabled = true,
+            dispatch = dispatch
+        )
+        assertTrue("Expected re-allowed Instant to be eligible: ${instantPass.skipReason}", instantPass.isEligible)
     }
 }

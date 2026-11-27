@@ -443,25 +443,35 @@ fun ProfileContent(
                 ) {
                     Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("Active Dispatch Services", fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            OrderStepConstants.ALL_SERVICES.forEach { svcKey ->
-                                val isActive = rider.activeServices.contains(svcKey)
-                                val isAllowed = rider.allowedServices.contains(svcKey)
-                                val label = OrderStepConstants.getServiceBadge(svcKey)
-                                Surface(
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = if (isActive && isAllowed) DelivioYellowLight else MaterialTheme.colorScheme.surfaceVariant
-                                ) {
-                                    Text(
-                                        text = label,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isActive && isAllowed) TextOnYellow else MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                    )
+                        val visibleServices = OrderStepConstants.ALL_SERVICES.filter { rider.isServiceAllowedByAdmin(it) }
+                        if (visibleServices.isEmpty()) {
+                            Text(
+                                text = "No services enabled for your account.",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                visibleServices.forEach { svcKey ->
+                                    val isActive = rider.activeServices.any {
+                                        OrderStepConstants.normalizeOrderServiceKey(it) == svcKey
+                                    }
+                                    val label = OrderStepConstants.getServiceBadge(svcKey)
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = if (isActive) DelivioYellowLight else MaterialTheme.colorScheme.surfaceVariant
+                                    ) {
+                                        Text(
+                                            text = label,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isActive) TextOnYellow else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                        )
+                                    }
                                 }
                             }
                         }

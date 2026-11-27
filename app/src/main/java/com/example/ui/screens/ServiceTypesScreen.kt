@@ -82,7 +82,11 @@ fun ServiceTypesContent(
         .map { OrderStepConstants.normalizeOrderServiceKey(it) }
         .filter { it.isNotEmpty() }
         .toSet()
-    val allowedList = rider?.allowedServices ?: OrderStepConstants.ALL_SERVICES
+    val visibleDefinitions = remember(rider) {
+        OrderStepConstants.SERVICE_DEFINITIONS.filter { def ->
+            rider == null || rider.isServiceAllowedByAdmin(def.key)
+        }
+    }
     val vehicleType = rider?.vehicle?.type
     val vehicleSupported = OrderStepConstants.getServicesForVehicle(vehicleType)
         .map { OrderStepConstants.normalizeOrderServiceKey(it) }
@@ -120,44 +124,62 @@ fun ServiceTypesContent(
         ) {
             item {
                 Text(
-                    text = "Choose which booking types you want to receive while online. Services locked by admin, city, platform, or vehicle type cannot be enabled.",
+                    text = "Choose which booking types you want to receive while online. Services locked by city, platform, or vehicle type cannot be enabled.",
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     lineHeight = 18.sp
                 )
             }
 
-            items(OrderStepConstants.SERVICE_DEFINITIONS, key = { it.key }) { def ->
-                val svcKey = OrderStepConstants.normalizeOrderServiceKey(def.key)
-                val isPlatformOn = isPlatformServiceOn(svcKey)
-                val isCityOn = isCityServiceOn(svcKey)
-                val isAllowed = OrderStepConstants.isServiceAllowedMatch(allowedList, svcKey)
-                val isVehicleSupported = svcKey in vehicleSupported
-                val lockReason = OrderStepConstants.getServiceLockReason(
-                    isPlatformOn = isPlatformOn,
-                    isCityOn = isCityOn,
-                    isAllowed = isAllowed,
-                    cityName = cityDisplayName,
-                    isVehicleSupported = isVehicleSupported,
-                    vehicleName = vehicleDisplayName
-                )
-                val isLocked = lockReason != null
-                val isChecked = !isLocked && (svcKey in activeList)
-
-                ServiceTypeCard(
-                    serviceKey = def.key,
-                    title = def.displayName,
-                    description = def.subtitle,
-                    icon = serviceTypeIcon(def.key),
-                    isChecked = isChecked,
-                    isLocked = isLocked,
-                    lockReason = lockReason,
-                    onCheckedChange = { enabled ->
-                        if (!isLocked) {
-                            onToggleService(def.key, enabled)
-                        }
+            if (visibleDefinitions.isEmpty()) {
+                item {
+                    Card(
+                        shape = RoundedCornerShape(18.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("service_types_empty")
+                    ) {
+                        Text(
+                            text = "No services are currently allowed for your account.",
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(20.dp)
+                        )
                     }
-                )
+                }
+            } else {
+                items(visibleDefinitions, key = { it.key }) { def ->
+                    val svcKey = OrderStepConstants.normalizeOrderServiceKey(def.key)
+                    val isPlatformOn = isPlatformServiceOn(svcKey)
+                    val isCityOn = isCityServiceOn(svcKey)
+                    val isVehicleSupported = svcKey in vehicleSupported
+                    val lockReason = OrderStepConstants.getServiceLockReason(
+                        isPlatformOn = isPlatformOn,
+                        isCityOn = isCityOn,
+                        isAllowed = true,
+                        cityName = cityDisplayName,
+                        isVehicleSupported = isVehicleSupported,
+                        vehicleName = vehicleDisplayName
+                    )
+                    val isLocked = lockReason != null
+                    val isChecked = !isLocked && (svcKey in activeList)
+
+                    ServiceTypeCard(
+                        serviceKey = def.key,
+                        title = def.displayName,
+                        description = def.subtitle,
+                        icon = serviceTypeIcon(def.key),
+                        isChecked = isChecked,
+                        isLocked = isLocked,
+                        lockReason = lockReason,
+                        onCheckedChange = { enabled ->
+                            if (!isLocked) {
+                                onToggleService(def.key, enabled)
+                            }
+                        }
+                    )
+                }
             }
         }
     }

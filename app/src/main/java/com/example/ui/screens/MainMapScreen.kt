@@ -568,8 +568,16 @@ fun MainMapScreen(
             }
 
             // 5. Incoming Offer Dialog (Single or Double Booking bundle)
-            if (incomingOfferBundle != null) {
-                val bundle = incomingOfferBundle!!
+            val allowedIncomingBundle = incomingOfferBundle?.takeIf { bundle ->
+                val currentRider = rider
+                currentRider == null || bundle.orders.all { currentRider.isServiceAllowedByAdmin(it.serviceType) }
+            }
+            val allowedIncomingOffer = incomingOffer?.takeIf { offer ->
+                val currentRider = rider
+                currentRider == null || currentRider.isServiceAllowedByAdmin(offer.serviceType)
+            }
+            if (allowedIncomingBundle != null) {
+                val bundle = allowedIncomingBundle
                 IncomingOrderDialog(
                     bundle = bundle,
                     currencySymbol = currencySymbol,
@@ -580,8 +588,8 @@ fun MainMapScreen(
                     onMissed = { viewModel.missIncomingOfferBundle(bundle) },
                     onDisplayed = { viewModel.logOfferDisplayed(bundle) }
                 )
-            } else if (incomingOffer != null) {
-                val offer = incomingOffer!!
+            } else if (allowedIncomingOffer != null) {
+                val offer = allowedIncomingOffer
                 val fallbackBundle = remember(offer.id, offer.riderQuote) {
                     val timerSecs = if (
                         offer.serviceType.equals(OrderStepConstants.SERVICE_REQUEST, ignoreCase = true) ||

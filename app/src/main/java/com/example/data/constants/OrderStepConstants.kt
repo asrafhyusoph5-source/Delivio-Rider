@@ -200,12 +200,140 @@ object OrderStepConstants {
         return out.toList()
     }
 
+    data class RiderServiceAccess(
+        val allowedServices: List<String>,
+        val blockedServices: List<String>
+    )
+
     fun isServiceAllowedMatch(allowedServices: Iterable<String>, orderServiceType: String?): Boolean {
         val normalizedOrder = normalizeOrderServiceKey(orderServiceType)
         if (normalizedOrder.isEmpty()) return false
         val normalizedAllowed = normalizeOrderServiceKeys(allowedServices)
-        if (normalizedAllowed.isEmpty()) return true
         return normalizedOrder in normalizedAllowed
+    }
+
+    fun isServiceAllowedMatch(
+        allowedServices: Iterable<String>,
+        blockedServices: Iterable<String>,
+        orderServiceType: String?
+    ): Boolean {
+        val normalizedOrder = normalizeOrderServiceKey(orderServiceType)
+        if (normalizedOrder.isEmpty()) return false
+        val normalizedBlocked = normalizeOrderServiceKeys(blockedServices)
+        if (normalizedOrder in normalizedBlocked) return false
+        val normalizedAllowed = normalizeOrderServiceKeys(allowedServices)
+        return normalizedOrder in normalizedAllowed
+    }
+
+    fun parseRiderServiceAccess(data: Map<String, Any?>?): RiderServiceAccess {
+        if (data == null) {
+            return RiderServiceAccess(
+                allowedServices = ALL_SERVICES,
+                blockedServices = emptyList()
+            )
+        }
+
+        val blockedSet = LinkedHashSet<String>()
+        val explicitlyAllowedFromToggles = LinkedHashSet<String>()
+
+        fun parseToggleValue(rawVal: Any?): Boolean? {
+            return when (rawVal) {
+                is Boolean -> rawVal
+                is String -> when (rawVal.trim().lowercase(java.util.Locale.US)) {
+                    "false", "0", "no", "off", "blocked", "block", "disabled", "disable", "denied" -> false
+                    "true", "1", "yes", "on", "allowed", "allow", "enabled", "enable", "active" -> true
+                    else -> null
+                }
+                is Number -> rawVal.toInt() != 0
+                is Map<*, *> -> {
+                    when {
+                        rawVal["blocked"] == true || parseToggleValue(rawVal["blocked"]) == true -> false
+                        rawVal["disabled"] == true || parseToggleValue(rawVal["disabled"]) == true -> false
+                        rawVal["allowed"] != null -> parseToggleValue(rawVal["allowed"])
+                        rawVal["enabled"] != null -> parseToggleValue(rawVal["enabled"])
+                        rawVal["driverToggle"] != null -> parseToggleValue(rawVal["driverToggle"])
+                        rawVal["toggle"] != null -> parseToggleValue(rawVal["toggle"])
+                        rawVal["status"] != null -> parseToggleValue(rawVal["status"])
+                        else -> null
+                    }
+                }
+                else -> null
+            }
+        }
+
+        // 1. Explicit block-list fields
+        listOf("blockedServices", "disabledServices", "adminBlockedServices").forEach { field ->
+            when (val raw = data[field]) {
+                is Iterable<*> -> raw.forEach { item ->
+                    val norm = normalizeOrderServiceKey(item?.toString())
+                    if (norm.isNotEmpty()) blockedSet.add(norm)
+                }
+                is Map<*, *> -> raw.forEach { (k, v) ->
+                    val norm = normalizeOrderServiceKey(k?.toString())
+                    if (norm.isNotEmpty() && parseToggleValue(v) == true) {
+                        blockedSet.add(norm)
+                    }
+                }
+            }
+        }
+
+        // 2. Per-service toggle maps from admin Services tab
+        listOf(
+            "driverToggles",
+            "serviceToggles",
+            "driverServices",
+            "adminServices",
+            "servicePermissions",
+            "driverServiceToggles",
+            "driverToggle",
+            "services"
+        ).forEach { field ->
+            val map = data[field] as? Map<*, *> ?: return@forEach
+            map.forEach { (k, v) ->
+                val norm = normalizeOrderServiceKey(k?.toString())
+                if (norm.isEmpty()) return@forEach
+                when (parseToggleValue(v)) {
+                    false -> blockedSet.add(norm)
+                    true -> explicitlyAllowedFromToggles.add(norm)
+                    null -> Unit
+                }
+            }
+        }
+
+        // 3. allowedServices list/map
+        val rawAllowed = data["allowedServices"]
+        val hasRawAllowed = rawAllowed != null
+        val baseAllowed: List<String> = when (rawAllowed) {
+            is Iterable<*> -> normalizeOrderServiceKeys(rawAllowed.mapNotNull { it?.toString() })
+            is Map<*, *> -> {
+                val out = LinkedHashSet<String>()
+                rawAllowed.forEach { (k, v) ->
+                    val norm = normalizeOrderServiceKey(k?.toString())
+                    if (norm.isNotEmpty()) {
+                        when (parseToggleValue(v)) {
+                            false -> blockedSet.add(norm)
+                            true, null -> out.add(norm)
+                        }
+                    }
+                }
+                out.toList()
+            }
+            else -> ALL_SERVICES
+        }
+
+        // If allowedServices was initialized as [] while toggle maps explicitly set per-service toggles,
+        // derive allowed from those toggles; otherwise remove blockedSet from baseAllowed.
+        val resolvedBase = if (hasRawAllowed && baseAllowed.isEmpty() && explicitlyAllowedFromToggles.isNotEmpty()) {
+            explicitlyAllowedFromToggles.toList()
+        } else {
+            baseAllowed
+        }
+
+        val effectiveAllowed = normalizeOrderServiceKeys(resolvedBase).filterNot { it in blockedSet }
+        return RiderServiceAccess(
+            allowedServices = effectiveAllowed,
+            blockedServices = blockedSet.toList()
+        )
     }
 
     fun parcelVehicleMatch(orderVehicleRaw: String?, riderVehicleRaw: String?): Boolean {

@@ -48,13 +48,25 @@ data class Rider(
     val emergencyContactName: String = "",
     val emergencyContactPhone: String = "",
     val priorityRider: Boolean = false,
-    val documents: List<RiderDocument> = emptyList()
+    val documents: List<RiderDocument> = emptyList(),
+    val blockedServices: List<String> = emptyList()
 ) {
     val user: User
         get() = User(id = uid, name = name, email = email, phone = phone, role = "rider", avatarUrl = photoUrl)
 
     val documentExpiryAlerts: List<DocumentExpiryAlert>
         get() = documents.mapNotNull { it.getExpiryAlert() }.sortedBy { it.daysDiff }
+
+    val effectiveAllowedServices: List<String>
+        get() {
+            val blocked = OrderStepConstants.normalizeOrderServiceKeys(blockedServices).toSet()
+            return OrderStepConstants.normalizeOrderServiceKeys(allowedServices)
+                .filterNot { it in blocked }
+        }
+
+    fun isServiceAllowedByAdmin(serviceType: String?): Boolean {
+        return OrderStepConstants.isServiceAllowedMatch(allowedServices, blockedServices, serviceType)
+    }
 }
 
 enum class DocumentAlertLevel {
@@ -676,8 +688,8 @@ object AcceptOrderRules {
         val normalizedAllowed = OrderStepConstants.normalizeOrderServiceKeys(riderAllowedServices)
         val allowedPassed = OrderStepConstants.isServiceAllowedMatch(riderAllowedServices, orderServiceType)
         val allowedDetail = when {
-            normalizedAllowed.isEmpty() -> "allowedServices is empty (all services permitted); order=$normService"
             allowedPassed -> "Contains '$normService' (allowed=${normalizedAllowed.joinToString(", ")})"
+            normalizedAllowed.isEmpty() -> "Blocked by admin (allowedServices is empty)"
             else -> "Missing '$normService' in allowedServices (${normalizedAllowed.joinToString(", ")})"
         }
 
@@ -2147,7 +2159,7 @@ data class Quest(
 
     fun appliesTo(rider: Rider?): Boolean {
         if (rider == null) return false
-        return appliesTo(rider.cityId, rider.vehicle.type, rider.uid, rider.allowedServices)
+        return appliesTo(rider.cityId, rider.vehicle.type, rider.uid, rider.effectiveAllowedServices)
     }
 
     fun appliesTo(

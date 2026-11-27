@@ -177,6 +177,7 @@ class RiderRepository(
 
     private val _candidateOrders = MutableStateFlow<List<Order>>(emptyList())
     val candidateOrders: StateFlow<List<Order>> = _candidateOrders.asStateFlow()
+    private var latestRawCandidateOrders: List<Order> = emptyList()
 
     private val _customerReviews = MutableStateFlow<List<CustomerReview>>(emptyList())
     val customerReviews: StateFlow<List<CustomerReview>> = _customerReviews.asStateFlow()
@@ -736,19 +737,15 @@ class RiderRepository(
                     return@addSnapshotListener
                 }
                 if (snapshot == null || !snapshot.exists()) return@addSnapshotListener
-                val rawAllowed = (snapshot.get("allowedServices") as? List<*>)
-                    ?.mapNotNull { it?.toString()?.trim()?.takeIf { s -> s.isNotEmpty() } }
-                val allowed = if (rawAllowed != null) {
-                    OrderStepConstants.normalizeOrderServiceKeys(rawAllowed)
-                } else {
-                    OrderStepConstants.ALL_SERVICES
-                }
+                val serviceAccess = OrderStepConstants.parseRiderServiceAccess(snapshot.data)
+                val allowed = serviceAccess.allowedServices
+                val blocked = serviceAccess.blockedServices
                 val rawActive = (snapshot.get("activeServices") as? List<*>)
                     ?.mapNotNull { it?.toString()?.trim()?.takeIf { s -> s.isNotEmpty() } }
                 val active = if (rawActive != null) {
                     OrderStepConstants.normalizeOrderServiceKeys(rawActive)
                 } else {
-                    allowed
+                    OrderStepConstants.ALL_SERVICES
                 }
 
                 val vehicleMap = snapshot.get("vehicle") as? Map<*, *>
@@ -842,10 +839,20 @@ class RiderRepository(
                     emergencyContactName = snapshot.getString("emergencyContactName") ?: "",
                     emergencyContactPhone = snapshot.getString("emergencyContactPhone") ?: "",
                     priorityRider = snapshot.getBoolean("priorityRider") ?: false,
-                    documents = docsList
+                    documents = docsList,
+                    blockedServices = blocked
                 )
                 _rider.value = r
                 _coins.value = r.coins
+                val activeOfferBundle = _incomingOfferBundle.value
+                if (activeOfferBundle != null && activeOfferBundle.orders.any { !r.isServiceAllowedByAdmin(it.serviceType) }) {
+                    _incomingOfferBundle.value = null
+                    _incomingOffer.value = null
+                }
+                val activeSingleOffer = _incomingOffer.value
+                if (activeSingleOffer != null && !r.isServiceAllowedByAdmin(activeSingleOffer.serviceType)) {
+                    _incomingOffer.value = null
+                }
 
                 syncLinkedCustomer(linkedCustomerUid)
 
@@ -1318,7 +1325,13 @@ class RiderRepository(
                     lastError = null
                 )
                 val rawCandidates = snapshots.documents.mapNotNull { parseOrderSafely(it, "offers") }
-                _candidateOrders.value = rawCandidates
+                latestRawCandidateOrders = rawCandidates
+                val currentRider = _rider.value
+                _candidateOrders.value = if (currentRider == null) {
+                    rawCandidates
+                } else {
+                    rawCandidates.filter { currentRider.isServiceAllowedByAdmin(it.serviceType) }
+                }
                 evaluateOffers(activeUserPrefs)
             }
     }
@@ -1393,8 +1406,14 @@ class RiderRepository(
 
     private fun evaluateOffers(userPrefs: UserPreferencesRepository?) {
         waveDelayJob?.cancel()
-        val rawCandidates = _candidateOrders.value
         val currentRider = _rider.value
+        val allRawCandidates = latestRawCandidateOrders
+        val rawCandidates = if (currentRider == null) {
+            allRawCandidates
+        } else {
+            allRawCandidates.filter { currentRider.isServiceAllowedByAdmin(it.serviceType) }
+        }
+        _candidateOrders.value = rawCandidates
         val activeList = _activeOrders.value
         val riderLoc = RiderLocationTracker.currentLocation.value
         val lastLocMs = maxOf(RiderLocationTracker.lastLocationTimeMillis.value, _riderDocLocationUpdatedAtMs.value)
@@ -1620,6 +1639,10 @@ class RiderRepository(
             }
         }
 
+        if (selectedBundle != null && selectedBundle.orders.any { !activeRider.isServiceAllowedByAdmin(it.serviceType) }) {
+            selectedBundle = null
+        }
+
         if (selectedBundle != null) {
             val waveDelaySec = selectedBundle.waveDelaySeconds
             val elapsedSec = ((now - selectedBundle.eligibleSince) / 1000).coerceAtLeast(0)
@@ -1732,7 +1755,7 @@ class RiderRepository(
     fun toggleServiceType(serviceKey: String, enabled: Boolean, onSuccess: () -> Unit, onError: (String) -> Unit) {
         val currentRider = _rider.value ?: run { onError("Rider data not loaded"); return }
         val normKey = OrderStepConstants.normalizeOrderServiceKey(serviceKey)
-        if (!OrderStepConstants.isServiceAllowedMatch(currentRider.allowedServices, normKey)) {
+        if (!currentRider.isServiceAllowedByAdmin(normKey)) {
             onError("This service is disabled by admin")
             return
         }
@@ -1745,7 +1768,8 @@ class RiderRepository(
         if (enabled) {
             if (!updatedActive.contains(normKey)) updatedActive.add(normKey)
         } else {
-            if (updatedActive.size <= 1 && updatedActive.contains(normKey)) {
+            val remainingAllowedActive = updatedActive.count { it != normKey && currentRider.isServiceAllowedByAdmin(it) }
+            if (remainingAllowedActive == 0 && updatedActive.contains(normKey)) {
                 onError("At least one service must stay active")
                 return
             }
@@ -1833,6 +1857,43 @@ class RiderRepository(
             return
         }
 
+        val blockedOrder = bundle.orders.firstOrNull { ord ->
+            ord.riderId != authUid && !currentRider.isServiceAllowedByAdmin(ord.serviceType)
+        }
+        if (blockedOrder != null) {
+            _incomingOfferBundle.value = null
+            _incomingOffer.value = null
+            val checks = AcceptOrderRules.evaluateAcceptChecks(
+                myUid = authUid,
+                riderStatus = currentRider.status,
+                riderAllowedServices = currentRider.effectiveAllowedServices,
+                riderTopLevelVehicleType = currentRider.vehicle.type,
+                riderFallbackVehicleType = currentRider.vehicle.type,
+                orderServiceType = blockedOrder.serviceType,
+                orderVehicleType = blockedOrder.vehicleType,
+                orderCityId = blockedOrder.cityId,
+                isCityServiceOn = isCityServiceOn(blockedOrder.serviceType, blockedOrder.cityId),
+                excludeRiderIds = blockedOrder.excludeRiderIds,
+                onHold = blockedOrder.onHold,
+                isCashOrder = WalletLedgerHelper.isCodOrder(blockedOrder),
+                userWalletBalance = effectiveWalletBalance(),
+                orderRiderId = blockedOrder.riderId.orEmpty()
+            )
+            val shortMsg = AcceptOrderRules.buildShortFailureMessage(checks, "This service is disabled for your account by admin")
+            onError(
+                AcceptOrderErrorDetails(
+                    exceptionMessage = shortMsg,
+                    orderId = blockedOrder.id,
+                    currentStatus = AcceptOrderRules.formatRawStatus(blockedOrder.status),
+                    authUid = authUid,
+                    fieldsWritten = emptyMap(),
+                    shortMessage = shortMsg,
+                    checks = checks
+                )
+            )
+            return
+        }
+
         if (WalletLedgerHelper.isCodBlockedForWallet(effectiveWalletBalance()) &&
             bundle.orders.any { WalletLedgerHelper.isCodOrder(it) }
         ) {
@@ -1843,7 +1904,7 @@ class RiderRepository(
                 AcceptOrderRules.evaluateAcceptChecks(
                     myUid = authUid,
                     riderStatus = currentRider.status,
-                    riderAllowedServices = currentRider.allowedServices,
+                    riderAllowedServices = currentRider.effectiveAllowedServices,
                     riderTopLevelVehicleType = currentRider.vehicle.type,
                     riderFallbackVehicleType = currentRider.vehicle.type,
                     orderServiceType = targetOrd.serviceType,
@@ -1956,9 +2017,8 @@ class RiderRepository(
                 }
 
                 val liveRiderStatus = riderSnap.getString("status")?.trim().orEmpty()
-                val liveAllowedServices = (riderSnap.get("allowedServices") as? List<*>)
-                    ?.mapNotNull { it?.toString()?.trim()?.takeIf { s -> s.isNotEmpty() } }
-                    ?: emptyList()
+                val liveServiceAccess = OrderStepConstants.parseRiderServiceAccess(riderSnap.data)
+                val liveAllowedServices = liveServiceAccess.allowedServices
                 val liveTopLevelVehicleType = riderSnap.getString("vehicleType")?.trim().orEmpty()
                 val liveFallbackVehicleType = ((riderSnap.get("vehicle") as? Map<*, *>)?.get("type")?.toString())
                     ?.trim()
@@ -2244,7 +2304,7 @@ class RiderRepository(
                         AcceptOrderRules.evaluateAcceptChecks(
                             myUid = authUid,
                             riderStatus = currentRider.status,
-                            riderAllowedServices = currentRider.allowedServices,
+                            riderAllowedServices = currentRider.effectiveAllowedServices,
                             riderTopLevelVehicleType = currentRider.vehicle.type,
                             riderFallbackVehicleType = currentRider.vehicle.type,
                             orderServiceType = targetOrd.serviceType,
@@ -3255,6 +3315,8 @@ class RiderRepository(
         _bookedSessionsById.value = emptyMap()
         _scheduleLoadError.value = null
         _lastTaxiDiagnostics.value = null
+        latestRawCandidateOrders = emptyList()
+        _candidateOrders.value = emptyList()
         _dispatchListenerStatus.value = DispatchListenerStatus(state = ListenerConnectionState.DISCONNECTED)
     }
 
